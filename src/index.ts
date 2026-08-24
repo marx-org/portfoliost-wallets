@@ -5,6 +5,7 @@ import { validateJwt } from "./auth.js"
 import { createWalletRoutes } from "./routes/wallets.js"
 import { createMovementRoutes } from "./routes/movements.js"
 import { createTransactionRoutes } from "./routes/transactions.js"
+import { createHistoryRoutes } from "./routes/history.js"
 import { moduleMeta } from "./meta.js"
 
 const app = new Hono()
@@ -24,6 +25,7 @@ const walletsApi = createWalletRoutes()
 api.route("/wallets", walletsApi)
 api.route("/wallets", createMovementRoutes())
 api.route("/wallets/transactions", createTransactionRoutes())
+api.route("/wallets", createHistoryRoutes())
 
 app.route("/api", api)
 
