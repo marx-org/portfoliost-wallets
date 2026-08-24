@@ -11,7 +11,8 @@
     "db:generate": "drizzle-kit generate",
     "db:migrate": "drizzle-kit migrate",
     "db:seed": "node seed/run.mjs",
-    "gen:openapi": "tsx src/gen-openapi.ts"
+    "gen:openapi": "tsx src/gen-openapi.ts",
+    "fx:sync": "tsx src/scripts/fx-sync.ts"
   },
   "dependencies": {
     "@hono/node-server": "^2.1.1",
