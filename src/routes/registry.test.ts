@@ -63,7 +63,6 @@ describe("GET /internal/fx-rates (D20 internal exposure)", () => {
     expect(res.status).toBe(200)
     expect(body.rate).toBeCloseTo(4.3 / 1.07, 8)
     expect(body.asOf).toBe("2026-08-20")
-    expect(body.rate).toBeCloseTo(1.07 / 4.3, 8)
   })
 
   it("exact-date lookup", async () => {
