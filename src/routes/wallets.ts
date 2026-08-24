@@ -5,6 +5,7 @@ import { userIdentityMiddleware } from "../auth.js"
 import { getDb, type DB } from "../db/index.js"
 import { wallets, walletTransactions } from "../db/schema.js"
 import { totalBalance } from "../services/valuation.js"
+import { preferredBaseCurrency } from "../services/preferences.js"
 
 export const ISO_CURRENCY = /^[A-Za-z]{3}$/
 
@@ -66,13 +67,21 @@ export function createWalletRoutes(db?: DB) {
     }
     const identity = c.get("userIdentity")
     const database = getDbInstance()
+    // D21b: explicit value wins; otherwise the user's preferred base currency
+    const forwardedHeaders: Record<string, string> = {}
+    for (const k of ["authorization", "x-user-id", "x-user-email"]) {
+      const v = c.req.header(k)
+      if (v) forwardedHeaders[k] = v
+    }
+    const defaultBase =
+      parsed.data.baseCurrency ?? (await preferredBaseCurrency(forwardedHeaders))
     const [created] = await database
       .insert(wallets)
       .values({
         userId: identity.id,
         name: parsed.data.name,
         currency: parsed.data.currency.toUpperCase(),
-        baseCurrency: (parsed.data.baseCurrency ?? "USD").toUpperCase(),
+        baseCurrency: defaultBase.toUpperCase(),
       })
       .returning()
     return c.json(serializeWallet(created), 201)
