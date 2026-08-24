@@ -74,7 +74,8 @@ export function createTransactionRoutes(db?: DB) {
   routes.patch("/:txId", async (c: Context) => {
     const identity = c.get("userIdentity")
     const database = getDbInstance()
-    const row = await loadOwn(database, c.req.param("txId"), identity.id)
+    const txId = c.req.param("txId") as string
+    const row = await loadOwn(database, txId, identity.id)
     if (!row) return c.json({ error: "NotFound", message: "Transaction not found" }, 404)
 
     // D23 #6: trade-derived cash rows are immutable
@@ -156,7 +157,8 @@ export function createTransactionRoutes(db?: DB) {
   routes.delete("/:txId", async (c: Context) => {
     const identity = c.get("userIdentity")
     const database = getDbInstance()
-    const row = await loadOwn(database, c.req.param("txId"), identity.id)
+    const txId = c.req.param("txId") as string
+    const row = await loadOwn(database, txId, identity.id)
     if (!row) return c.json({ error: "NotFound", message: "Transaction not found" }, 404)
 
     if (!EDITABLE_TYPES.includes(row.type as (typeof EDITABLE_TYPES)[number]) && row.type !== "TRANSFER") {
