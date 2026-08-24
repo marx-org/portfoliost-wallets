@@ -178,7 +178,7 @@ describe("transfers incl. cross-currency elastic legs (§11.4 / wallets D22)", (
       targetAmount: 99,
     })
     const out = await res.json()
-    expect(out.targetAmount).toBe(99)
+    expect(Number(out.targetAmount)).toBe(99)
     const [dest] = await h.db.select().from(wallets).where(eq(wallets.id, pln))
     expect(Number(dest.balance)).toBe(99)
   })

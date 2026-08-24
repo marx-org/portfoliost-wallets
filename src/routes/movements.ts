@@ -1,4 +1,4 @@
-import { Hono } from "hono"
+import { Hono, type Context } from "hono"
 import { and, eq } from "drizzle-orm"
 import { z } from "zod"
 import { userIdentityMiddleware } from "../auth.js"
@@ -39,7 +39,7 @@ export function createMovementRoutes(db?: DB) {
     return w
   }
 
-  async function handle(c: Parameters<Hono["fetch"]>[0], kind: "DEPOSIT" | "WITHDRAWAL" | "TRANSFER") {
+  async function handle(c: Context, kind: "DEPOSIT" | "WITHDRAWAL" | "TRANSFER") {
     const identity = c.get("userIdentity")
     const database = getDbInstance()
     const parsed = MovementSchema.safeParse(await c.req.json().catch(() => ({})))
