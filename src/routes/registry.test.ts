@@ -13,7 +13,7 @@ async function boot() {
 describe("GET /api/currencies (D26)", () => {
   it("returns EUR alone when nothing imported yet", async () => {
     const h = await boot()
-    const res = await h.app.request("/api/currencies")
+    const res = await h.app.request("/currencies")
     const body = await res.json()
     expect(body.currencies.map((c: { code: string }) => c.code)).toEqual(["EUR"])
   })
@@ -26,7 +26,7 @@ describe("GET /api/currencies (D26)", () => {
       // a currency outside the metadata catalog still appears
       { rateDate: "2026-08-21", currency: "XYZ", rate: "2.0" },
     ])
-    const res = await h.app.request("/api/currencies")
+    const res = await h.app.request("/currencies")
     const body = await res.json()
     const codes = body.currencies.map((c: { code: string }) => c.code)
     expect(codes).toContain("EUR")

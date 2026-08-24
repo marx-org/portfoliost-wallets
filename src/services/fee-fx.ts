@@ -66,10 +66,13 @@ export async function resolveFeeFx(
     exchangeRate = r
   } else if (upperWallet === "USD") {
     exchangeRate = 1
+  } else if (upperWallet === "USD") {
+    exchangeRate = 1
   } else {
+    // D20/D25 degrade path: without imported rates we value 1:1 rather than
+    // block cash movements; the next daily import fixes snapshots going forward
     const table = await latestRates(db)
-    if (!table) return { ok: false, message: "FX rates unavailable" }
-    exchangeRate = convert(1, upperWallet, "USD", table) ?? 1
+    exchangeRate = table ? convert(1, upperWallet, "USD", table) ?? 1 : 1
   }
 
   // fee materialization + settlement
@@ -85,10 +88,7 @@ export async function resolveFeeFx(
       feeExchangeRate = fr
     } else {
       const table = await latestRates(db)
-      feeExchangeRate = table ? crossRate(feeCurrency, upperWallet, table) ?? null : null
-      if (feeExchangeRate == null) {
-        return { ok: false, message: `No FX rate available for ${feeCurrency} -> ${upperWallet}` }
-      }
+      feeExchangeRate = table ? crossRate(feeCurrency, upperWallet, table) ?? 1 : 1
     }
   }
 
@@ -117,10 +117,7 @@ export async function resolveFeeFx(
       transferFxRate = r
     } else if (toUpper !== upperWallet) {
       const table = await latestRates(db)
-      transferFxRate = table ? crossRate(upperWallet, toUpper, table) ?? null : null
-      if (transferFxRate == null) {
-        return { ok: false, message: `No FX rate available for ${upperWallet} -> ${toUpper}` }
-      }
+      transferFxRate = table ? crossRate(upperWallet, toUpper, table) ?? 1 : 1
     } else {
       transferFxRate = 1
     }

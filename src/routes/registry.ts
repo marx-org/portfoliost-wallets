@@ -70,7 +70,7 @@ export function createRegistryRoutes(db?: DB) {
   const routes = new Hono()
   const getDbInstance = () => db ?? getDb()
 
-  routes.get("/api/currencies", async (c) => {
+  routes.get("/currencies", async (c) => {
     return c.json(await currenciesPayload(getDbInstance()))
   })
 

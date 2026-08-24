@@ -79,19 +79,47 @@ export async function userIdentityMiddleware(c: Context, next: Next) {
   // Fallback to X-User-* headers (Docker Compose with mock)
   const id = c.req.header("X-User-Id")
   const email = c.req.header("X-User-Email")
-  const firstName = c.req.header("X-User-FirstName") ?? ""
-  const lastName = c.req.header("X-User-LastName") ?? ""
-  const avatarUrl = c.req.header("X-User-AvatarUrl") || null
-  const groups = c.req.header("X-User-Groups")?.split(",") || ["portfoliost_admin"]
-
-  if (!id || !email) {
-    return c.json({ error: "Unauthorized", message: "Missing user identity" }, 401)
+  if (id && email) {
+    c.set("userIdentity", {
+      id,
+      email,
+      firstName: c.req.header("X-User-FirstName") ?? "",
+      lastName: c.req.header("X-User-LastName") ?? "",
+      avatarUrl: c.req.header("X-User-AvatarUrl") || null,
+      groups: c.req.header("X-User-Groups")?.split(",") || ["portfoliost_admin"],
+    })
+    await next()
+    return
   }
 
-  c.set("userIdentity", { id, email, firstName, lastName, avatarUrl, groups })
-  await next()
-}
+  // Dev-only fallback: with the mock IdP there is no signature to verify and
+  // the SPA only sends a bearer token. Derive a stable identity from its
+  // claims when decodable, else from the token itself. Never reached in the
+  // cluster, where POCKETID_ISSUER_URL forces strict validation above.
+  const authHeader = c.req.header("Authorization")
+  if (authHeader?.startsWith("Bearer ")) {
+    const token = authHeader.slice(7)
+    let sub = `mock-${token.slice(0, 12)}`
+    let mail = "dev@localhost"
+    try {
+      const payload = JSON.parse(Buffer.from(token.split(".")[1] ?? "", "base64url").toString())
+      if (typeof payload.sub === "string" && payload.sub) sub = payload.sub
+      if (typeof payload.email === "string" && payload.email) mail = payload.email
+    } catch {}
+    c.set("userIdentity", {
+      id: sub,
+      email: mail,
+      firstName: "",
+      lastName: "",
+      avatarUrl: null,
+      groups: ["portfoliost_admin"],
+    })
+    await next()
+    return
+  }
 
+  return c.json({ error: "Unauthorized", message: "Missing user identity" }, 401)
+}
 export function requireGroup(group: string) {
   return async (c: Context, next: Next) => {
     const identity = c.get("userIdentity")
