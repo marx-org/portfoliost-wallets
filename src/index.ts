@@ -6,6 +6,7 @@ import { createWalletRoutes } from "./routes/wallets.js"
 import { createMovementRoutes } from "./routes/movements.js"
 import { createTransactionRoutes } from "./routes/transactions.js"
 import { createHistoryRoutes } from "./routes/history.js"
+import { createRegistryRoutes } from "./routes/registry.js"
 import { moduleMeta } from "./meta.js"
 
 const app = new Hono()
