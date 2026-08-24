@@ -162,9 +162,8 @@ export function createHistoryRoutes(db?: DB) {
   routes.get("/:id/balance-history", async (c: Context) => {
     const identity = c.get("userIdentity")
     const database = getDbInstance()
-    const walletId = c.req.param("id")
-    const period = c.req.query("period") ?? "ALL"
     const walletId = c.req.param("id") as string
+    const period = c.req.query("period") ?? "ALL"
 
     const [owned] = await database
       .select()
