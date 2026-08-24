@@ -48,9 +48,12 @@ describe("GET /api/currencies (D26)", () => {
 describe("GET /internal/fx-rates (D20 internal exposure)", () => {
   it("crosses non-EUR pairs via EUR and reports asOf carry-forward date", async () => {
     const h = await boot()
+    // weekend-style gap: newest two days lack USD entirely
     await h.db.insert(fxRates).values([
-      { rateDate: "2026-08-19", currency: "USD", rate: "1.07" },
-      { rateDate: "2026-08-20", currency: "PLN", rate: "4.30" }, // USD missing on newest day
+      { rateDate: "2026-08-20", currency: "USD", rate: "1.07" },
+      { rateDate: "2026-08-20", currency: "PLN", rate: "4.30" },
+      { rateDate: "2026-08-21", currency: "PLN", rate: "4.31" },
+      { rateDate: "2026-08-22", currency: "PLN", rate: "4.32" },
     ])
     const res = await h.app.request(
       "/internal/fx-rates?from=USD&to=PLN",
@@ -60,6 +63,7 @@ describe("GET /internal/fx-rates (D20 internal exposure)", () => {
     expect(res.status).toBe(200)
     expect(body.rate).toBeCloseTo(1.07 / 4.3, 8)
     expect(body.asOf).toBe("2026-08-20")
+    expect(body.rate).toBeCloseTo(1.07 / 4.3, 8)
   })
 
   it("exact-date lookup", async () => {

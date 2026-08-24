@@ -16,7 +16,7 @@ export async function currenciesPayload(db: DB) {
   const rows = await db.execute(
     sql`select distinct currency from wallets.fx_rates order by currency`,
   )
-  const codes = new Set<string>(["EUR", ...rows.rows.map((r) => String(r.currency))])
+  const codes = new Set<string>(["EUR", ...rows.rows.map((r: { currency: string }) => String(r.currency))])
   return {
     currencies: [...codes].map((code) => {
       const meta = CURRENCIES.find((c) => c.code === code)
