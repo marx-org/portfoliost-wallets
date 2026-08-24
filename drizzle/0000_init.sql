@@ -66,7 +66,7 @@ CREATE TABLE "wallets"."wallets" (
 );
 --> statement-breakpoint
 ALTER TABLE "wallets"."wallet_transactions" ADD CONSTRAINT "wallet_transactions_wallet_id_wallets_id_fk" FOREIGN KEY ("wallet_id") REFERENCES "wallets"."wallets"("id") ON DELETE no action ON UPDATE no action;--> statement-breakpoint
-ALTER TABLE "wallets"."wallet_transactions" ADD CONSTRAINT "wallet_transactions_to_wallet_id_wallet_transactions_id_fk" FOREIGN KEY ("to_wallet_id") REFERENCES "wallets"."wallet_transactions"("id") ON DELETE no action ON UPDATE no action;--> statement-breakpoint
+ALTER TABLE "wallets"."wallet_transactions" ADD CONSTRAINT "wallet_transactions_to_wallet_id_wallets_id_fk" FOREIGN KEY ("to_wallet_id") REFERENCES "wallets"."wallets"("id") ON DELETE no action ON UPDATE no action;--> statement-breakpoint
 CREATE INDEX "idx_wtx_wallet" ON "wallets"."wallet_transactions" USING btree ("wallet_id","executed_at" DESC NULLS LAST);--> statement-breakpoint
 CREATE INDEX "idx_wtx_user_recent" ON "wallets"."wallet_transactions" USING btree ("user_id","executed_at" DESC NULLS LAST);--> statement-breakpoint
 CREATE UNIQUE INDEX "uq_wtx_reference" ON "wallets"."wallet_transactions" USING btree ("reference") WHERE reference is not null;--> statement-breakpoint

@@ -83,7 +83,7 @@ export const walletTransactions = walletsSchema.table(
     feesType: text("fees_type", { enum: ["fixed", "pct"] }),
     feeCurrency: char("fee_currency", { length: 3 }),
     taxes: numeric("taxes", { precision: 20, scale: 8 }),
-    toWalletId: uuid("to_wallet_id").references((): any => walletTransactions.id),
+    toWalletId: uuid("to_wallet_id").references(() => wallets.id),
     linkedTxId: uuid("linked_tx_id"),
     reference: text("reference"),
     portfolioId: uuid("portfolio_id"),

@@ -1,5 +1,5 @@
 {
-  "id": "e903bbbf-6b6d-404b-9895-cbadd69895dd",
+  "id": "5a36e3f5-beda-4dc2-b08c-79677b1779a3",
   "prevId": "00000000-0000-0000-0000-000000000000",
   "version": "7",
   "dialect": "postgresql",
@@ -344,10 +344,10 @@
           "onDelete": "no action",
           "onUpdate": "no action"
         },
-        "wallet_transactions_to_wallet_id_wallet_transactions_id_fk": {
-          "name": "wallet_transactions_to_wallet_id_wallet_transactions_id_fk",
+        "wallet_transactions_to_wallet_id_wallets_id_fk": {
+          "name": "wallet_transactions_to_wallet_id_wallets_id_fk",
           "tableFrom": "wallet_transactions",
-          "tableTo": "wallet_transactions",
+          "tableTo": "wallets",
           "schemaTo": "wallets",
           "columnsFrom": [
             "to_wallet_id"
