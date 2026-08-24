@@ -47,7 +47,7 @@ export function createMovementRoutes(db?: DB) {
       return c.json({ error: "ValidationError", message: parsed.error.issues[0]?.message }, 422)
     }
     const body = parsed.data
-    const walletId = c.req.param("id")
+    const walletId = c.req.param("id") as string
 
     const wallet = await loadOwnWallet(database, walletId, identity.id)
     if (!wallet) return c.json({ error: "NotFound", message: "Wallet not found" }, 404)
