@@ -4,6 +4,7 @@ import { z } from "zod"
 import { userIdentityMiddleware } from "../auth.js"
 import { getDb, type DB } from "../db/index.js"
 import { wallets, walletTransactions } from "../db/schema.js"
+import { totalBalance } from "../services/valuation.js"
 
 export const ISO_CURRENCY = /^[A-Za-z]{3}$/
 
@@ -82,6 +83,14 @@ export function createWalletRoutes(db?: DB) {
     const database = getDbInstance()
     const rows = await database.select().from(wallets).where(eq(wallets.userId, identity.id))
     return c.json(rows.map(serializeWallet))
+  })
+
+  // NOTE: registered before Hono sees "/:id" — static wins in the router
+  routes.get("/total-balance", async (c) => {
+    const identity = c.get("userIdentity")
+    const database = getDbInstance()
+    const base = (c.req.query("baseCurrency") ?? "USD").toUpperCase()
+    return c.json(await totalBalance(database, identity.id, base))
   })
 
   routes.patch("/:id", async (c) => {
