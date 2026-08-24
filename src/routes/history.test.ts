@@ -63,8 +63,6 @@ describe("recent-transactions feed shapes (D19 read model)", () => {
     await h.json(`/api/wallets/${a}/transfers`, { amount: 20, to_wallet_id: b })
 
     // trade-derived row written the way portfolios will push it (§ D19)
-    const [w] = await (await import("../db/schema.js")).then?.() ?? [null]
-    void w
     const { wallets } = await import("../db/schema.js")
     const rows = await h.db.select().from(wallets)
     const eur = rows.find((r) => r.id === b)!

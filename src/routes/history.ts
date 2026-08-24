@@ -19,8 +19,8 @@ const LABELS: Record<string, string> = {
 const NEGATIVE_TYPES = new Set(["WITHDRAWAL", "INVEST", "FEE"])
 
 function paginate(c: Context) {
-  const page = Math.max(1, Number(c.req.query("page") ?? 1))
-  const limit = Math.min(100, Math.max(1, Number(c.req.query("limit") ?? 10)))
+  const page = Math.max(1, Number(String(c.req.query("page") ?? "1")))
+  const limit = Math.min(100, Math.max(1, Number(String(c.req.query("limit") ?? "10"))))
   return { page, limit }
 }
 
@@ -62,7 +62,7 @@ export function createHistoryRoutes(db?: DB) {
     const identity = c.get("userIdentity")
     const database = getDbInstance()
     const { page, limit } = paginate(c)
-    const walletId = c.req.param("id")
+    const walletId = c.req.param("id") as string
 
     const [owned] = await database
       .select({ id: wallets.id })
@@ -85,7 +85,7 @@ export function createHistoryRoutes(db?: DB) {
     const identity = c.get("userIdentity")
     const database = getDbInstance()
     const { page, limit } = paginate(c)
-    const typeFilter = c.req.query("type")?.toUpperCase()
+    const typeFilter = c.req.query("type") ? String(c.req.query("type")).toUpperCase() : undefined
 
     const conditions = [eq(walletTransactions.userId, identity.id)]
     if (typeFilter && typeFilter !== "ALL") {
@@ -164,6 +164,7 @@ export function createHistoryRoutes(db?: DB) {
     const database = getDbInstance()
     const walletId = c.req.param("id")
     const period = c.req.query("period") ?? "ALL"
+    const walletId = c.req.param("id") as string
 
     const [owned] = await database
       .select()
