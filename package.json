@@ -1,0 +1,35 @@
+{
+  "name": "portfoliost-wallets",
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "tsx watch src/index.ts",
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "db:generate": "drizzle-kit generate",
+    "db:migrate": "drizzle-kit migrate",
+    "db:seed": "node seed/run.mjs",
+    "gen:openapi": "tsx src/gen-openapi.ts"
+  },
+  "dependencies": {
+    "@hono/node-server": "^2.1.1",
+    "@marx2/contracts": "github:Marx2/portfoliost-contracts",
+    "drizzle-orm": "^0.45.2",
+    "hono": "^4.7.0",
+    "hono-zod-openapi": "^1.1.1",
+    "jose": "^6.2.9",
+    "postgres": "^3.4.7",
+    "yaml": "^2.9.0",
+    "zod": "^4.4.3"
+  },
+  "devDependencies": {
+    "@electric-sql/pglite": "^0.3.14",
+    "@types/node": "^22.0.0",
+    "drizzle-kit": "^0.31.10",
+    "tsx": "^4.19.0",
+    "typescript": "^5.7.0",
+    "vitest": "^3.1.0"
+  }
+}
