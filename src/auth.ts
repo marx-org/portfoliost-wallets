@@ -92,13 +92,41 @@ export async function userIdentityMiddleware(c: Context, next: Next) {
     return
   }
 
-  // Dev-only fallback: with the mock IdP there is no signature to verify and
-  // the SPA only sends a bearer token. Derive a stable identity from its
-  // claims when decodable, else from the token itself. Never reached in the
-  // cluster, where POCKETID_ISSUER_URL forces strict validation above.
+  // Dev-only fallback: with the mock IdP the SPA carries an OPAQUE bearer
+  // token, so resolve the real identity from the auth provider's /me endpoint
+  // (stable across logins). If that fails, derive a per-token identity.
+  // Never reached in the cluster, where POCKETID_ISSUER_URL forces strict
+  // JWT validation above.
   const authHeader = c.req.header("Authorization")
   if (authHeader?.startsWith("Bearer ")) {
     const token = authHeader.slice(7)
+    const meUrl = process.env.AUTH_ME_URL
+    if (meUrl) {
+      try {
+        const res = await fetch(`${meUrl}/api/auth/me`, {
+          headers: { authorization: `Bearer ${token}` },
+          signal: AbortSignal.timeout(1500),
+        })
+        if (res.ok) {
+          const body = (await res.json()) as { user?: { id?: string; email?: string } }
+          if (body.user?.id) {
+            c.set("userIdentity", {
+              id: body.user.id,
+              email: body.user.email ?? "dev@localhost",
+              firstName: "",
+              lastName: "",
+              avatarUrl: null,
+              groups: ["portfoliost_admin"],
+            })
+            await next()
+            return
+          }
+        }
+      } catch {
+        // fall through to token-derived identity
+      }
+    }
+
     let sub = `mock-${token.slice(0, 12)}`
     let mail = "dev@localhost"
     try {
