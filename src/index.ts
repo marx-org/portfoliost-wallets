@@ -27,6 +27,8 @@ api.route("/wallets", walletsApi)
 api.route("/wallets", createMovementRoutes())
 api.route("/wallets/transactions", createTransactionRoutes())
 api.route("/wallets", createHistoryRoutes())
+// registry: /api/currencies (public) + /api/internal/fx-rates (D20/D26)
+api.route("/", createRegistryRoutes())
 
 app.route("/api", api)
 

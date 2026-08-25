@@ -13,10 +13,13 @@ import { fxRates } from "../db/schema.js"
  * comes from the contracts catalog.
  */
 export async function currenciesPayload(db: DB) {
-  const rows = await db.execute(
+  const result = await db.execute(
     sql`select distinct currency from wallets.fx_rates order by currency`,
   )
-  const codes = new Set<string>(["EUR", ...rows.rows.map((r: { currency: string }) => String(r.currency))])
+  const list = (Array.isArray(result) ? result : (result as unknown as { rows: { currency: string }[] }).rows) as {
+    currency: string
+  }[]
+  const codes = new Set<string>(["EUR", ...list.map((r) => String(r.currency))])
   return {
     currencies: [...codes].map((code) => {
       const meta = CURRENCIES.find((c) => c.code === code)
