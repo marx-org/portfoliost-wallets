@@ -79,6 +79,22 @@ describe("GET /internal/fx-rates (D20 internal exposure)", () => {
     expect(body.rate).toBeCloseTo(1 / 1.07, 8)
   })
 
+  it("serves the SPA-facing /api/fx/latest with the same semantics", async () => {
+    const h = await boot()
+    await h.db.insert(fxRates).values([
+      { rateDate: "2026-08-21", currency: "USD", rate: "1.08" },
+      { rateDate: "2026-08-21", currency: "PLN", rate: "4.30" },
+    ])
+    const res = await h.app.request(
+      "/fx/latest?from=USD&to=PLN",
+      { headers: { "X-User-Id": "u", "X-User-Email": "u@t.dev" } },
+    )
+    const body = await res.json()
+    expect(res.status).toBe(200)
+    expect(body.rate).toBeCloseTo(4.3 / 1.08, 8)
+    expect(body.asOf).toBe("2026-08-21")
+  })
+
   it("validates inputs and 404s unknown pairs", async () => {
     const h = await boot()
     const bad = await h.app.request(
@@ -86,5 +102,42 @@ describe("GET /internal/fx-rates (D20 internal exposure)", () => {
       { headers: { "X-User-Id": "svc", "X-User-Email": "svc@t.dev" } },
     )
     expect(bad.status).toBe(422)
+  })
+})
+
+describe("GET /internal/fx-rates — dated carry-forward (D39)", () => {
+  it("walks back from the requested date over weekend/sync gaps", async () => {
+    const h = await boot()
+    // requested date (2026-08-25) has no rows; last quotable day is 2026-08-22
+    await h.db.insert(fxRates).values([
+      { rateDate: "2026-08-22", currency: "USD", rate: "1.07" },
+      { rateDate: "2026-08-22", currency: "PLN", rate: "4.30" },
+    ])
+    const res = await h.app.request(
+      "/internal/fx-rates?from=PLN&to=USD&date=2026-08-25",
+      { headers: { "X-User-Id": "svc", "X-User-Email": "svc@t.dev" } },
+    )
+    const body = await res.json()
+    expect(res.status).toBe(200)
+    expect(body.rate).toBeCloseTo(1.07 / 4.3, 8)
+    expect(body.asOf).toBe("2026-08-22")
+  })
+
+  it("prefers the exact date when present", async () => {
+    const h = await boot()
+    await h.db.insert(fxRates).values([
+      { rateDate: "2026-08-22", currency: "USD", rate: "1.07" },
+      { rateDate: "2026-08-22", currency: "PLN", rate: "4.30" },
+      { rateDate: "2026-08-25", currency: "USD", rate: "1.08" },
+      { rateDate: "2026-08-25", currency: "PLN", rate: "4.00" },
+    ])
+    const res = await h.app.request(
+      "/internal/fx-rates?from=PLN&to=USD&date=2026-08-25",
+      { headers: { "X-User-Id": "svc", "X-User-Email": "svc@t.dev" } },
+    )
+    const body = await res.json()
+    expect(res.status).toBe(200)
+    expect(body.rate).toBeCloseTo(1.08 / 4.0, 8)
+    expect(body.asOf).toBe("2026-08-25")
   })
 })

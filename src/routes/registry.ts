@@ -50,23 +50,30 @@ async function internalRate(c: Context, db: DB) {
     return t
   }
 
-  if (date) {
-    const table = await buildTable(date)
-    const rate = crossRate(from, to, table)
-    if (rate === undefined) return c.json({ error: "NotFound", message: `No rate ${from}->${to} on ${date}` }, 404)
-    return c.json({ rate, asOf: date })
+  // carry-forward: walk back over dated tables until the pair is quotable
+  // (D39/D20 — weekends, holidays and sync gaps resolve to the last known rate)
+  const walkBack = async (fromDate: string, window = 10) => {
+    const dated = await db
+      .select({ rateDate: sql<string>`distinct ${fxRates.rateDate}` })
+      .from(fxRates)
+      .where(sql`${fxRates.rateDate} <= ${fromDate}`)
+      .orderBy(sql`${fxRates.rateDate} desc`)
+    for (const d of dated.slice(0, window)) {
+      const rate = crossRate(from, to, await buildTable(d.rateDate))
+      if (rate !== undefined) return { rate, asOf: d.rateDate }
+    }
+    return null
   }
 
-  // carry-forward: walk back over dated tables until the pair is quotable
-  const dated = await db
-    .select({ rateDate: sql<string>`distinct ${fxRates.rateDate}` })
-    .from(fxRates)
-    .orderBy(sql`${fxRates.rateDate} desc`)
-  for (const d of dated.slice(0, 7)) {
-    const rate = crossRate(from, to, await buildTable(d.rateDate))
-    if (rate !== undefined) return c.json({ rate, asOf: d.rateDate })
+  if (date) {
+    const found = await walkBack(date)
+    if (!found) return c.json({ error: "NotFound", message: `No rate ${from}->${to} on or before ${date}` }, 404)
+    return c.json(found)
   }
-  return c.json({ error: "NotFound", message: `No rate ${from}->${to} within staleness window` }, 404)
+
+  const found = await walkBack(new Date().toISOString().slice(0, 10))
+  if (!found) return c.json({ error: "NotFound", message: `No rate ${from}->${to} within staleness window` }, 404)
+  return c.json(found)
 }
 
 export function createRegistryRoutes(db?: DB) {
@@ -76,6 +83,10 @@ export function createRegistryRoutes(db?: DB) {
   routes.get("/currencies", async (c) => {
     return c.json(await currenciesPayload(getDbInstance()))
   })
+
+  // SPA-facing resolved rate (fees-and-custom-fx D28/D30 UI): automatic value
+  // shown in dialogs, custom inputs pre-filled from it.
+  routes.get("/fx/latest", userIdentityMiddleware, async (c) => internalRate(c, getDbInstance()))
 
   // service-to-service (D20/D19 consumers later: portfolios)
   routes.get("/internal/fx-rates", userIdentityMiddleware, async (c) =>
