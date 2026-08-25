@@ -144,3 +144,24 @@ describe("transaction delete reverses effects (§11.5)", () => {
     expect(rows.length).toBe(1) // only the deposit
   })
 })
+
+describe("PATCH /wallets/transactions/:id — fee FX edit parity (plan §13 follow-up 2/6)", () => {
+  it("updates fee currency/type/rate source and settles via manual rate", async () => {
+    const h = await boot()
+    const w = await h.mk("USD")
+    const dep = await (await h.json(`/api/wallets/${w}/deposits`, { amount: 50 })).json()
+
+    const res = await h.json(`/api/wallets/transactions/${dep.id}`, {
+      fees: 10,
+      fees_type: "fixed",
+      feeCurrency: "PLN",
+      feeRateSource: "manual",
+      feeExchangeRate: 0.25,
+    }, "PATCH")
+    expect(res.status).toBe(200)
+    const body = await res.json()
+    expect(body.feeCurrency).toBe("PLN")
+    // 10 PLN settles at the manual 0.25 → $2.50 netted off the $50 credit
+    expect(await h.walletOf(w)).toBeCloseTo(47.5, 6)
+  })
+})

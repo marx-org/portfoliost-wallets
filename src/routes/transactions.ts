@@ -16,6 +16,11 @@ const EditSchema = z.object({
   /** unsigned magnitude; sign derives from the resulting type (D18) */
   amount: z.number().positive().optional(),
   fees: z.number().nonnegative().optional(),
+  /** fees-and-custom-fx D28/D29 edit parity (plan §13 follow-up 2/6) */
+  fees_type: z.enum(["fixed", "pct"]).optional(),
+  feeCurrency: z.string().length(3).optional(),
+  feeRateSource: z.enum(["automatic", "manual"]).optional(),
+  feeExchangeRate: z.number().positive().optional(),
 })
 
 /** Signed cash effect of a ledger row on its wallet (in wallet currency). */
@@ -102,8 +107,10 @@ export function createTransactionRoutes(db?: DB) {
       const newType = patchBody.type ?? row.type
       const newAmount = patchBody.amount ?? Math.abs(Number(row.amount))
       const newFees = patchBody.fees ?? Number(row.fees ?? 0)
-      const newFeesType = row.feesType ?? "fixed"
-      const newFeeCcy = row.feeCurrency ?? row.currency
+      const newFeesType = patchBody.fees_type ?? row.feesType ?? "fixed"
+      const newFeeCcy = patchBody.feeCurrency ?? row.feeCurrency ?? row.currency
+      const newFeeRateSource = patchBody.feeRateSource ?? row.feeRateSource ?? "automatic"
+      const newFeeFx = patchBody.feeExchangeRate ?? (row.feeExchangeRate != null ? Number(row.feeExchangeRate) : null)
 
       const notional = newAmount
       const effectiveFee =
@@ -112,7 +119,7 @@ export function createTransactionRoutes(db?: DB) {
         effectiveFee > 0 && newFeeCcy !== row.currency
           ? (() => {
               const manual =
-                row.feeRateSource === "manual" ? Number(row.feeExchangeRate ?? NaN) : undefined
+                newFeeRateSource === "manual" ? (newFeeFx ?? NaN) : undefined
               const v = settleFee(effectiveFee, newFeeCcy, row.currency, {}, manual as number | undefined)
               return v ?? effectiveFee
             })()
@@ -132,6 +139,10 @@ export function createTransactionRoutes(db?: DB) {
           type: newType,
           amount: signedNew.toFixed(8),
           fees: newFees > 0 || patchBody.fees != null ? newFees.toFixed(8) : row.fees,
+          feesType: newFeesType,
+          feeCurrency: newFeeCcy,
+          feeRateSource: newFeeRateSource,
+          feeExchangeRate: newFeeFx != null ? String(newFeeFx) : row.feeExchangeRate,
           updatedAt: new Date(),
         })
         .where(eq(walletTransactions.id, row.id))
