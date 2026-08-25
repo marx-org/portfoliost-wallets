@@ -7,6 +7,7 @@ import { createMovementRoutes } from "./routes/movements.js"
 import { createTransactionRoutes } from "./routes/transactions.js"
 import { createHistoryRoutes } from "./routes/history.js"
 import { createRegistryRoutes } from "./routes/registry.js"
+import { createAdminRoutes } from "./routes/admin.js"
 import { moduleMeta } from "./meta.js"
 
 const app = new Hono()
@@ -29,6 +30,8 @@ api.route("/wallets/transactions", createTransactionRoutes())
 api.route("/wallets", createHistoryRoutes())
 // registry: /api/currencies (public) + /api/internal/fx-rates (D20/D26)
 api.route("/", createRegistryRoutes())
+// D47 — admin-facing FX rates endpoint
+api.route("/admin", createAdminRoutes())
 
 app.route("/api", api)
 
