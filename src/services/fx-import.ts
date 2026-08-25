@@ -6,8 +6,11 @@ export const FRANKFURTER_BASE = process.env.FRANKFURTER_BASE ?? "https://api.fra
 
 /** Currencies we import (EUR is the implicit base). Extending this list is what
  * grows the supported-currency registry on the next daily run (D26). */
+// Full ECB/frankfurter coverage (~31 currencies). EUR is the implicit base.
 export const TRACKED_CURRENCIES = [
-  "USD", "PLN", "GBP", "CHF", "JPY", "CZK", "SEK", "NOK", "DKK", "HUF", "CNY", "AUD", "CAD",
+  "USD", "PLN", "GBP", "CHF", "JPY", "CZK", "SEK", "NOK", "DKK", "HUF", "CNY",
+  "AUD", "CAD", "BGN", "BRL", "HKD", "IDR", "ILS", "INR", "ISK", "KRW",
+  "MXN", "MYR", "NZD", "PHP", "RON", "SGD", "THB", "TRY", "ZAR",
 ] as const
 
 interface FrankfurterResponse {

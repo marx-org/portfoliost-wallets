@@ -39,6 +39,27 @@ export async function seed(dbUrl: string): Promise<boolean> {
       return false
     }
 
+    // Offline-friendly FX bootstrap (fees-and-custom-fx D25 interim): a demo
+    // close table so selectors/valuations work before the first real import.
+    const rateCount = await sql`select count(*)::int as count from wallets.fx_rates`
+    if ((rateCount[0] as { count: number }).count === 0) {
+      const DEMO: Record<string, number> = {
+        USD: 1.08, PLN: 4.3, GBP: 0.85, CHF: 0.93, JPY: 163.2, CZK: 24.9,
+        SEK: 11.3, NOK: 11.8, DKK: 7.46, HUF: 393.0, CNY: 7.8, AUD: 1.65,
+        CAD: 1.47, BGN: 1.96, BRL: 5.9, HKD: 8.43, IDR: 17300, ILS: 4.0,
+        INR: 90.2, ISK: 148.7, KRW: 1470, MXN: 19.7, MYR: 5.05, NZD: 1.79,
+        PHP: 62.4, RON: 4.97, SGD: 1.44, THB: 38.9, TRY: 36.8, ZAR: 19.6,
+      }
+      const today = new Date().toISOString().slice(0, 10)
+      for (const [currency, rate] of Object.entries(DEMO)) {
+        await sql`
+          insert into wallets.fx_rates (rate_date, currency, rate, source)
+          values (${today}, ${currency}, ${rate.toFixed(10)}, ${"demo"})
+          on conflict (rate_date, currency) do nothing
+        `
+      }
+    }
+
     await sql.begin(async (tx) => {
       await tx`
         insert into wallets.wallets (id, user_id, name, currency, base_currency, balance, available_balance)
