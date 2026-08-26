@@ -11,6 +11,7 @@ import {
   wallets,
 } from "../db/schema.js"
 import { preferredBaseCurrency } from "../services/preferences.js"
+import { createTransactionRoutes } from "./portfolio-transactions.js"
 
 const ISO_CURRENCY = /^[A-Za-z]{3}$/
 
@@ -398,6 +399,9 @@ export function createPortfolioRoutes(db?: DB) {
     await database.delete(portfolios).where(sql`${portfolios.id} = ${id}`)
     return c.body(null, 204)
   })
+
+  // Mount transaction + position routes (Phase C)
+  routes.route("/", createTransactionRoutes(getDbInstance()))
 
   return routes
 }
