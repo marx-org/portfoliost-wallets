@@ -482,7 +482,7 @@ export function createTransactionRoutes(db?: DB) {
       return c.json({ error: "ValidationError", message: result.error }, 422)
     }
 
-    return c.json(result.transaction, 201)
+    return c.json({ ...result.transaction, position: result.position ?? null }, 201)
   })
 
   // PATCH /:id/transactions/:txId — update transaction + recompute
