@@ -1,5 +1,5 @@
 import { Hono, type Context } from "hono"
-import { and, eq, sql } from "drizzle-orm"
+import { and, eq, sql, asc, desc } from "drizzle-orm"
 import { z } from "zod"
 import { userIdentityMiddleware } from "../auth.js"
 import { type DB } from "../db/index.js"
@@ -824,6 +824,248 @@ export function createTransactionRoutes(db?: DB) {
       .where(eq(positions.id, positionId))
 
     return c.body(null, 204)
+  })
+
+  // ── D1: GET /:id/transactions — paginated with filters + sorting ─────
+
+  const TX_SORT_FIELDS: Record<string, string> = {
+    symbol: "instrument_symbol",
+    date: "executed_at",
+    type: "type",
+    quantity: "quantity",
+    price: "price",
+    fees: "fees",
+    amount: "total_amount",
+  }
+
+  routes.get("/:id/transactions", async (c) => {
+    const identity = c.get("userIdentity")
+    const database = getDb()!
+    const portfolioId = c.req.param("id") as string
+
+    const portfolio = await loadPortfolio(database, portfolioId, identity.id)
+    if (!portfolio) return c.json({ error: "NotFound", message: "Portfolio not found" }, 404)
+
+    const page = Math.max(1, Number(c.req.query("page")) || 1)
+    const limit = Math.min(100, Math.max(1, Number(c.req.query("limit")) || 20))
+    const offset = (page - 1) * limit
+    const sortBy = c.req.query("sortBy") ?? "date"
+    const sortOrder = (c.req.query("sortOrder") ?? "desc").toLowerCase() === "asc" ? "asc" : "desc"
+    const typeFilter = c.req.query("type")
+    const positionId = c.req.query("positionId")
+
+    const conditions = [
+      eq(portfolioTransactions.userId, identity.id),
+      eq(portfolioTransactions.portfolioId, portfolioId),
+    ]
+    if (typeFilter) {
+      conditions.push(eq(portfolioTransactions.type, typeFilter.toUpperCase()))
+    }
+    if (positionId) {
+      conditions.push(eq(portfolioTransactions.positionId, positionId))
+    }
+
+    const sortCol = TX_SORT_FIELDS[sortBy] ?? "executedAt"
+    const sortFn = sortOrder === "asc" ? asc : desc
+    const sortExpr = sql`${sql.raw(`"${sortCol}"`)}`
+
+    const [countRow] = await database
+      .select({ count: sql<number>`count(*)::int` })
+      .from(portfolioTransactions)
+      .where(and(...conditions))
+
+    const total = countRow?.count ?? 0
+
+    const rows = await database
+      .select()
+      .from(portfolioTransactions)
+      .where(and(...conditions))
+      .orderBy(sortFn(sortExpr))
+      .limit(limit)
+      .offset(offset)
+
+    const items = rows.map((r) => ({
+      id: r.id,
+      portfolioId: r.portfolioId,
+      positionId: r.positionId,
+      walletId: r.walletId,
+      type: r.type,
+      instrumentSymbol: r.instrumentSymbol,
+      instrumentName: r.instrumentName,
+      sector: r.sector,
+      country: r.country,
+      quantity: Number(r.quantity),
+      price: Number(r.price),
+      fees: r.fees != null ? Number(r.fees) : 0,
+      feesType: r.feesType,
+      feeCurrency: r.feeCurrency,
+      feesSettled: Number(r.feesSettled),
+      totalAmount: Number(r.totalAmount),
+      currency: r.currency,
+      instrumentCurrency: r.instrumentCurrency,
+      assetType: r.assetType,
+      exchangeRate: Number(r.exchangeRate),
+      rateSource: r.rateSource,
+      convertedTotalAmount: Number(r.convertedTotalAmount),
+      convertedPrice: Number(r.convertedPrice),
+      convertedFees: Number(r.convertedFees),
+      realizedGainLoss: r.realizedGainLoss != null ? Number(r.realizedGainLoss) : null,
+      isGift: r.isGift,
+      synthesizedOpeningLot: r.synthesizedOpeningLot,
+      executedAt: r.executedAt?.toISOString?.() ?? r.executedAt,
+      createdAt: r.createdAt?.toISOString?.() ?? r.createdAt,
+    }))
+
+    return c.json({ items, total, page, limit })
+  })
+
+  // ── D3: GET /:id/transactions/export — paginated JSON export ─────────
+
+  routes.get("/:id/transactions/export", async (c) => {
+    const identity = c.get("userIdentity")
+    const database = getDb()!
+    const portfolioId = c.req.param("id") as string
+
+    const portfolio = await loadPortfolio(database, portfolioId, identity.id)
+    if (!portfolio) return c.json({ error: "NotFound", message: "Portfolio not found" }, 404)
+
+    const page = Math.max(1, Number(c.req.query("page")) || 1)
+    const limit = Math.min(500, Math.max(1, Number(c.req.query("limit")) || 100))
+    const offset = (page - 1) * limit
+
+    const [countRow] = await database
+      .select({ count: sql<number>`count(*)::int` })
+      .from(portfolioTransactions)
+      .where(
+        and(
+          eq(portfolioTransactions.userId, identity.id),
+          eq(portfolioTransactions.portfolioId, portfolioId),
+        ),
+      )
+
+    const total = countRow?.count ?? 0
+
+    const rows = await database
+      .select()
+      .from(portfolioTransactions)
+      .where(
+        and(
+          eq(portfolioTransactions.userId, identity.id),
+          eq(portfolioTransactions.portfolioId, portfolioId),
+        ),
+      )
+      .orderBy(desc(portfolioTransactions.executedAt))
+      .limit(limit)
+      .offset(offset)
+
+    const items = rows.map((r) => ({
+      id: r.id,
+      portfolioId: r.portfolioId,
+      positionId: r.positionId,
+      type: r.type,
+      instrumentSymbol: r.instrumentSymbol,
+      instrumentName: r.instrumentName,
+      quantity: Number(r.quantity),
+      price: Number(r.price),
+      totalAmount: Number(r.totalAmount),
+      currency: r.currency,
+      fees: r.fees != null ? Number(r.fees) : 0,
+      feesSettled: Number(r.feesSettled),
+      feeCurrency: r.feeCurrency,
+      exchangeRate: Number(r.exchangeRate),
+      rateSource: r.rateSource,
+      convertedTotalAmount: Number(r.convertedTotalAmount),
+      realizedGainLoss: r.realizedGainLoss != null ? Number(r.realizedGainLoss) : null,
+      executedAt: r.executedAt?.toISOString?.() ?? r.executedAt,
+    }))
+
+    return c.json({ items, total, page, limit })
+  })
+
+  return routes
+}
+
+// ── D2: cross-portfolio transaction feed ──────────────────────────────────
+// Separate Hono to mount at /api/portfolios/transactions without /:id collision.
+
+const PORTFOLIO_TX_SORT: Record<string, string> = {
+  symbol: "instrument_symbol",
+  date: "executed_at",
+  type: "type",
+  quantity: "quantity",
+  price: "price",
+  fees: "fees",
+  amount: "total_amount",
+}
+
+function serializeTx(r: typeof portfolioTransactions.$inferSelect) {
+  return {
+    id: r.id,
+    portfolioId: r.portfolioId,
+    positionId: r.positionId,
+    walletId: r.walletId,
+    type: r.type,
+    instrumentSymbol: r.instrumentSymbol,
+    instrumentName: r.instrumentName,
+    sector: r.sector,
+    country: r.country,
+    quantity: Number(r.quantity),
+    price: Number(r.price),
+    fees: r.fees != null ? Number(r.fees) : 0,
+    feesType: r.feesType,
+    feeCurrency: r.feeCurrency,
+    feesSettled: Number(r.feesSettled),
+    totalAmount: Number(r.totalAmount),
+    currency: r.currency,
+    instrumentCurrency: r.instrumentCurrency,
+    assetType: r.assetType,
+    exchangeRate: Number(r.exchangeRate),
+    rateSource: r.rateSource,
+    convertedTotalAmount: Number(r.convertedTotalAmount),
+    convertedPrice: Number(r.convertedPrice),
+    convertedFees: Number(r.convertedFees),
+    realizedGainLoss: r.realizedGainLoss != null ? Number(r.realizedGainLoss) : null,
+    isGift: r.isGift,
+    synthesizedOpeningLot: r.synthesizedOpeningLot,
+    executedAt: r.executedAt?.toISOString?.() ?? r.executedAt,
+    createdAt: r.createdAt?.toISOString?.() ?? r.createdAt,
+  }
+}
+
+export function createCrossPortfolioTransactionsRoute(db?: DB) {
+  const routes = new Hono()
+  routes.use("*", userIdentityMiddleware)
+  const getDb = () => db
+
+  routes.get("/", async (c) => {
+    const identity = c.get("userIdentity")
+    const database = getDb()!
+
+    const page = Math.max(1, Number(c.req.query("page")) || 1)
+    const limit = Math.min(100, Math.max(1, Number(c.req.query("limit")) || 10))
+    const offset = (page - 1) * limit
+    const sortBy = c.req.query("sortBy") ?? "date"
+    const sortOrder = (c.req.query("sortOrder") ?? "desc").toLowerCase() === "asc" ? "asc" : "desc"
+
+    const sortCol = PORTFOLIO_TX_SORT[sortBy] ?? "executed_at"
+    const sortDir = sortOrder === "asc" ? sql`ASC` : sql`DESC`
+
+    const [countRow] = await database
+      .select({ count: sql<number>`count(*)::int` })
+      .from(portfolioTransactions)
+      .where(sql`${portfolioTransactions.userId} = ${identity.id}`)
+
+    const total = countRow?.count ?? 0
+
+    const rows = await database
+      .select()
+      .from(portfolioTransactions)
+      .where(sql`${portfolioTransactions.userId} = ${identity.id}`)
+      .orderBy(sql`${sql.raw(`"${sortCol}"`)} ${sortDir}`)
+      .limit(limit)
+      .offset(offset)
+
+    return c.json({ items: rows.map(serializeTx), total, page, limit })
   })
 
   return routes

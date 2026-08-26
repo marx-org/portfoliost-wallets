@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest"
 import { Hono } from "hono"
 import { createPortfolioRoutes } from "./portfolios.js"
+import { createCrossPortfolioTransactionsRoute } from "./portfolio-transactions.js"
 import { makeHarness } from "./test-utils.js"
 import {
   portfolios,
@@ -13,6 +14,8 @@ import { sql } from "drizzle-orm"
 
 function app(db: Parameters<typeof makeHarness>[0] extends string ? never : Parameters<typeof createPortfolioRoutes>[0]) {
   const a = new Hono()
+  // Cross-portfolio feed must be mounted BEFORE portfolio routes to avoid /:id collision
+  a.route("/api/portfolios/transactions", createCrossPortfolioTransactionsRoute(db))
   a.route("/api/portfolios", createPortfolioRoutes(db))
   return a
 }
@@ -565,5 +568,229 @@ describe("Portfolio transactions (§15 Phase C)", () => {
     const body = await res.json()
     // 0.1% of 1500 = 1.5
     expect(body.feesSettled).toBeCloseTo(1.5, 2)
+  })
+})
+
+describe("Portfolio transaction history (§15 Phase D)", () => {
+  it("GET /:id/transactions — paginated list", async () => {
+    const h = await makeHarness()
+    const a = app(h.db)
+
+    const createRes = await a.request("/api/portfolios", {
+      method: "POST",
+      headers: h.headers,
+      body: JSON.stringify({ name: "P", currency: "USD" }),
+    })
+    const portfolio = await createRes.json()
+
+    // Create 3 transactions
+    for (let i = 0; i < 3; i++) {
+      await a.request(`/api/portfolios/${portfolio.id}/transactions`, {
+        method: "POST",
+        headers: h.headers,
+        body: JSON.stringify({ ...BUY_BODY, quantity: i + 1 }),
+      })
+    }
+
+    const res = await a.request(`/api/portfolios/${portfolio.id}/transactions?page=1&limit=2`, {
+      headers: h.headers,
+    })
+    expect(res.status).toBe(200)
+    const body = await res.json()
+    expect(body.items.length).toBe(2)
+    expect(body.total).toBe(3)
+    expect(body.page).toBe(1)
+    expect(body.limit).toBe(2)
+  })
+
+  it("GET /:id/transactions — filter by type", async () => {
+    const h = await makeHarness()
+    const a = app(h.db)
+
+    const createRes = await a.request("/api/portfolios", {
+      method: "POST",
+      headers: h.headers,
+      body: JSON.stringify({ name: "P", currency: "USD" }),
+    })
+    const portfolio = await createRes.json()
+
+    await a.request(`/api/portfolios/${portfolio.id}/transactions`, {
+      method: "POST",
+      headers: h.headers,
+      body: JSON.stringify(BUY_BODY),
+    })
+
+    await a.request(`/api/portfolios/${portfolio.id}/transactions`, {
+      method: "POST",
+      headers: h.headers,
+      body: JSON.stringify({
+        type: "DIVIDEND",
+        symbol: "AAPL",
+        quantity: 1,
+        price: 2.5,
+        currency: "USD",
+      }),
+    })
+
+    const res = await a.request(`/api/portfolios/${portfolio.id}/transactions?type=dividend`, {
+      headers: h.headers,
+    })
+    expect(res.status).toBe(200)
+    const body = await res.json()
+    expect(body.items.length).toBe(1)
+    expect(body.items[0].type).toBe("DIVIDEND")
+  })
+
+  it("GET /:id/transactions — filter by positionId", async () => {
+    const h = await makeHarness()
+    const a = app(h.db)
+
+    const createRes = await a.request("/api/portfolios", {
+      method: "POST",
+      headers: h.headers,
+      body: JSON.stringify({ name: "P", currency: "USD" }),
+    })
+    const portfolio = await createRes.json()
+
+    // BUY AAPL
+    const buyRes = await a.request(`/api/portfolios/${portfolio.id}/transactions`, {
+      method: "POST",
+      headers: h.headers,
+      body: JSON.stringify(BUY_BODY),
+    })
+    const buyTx = await buyRes.json()
+
+    // BUY MSFT (different position)
+    await a.request(`/api/portfolios/${portfolio.id}/transactions`, {
+      method: "POST",
+      headers: h.headers,
+      body: JSON.stringify({ ...BUY_BODY, symbol: "MSFT", instrumentName: "Microsoft" }),
+    })
+
+    const res = await a.request(
+      `/api/portfolios/${portfolio.id}/transactions?positionId=${buyTx.positionId}`,
+      { headers: h.headers },
+    )
+    expect(res.status).toBe(200)
+    const body = await res.json()
+    expect(body.items.length).toBe(1)
+    expect(body.items[0].instrumentSymbol).toBe("AAPL")
+  })
+
+  it("GET /:id/transactions — sort by symbol ascending", async () => {
+    const h = await makeHarness()
+    const a = app(h.db)
+
+    const createRes = await a.request("/api/portfolios", {
+      method: "POST",
+      headers: h.headers,
+      body: JSON.stringify({ name: "P", currency: "USD" }),
+    })
+    const portfolio = await createRes.json()
+
+    await a.request(`/api/portfolios/${portfolio.id}/transactions`, {
+      method: "POST",
+      headers: h.headers,
+      body: JSON.stringify({ ...BUY_BODY, symbol: "ZZZZ" }),
+    })
+    await a.request(`/api/portfolios/${portfolio.id}/transactions`, {
+      method: "POST",
+      headers: h.headers,
+      body: JSON.stringify({ ...BUY_BODY, symbol: "AAAA" }),
+    })
+
+    const res = await a.request(
+      `/api/portfolios/${portfolio.id}/transactions?sortBy=symbol&sortOrder=asc`,
+      { headers: h.headers },
+    )
+    expect(res.status).toBe(200)
+    const body = await res.json()
+    expect(body.items[0].instrumentSymbol).toBe("AAAA")
+    expect(body.items[1].instrumentSymbol).toBe("ZZZZ")
+  })
+
+  it("GET /transactions — cross-portfolio feed", async () => {
+    const h = await makeHarness()
+    const a = app(h.db)
+
+    const p1Res = await a.request("/api/portfolios", {
+      method: "POST",
+      headers: h.headers,
+      body: JSON.stringify({ name: "P1", currency: "USD" }),
+    })
+    const p1 = await p1Res.json()
+
+    const p2Res = await a.request("/api/portfolios", {
+      method: "POST",
+      headers: h.headers,
+      body: JSON.stringify({ name: "P2", currency: "EUR" }),
+    })
+    const p2 = await p2Res.json()
+
+    await a.request(`/api/portfolios/${p1.id}/transactions`, {
+      method: "POST",
+      headers: h.headers,
+      body: JSON.stringify(BUY_BODY),
+    })
+    await a.request(`/api/portfolios/${p2.id}/transactions`, {
+      method: "POST",
+      headers: h.headers,
+      body: JSON.stringify({ ...BUY_BODY, symbol: "MSFT" }),
+    })
+
+    const res = await a.request("/api/portfolios/transactions", { headers: h.headers })
+    expect(res.status).toBe(200)
+    const body = await res.json()
+    expect(body.items.length).toBe(2)
+    expect(body.total).toBe(2)
+    // Both portfolios' transactions appear
+    const symbols = body.items.map((t: any) => t.instrumentSymbol).sort()
+    expect(symbols).toEqual(["AAPL", "MSFT"])
+  })
+
+  it("GET /:id/transactions/export — returns all txs", async () => {
+    const h = await makeHarness()
+    const a = app(h.db)
+
+    const createRes = await a.request("/api/portfolios", {
+      method: "POST",
+      headers: h.headers,
+      body: JSON.stringify({ name: "P", currency: "USD" }),
+    })
+    const portfolio = await createRes.json()
+
+    await a.request(`/api/portfolios/${portfolio.id}/transactions`, {
+      method: "POST",
+      headers: h.headers,
+      body: JSON.stringify(BUY_BODY),
+    })
+
+    const res = await a.request(`/api/portfolios/${portfolio.id}/transactions/export`, {
+      headers: h.headers,
+    })
+    expect(res.status).toBe(200)
+    const body = await res.json()
+    expect(body.items.length).toBe(1)
+    expect(body.total).toBe(1)
+    expect(body.items[0].instrumentSymbol).toBe("AAPL")
+  })
+
+  it("GET /:id/transactions — foreign portfolio → 404", async () => {
+    const h = await makeHarness("user-a")
+    const h2 = await makeHarness("user-b")
+    const a = app(h.db)
+
+    const createRes = await a.request("/api/portfolios", {
+      method: "POST",
+      headers: h.headers,
+      body: JSON.stringify({ name: "A's", currency: "USD" }),
+    })
+    const portfolio = await createRes.json()
+
+    const a2 = app(h2.db)
+    const res = await a2.request(`/api/portfolios/${portfolio.id}/transactions`, {
+      headers: h2.headers,
+    })
+    expect(res.status).toBe(404)
   })
 })

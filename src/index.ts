@@ -9,6 +9,7 @@ import { createHistoryRoutes } from "./routes/history.js"
 import { createRegistryRoutes } from "./routes/registry.js"
 import { createAdminRoutes } from "./routes/admin.js"
 import { createPortfolioRoutes } from "./routes/portfolios.js"
+import { createCrossPortfolioTransactionsRoute } from "./routes/portfolio-transactions.js"
 import { moduleMeta } from "./meta.js"
 
 const app = new Hono()
@@ -35,6 +36,8 @@ api.route("/", createRegistryRoutes())
 api.route("/admin", createAdminRoutes())
 
 // §15 — portfolio management (D53–D64)
+// D2: cross-portfolio transaction feed (must be mounted before portfolio routes to avoid /:id collision)
+api.route("/portfolios/transactions", createCrossPortfolioTransactionsRoute())
 api.route("/portfolios", createPortfolioRoutes())
 
 app.route("/api", api)
