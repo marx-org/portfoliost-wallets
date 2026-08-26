@@ -191,6 +191,133 @@ export function createPortfolioRoutes(db?: DB) {
     return c.json(result)
   })
 
+  // ── G1: GET /total-metrics — aggregate metrics across all portfolios ─
+
+  routes.get("/total-metrics", async (c) => {
+    const identity = c.get("userIdentity")
+    const database = getDbInstance()
+
+    const portfolioRows = await database
+      .select()
+      .from(portfolios)
+      .where(sql`${portfolios.userId} = ${identity.id}`)
+
+    // Compute actual totals from positions + transactions rather than
+    // stale denormalized columns.
+    const portfolioBreakdown = await Promise.all(
+      portfolioRows.map(async (p) => {
+        const totalInvested = Number(p.totalInvested || 0)
+
+        // Sum market values from open positions
+        const [posAgg] = await database
+          .select({
+            totalMarketValue: sql<string>`COALESCE(SUM(CASE WHEN ${positions.isOpen} = true THEN COALESCE(${positions.marketValue}, ${positions.quantity} * ${positions.averageCostBasis}) ELSE 0 END), 0)`,
+          })
+          .from(positions)
+          .where(sql`${positions.portfolioId} = ${p.id}`)
+
+        const currentValue = Number(posAgg.totalMarketValue || 0)
+        const gainLoss = currentValue - totalInvested
+        return {
+          portfolioId: p.id,
+          portfolioName: p.name,
+          originalCurrency: p.currency,
+          originalValue: Math.round(currentValue * 100) / 100,
+          originalInvested: Math.round(totalInvested * 100) / 100,
+          originalGainLoss: Math.round(gainLoss * 100) / 100,
+          convertedValue: Math.round(currentValue * 100) / 100,
+          convertedInvested: Math.round(totalInvested * 100) / 100,
+          convertedGainLoss: Math.round(gainLoss * 100) / 100,
+          exchangeRate: 1,
+        }
+      }),
+    )
+
+    const totalValue = portfolioBreakdown.reduce((s, p) => s + p.originalValue, 0)
+    const totalInvested = portfolioBreakdown.reduce((s, p) => s + p.originalInvested, 0)
+    const totalGainLoss = totalValue - totalInvested
+    const returnPercentage = totalInvested > 0 ? (totalGainLoss / totalInvested) * 100 : 0
+
+    return c.json({
+      totalValue,
+      totalInvested,
+      totalGainLoss,
+      returnPercentage,
+      baseCurrency: "USD",
+      portfolioBreakdown,
+      externalCapitalReturnPercent: returnPercentage,
+      externalCapitalReturnAmount: totalGainLoss,
+      externalCapitalBasis: totalInvested,
+      externalCapitalBasisSource: "none",
+      externalCapitalSuppressedReason: null,
+      externalCapitalReturnBasisKind: "inception",
+    })
+  })
+
+  // ── G1: GET /held-stocks — aggregated open position view ─────────────
+
+  routes.get("/held-stocks", async (c) => {
+    const identity = c.get("userIdentity")
+    const database = getDbInstance()
+
+    const posRows = await database
+      .select()
+      .from(positions)
+      .where(
+        and(
+          sql`${positions.userId} = ${identity.id}`,
+          eq(positions.isOpen, true),
+        ),
+      )
+
+    const bySymbol = new Map<string, {
+      symbol: string
+      companyName: string
+      quantity: number
+      totalCostBasis: number
+      marketValue: number
+      assetType: string
+      instrumentCurrency: string
+    }>()
+
+    for (const p of posRows) {
+      const existing = bySymbol.get(p.symbol)
+      const qty = Number(p.quantity)
+      const costBasis = Number(p.averageCostBasis) * qty
+      const mktVal = p.marketValue != null ? Number(p.marketValue) : costBasis
+      if (existing) {
+        existing.quantity += qty
+        existing.totalCostBasis += costBasis
+        existing.marketValue += mktVal
+      } else {
+        bySymbol.set(p.symbol, {
+          symbol: p.symbol,
+          companyName: p.companyName || p.symbol,
+          quantity: qty,
+          totalCostBasis: costBasis,
+          marketValue: mktVal,
+          assetType: p.assetType || "STOCK",
+          instrumentCurrency: p.instrumentCurrency || "USD",
+        })
+      }
+    }
+
+    const stocks = [...bySymbol.values()]
+      .map((s) => ({
+        symbol: s.symbol,
+        name: s.companyName,
+        logo: null as string | null,
+        currentPrice: s.quantity > 0 ? Math.round((s.marketValue / s.quantity) * 100) / 100 : 0,
+        changePercent: 0,
+        assetType: s.assetType,
+        totalQuantity: s.quantity,
+        totalValue: Math.round(s.marketValue * 100) / 100,
+      }))
+      .sort((a, b) => b.totalValue - a.totalValue)
+
+    return c.json({ stocks, totalCount: stocks.length })
+  })
+
   // POST /api/portfolios — create
   routes.post("/", async (c) => {
     const parsed = CreatePortfolioSchema.safeParse(await c.req.json().catch(() => ({})))
@@ -403,33 +530,76 @@ export function createPortfolioRoutes(db?: DB) {
   // Mount transaction + position routes (Phase C)
   routes.route("/", createTransactionRoutes(getDbInstance()))
 
-  // ── Stubs for unimplemented endpoints (Phase F) ──────────────────────
-  // Returns valid empty content so the SPA doesn't break before these are wired.
+  // ── G2: GET /:id/summary-metrics — per-portfolio computed metrics ────
 
-  routes.get("/total-metrics", (c) => {
-    return c.json({
-      totalValue: 0,
-      totalCostBasis: 0,
-      totalRealizedPnl: 0,
-      totalUnrealizedPnl: 0,
-      dayChange: 0,
-      dayChangePercent: 0,
-      totalDividends: 0,
-      totalFees: 0,
-    })
-  })
+  routes.get("/:id/summary-metrics", async (c) => {
+    const identity = c.get("userIdentity")
+    const database = getDbInstance()
+    const portfolioId = c.req.param("id") as string
 
-  routes.get("/:id/summary-metrics", (c) => {
+    const [portfolio] = await database
+      .select()
+      .from(portfolios)
+      .where(and(sql`${portfolios.id} = ${portfolioId}`, sql`${portfolios.userId} = ${identity.id}`))
+
+    if (!portfolio) return c.json({ error: "NotFound", message: "Portfolio not found" }, 404)
+
+    const posRows = await database
+      .select()
+      .from(positions)
+      .where(
+        and(
+          eq(positions.userId, identity.id),
+          eq(positions.portfolioId, portfolioId),
+          eq(positions.isOpen, true),
+        ),
+      )
+
+    const totalValue = posRows.reduce(
+      (s, p) => s + (p.marketValue != null ? Number(p.marketValue) : Number(p.quantity) * Number(p.averageCostBasis)),
+      0,
+    )
+    const totalCostBasis = posRows.reduce(
+      (s, p) => s + Number(p.quantity) * Number(p.averageCostBasis),
+      0,
+    )
+    const unrealizedPnl = posRows.reduce(
+      (s, p) => s + (p.unrealizedGainLoss != null ? Number(p.unrealizedGainLoss) : 0),
+      0,
+    )
+    const unrealizedPnlPercent = totalCostBasis > 0 ? (unrealizedPnl / totalCostBasis) * 100 : 0
+    const dayChange = posRows.reduce(
+      (s, p) => s + (p.dayChange != null ? Number(p.dayChange) : 0),
+      0,
+    )
+    const dayChangePercent = totalValue > 0 ? (dayChange / totalValue) * 100 : 0
+
+    // Realized PnL from SELL transactions
+    const sellTxs = await database
+      .select()
+      .from(portfolioTransactions)
+      .where(
+        and(
+          eq(portfolioTransactions.userId, identity.id),
+          eq(portfolioTransactions.portfolioId, portfolioId),
+          eq(portfolioTransactions.type, "SELL"),
+        ),
+      )
+    const realizedPnl = sellTxs.reduce(
+      (s, t) => s + (t.realizedGainLoss != null ? Number(t.realizedGainLoss) : 0),
+      0,
+    )
+
     return c.json({
-      totalValue: 0,
-      totalCostBasis: 0,
-      unrealizedPnl: 0,
-      unrealizedPnlPercent: 0,
-      realizedPnl: 0,
-      dayChange: 0,
-      dayChangePercent: 0,
+      totalValue: Math.round(totalValue * 100) / 100,
+      totalCostBasis: Math.round(totalCostBasis * 100) / 100,
+      unrealizedPnl: Math.round(unrealizedPnl * 100) / 100,
+      unrealizedPnlPercent: Math.round(unrealizedPnlPercent * 100) / 100,
+      realizedPnl: Math.round(realizedPnl * 100) / 100,
+      dayChange: Math.round(dayChange * 100) / 100,
+      dayChangePercent: Math.round(dayChangePercent * 100) / 100,
       weight: 0,
-      positionCount: 0,
+      positionCount: posRows.length,
     })
   })
 

@@ -920,3 +920,118 @@ describe("Portfolio positions & allocation (§15 Phase E)", () => {
     expect(res.status).toBe(404)
   })
 })
+
+describe("Aggregates & metrics (§15 Phase G)", () => {
+  it("GET /total-metrics — aggregate from real data", async () => {
+    const h = await makeHarness()
+    const a = app(h.db)
+
+    await a.request("/api/portfolios", {
+      method: "POST",
+      headers: h.headers,
+      body: JSON.stringify({ name: "P1", currency: "USD" }),
+    })
+    const list = await a.request("/api/portfolios", { headers: h.headers })
+    const portfolios = await list.json()
+    const pid = portfolios[0].id
+
+    // BUY
+    await a.request(`/api/portfolios/${pid}/transactions`, {
+      method: "POST",
+      headers: h.headers,
+      body: JSON.stringify(BUY_BODY),
+    })
+
+    const res = await a.request("/api/portfolios/total-metrics", { headers: h.headers })
+    expect(res.status).toBe(200)
+    const body = await res.json()
+    expect(body.totalValue).toBeGreaterThan(0)
+    expect(body.totalInvested).toBeGreaterThan(0)
+    expect(body.portfolioBreakdown.length).toBe(1)
+    expect(body.portfolioBreakdown[0].portfolioName).toBe("P1")
+  })
+
+  it("GET /held-stocks — open positions grouped by symbol", async () => {
+    const h = await makeHarness()
+    const a = app(h.db)
+
+    await a.request("/api/portfolios", {
+      method: "POST",
+      headers: h.headers,
+      body: JSON.stringify({ name: "P1", currency: "USD" }),
+    })
+    const list = await a.request("/api/portfolios", { headers: h.headers })
+    const portfolios = await list.json()
+
+    await a.request(`/api/portfolios/${portfolios[0].id}/transactions`, {
+      method: "POST",
+      headers: h.headers,
+      body: JSON.stringify(BUY_BODY),
+    })
+
+    const res = await a.request("/api/portfolios/held-stocks", { headers: h.headers })
+    expect(res.status).toBe(200)
+    const body = await res.json()
+    expect(body.stocks.length).toBe(1)
+    expect(body.stocks[0].symbol).toBe("AAPL")
+    expect(body.stocks[0].totalQuantity).toBe(10)
+    expect(body.stocks[0].currentPrice).toBe(150)
+  })
+
+  it("GET /:id/summary-metrics — per-portfolio computed metrics", async () => {
+    const h = await makeHarness()
+    const a = app(h.db)
+
+    const createRes = await a.request("/api/portfolios", {
+      method: "POST",
+      headers: h.headers,
+      body: JSON.stringify({ name: "P1", currency: "USD" }),
+    })
+    const portfolio = await createRes.json()
+
+    await a.request(`/api/portfolios/${portfolio.id}/transactions`, {
+      method: "POST",
+      headers: h.headers,
+      body: JSON.stringify(BUY_BODY),
+    })
+
+    const res = await a.request(`/api/portfolios/${portfolio.id}/summary-metrics`, { headers: h.headers })
+    expect(res.status).toBe(200)
+    const body = await res.json()
+    expect(body.totalValue).toBe(1500)
+    expect(body.totalCostBasis).toBe(1500)
+    expect(body.positionCount).toBe(1)
+    expect(body.realizedPnl).toBe(0)
+  })
+
+  it("GET /:id/summary-metrics — with realized PnL after SELL", async () => {
+    const h = await makeHarness()
+    const a = app(h.db)
+
+    const createRes = await a.request("/api/portfolios", {
+      method: "POST",
+      headers: h.headers,
+      body: JSON.stringify({ name: "P1", currency: "USD" }),
+    })
+    const portfolio = await createRes.json()
+
+    // BUY then SELL at profit
+    await a.request(`/api/portfolios/${portfolio.id}/transactions`, {
+      method: "POST",
+      headers: h.headers,
+      body: JSON.stringify(BUY_BODY),
+    })
+    await a.request(`/api/portfolios/${portfolio.id}/transactions`, {
+      method: "POST",
+      headers: h.headers,
+      body: JSON.stringify({ ...BUY_BODY, type: "SELL", quantity: 5, price: 170 }),
+    })
+
+    const res = await a.request(`/api/portfolios/${portfolio.id}/summary-metrics`, { headers: h.headers })
+    expect(res.status).toBe(200)
+    const body = await res.json()
+    expect(body.positionCount).toBe(1)
+    // realizedPnl should be > 0 (sell proceeds minus cost basis minus fees)
+    expect(body.realizedPnl).toBeGreaterThan(0)
+  })
+})
