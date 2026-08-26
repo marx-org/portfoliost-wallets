@@ -8,6 +8,7 @@ import { createTransactionRoutes } from "./routes/transactions.js"
 import { createHistoryRoutes } from "./routes/history.js"
 import { createRegistryRoutes } from "./routes/registry.js"
 import { createAdminRoutes } from "./routes/admin.js"
+import { createPortfolioRoutes } from "./routes/portfolios.js"
 import { moduleMeta } from "./meta.js"
 
 const app = new Hono()
@@ -32,6 +33,9 @@ api.route("/wallets", createHistoryRoutes())
 api.route("/", createRegistryRoutes())
 // D47 — admin-facing FX rates endpoint
 api.route("/admin", createAdminRoutes())
+
+// §15 — portfolio management (D53–D64)
+api.route("/portfolios", createPortfolioRoutes())
 
 app.route("/api", api)
 
