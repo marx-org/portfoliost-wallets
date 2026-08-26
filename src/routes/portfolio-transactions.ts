@@ -982,6 +982,127 @@ export function createTransactionRoutes(db?: DB) {
     return c.json({ items, total, page, limit })
   })
 
+  // ── E3: GET /:id/allocation — sector/asset/currency breakdown ────────
+
+  routes.get("/:id/allocation", async (c) => {
+    const identity = c.get("userIdentity")
+    const database = getDb()!
+    const portfolioId = c.req.param("id") as string
+
+    const portfolio = await loadPortfolio(database, portfolioId, identity.id)
+    if (!portfolio) return c.json({ error: "NotFound", message: "Portfolio not found" }, 404)
+
+    const posRows = await database
+      .select()
+      .from(positions)
+      .where(
+        and(
+          eq(positions.userId, identity.id),
+          eq(positions.portfolioId, portfolioId),
+          eq(positions.isOpen, true),
+        ),
+      )
+
+    const totalValue = posRows.reduce(
+      (sum, p) => sum + (p.marketValue != null ? Number(p.marketValue) : Number(p.quantity) * Number(p.averageCostBasis)),
+      0,
+    )
+
+    function sumBy(field: string) {
+      const totals = new Map<string, number>()
+      for (const p of posRows) {
+        const key = (p as Record<string, unknown>)[field] || "Other"
+        const val = p.marketValue != null ? Number(p.marketValue) : Number(p.quantity) * Number(p.averageCostBasis)
+        totals.set(String(key), (totals.get(String(key)) || 0) + val)
+      }
+      return [...totals.entries()]
+        .map(([name, value]) => ({ name, value: round2(value) }))
+        .sort((a, b) => b.value - a.value)
+    }
+
+    return c.json({
+      totalValue: round2(totalValue),
+      bySector: sumBy("sector"),
+      byAssetType: sumBy("assetType"),
+      byCurrency: sumBy("instrumentCurrency"),
+    })
+  })
+
+  // ── E2: GET /:id/positions/bare — minimal position list ──────────────
+
+  routes.get("/:id/positions/bare", async (c) => {
+    const identity = c.get("userIdentity")
+    const database = getDb()!
+    const portfolioId = c.req.param("id") as string
+
+    const portfolio = await loadPortfolio(database, portfolioId, identity.id)
+    if (!portfolio) return c.json({ error: "NotFound", message: "Portfolio not found" }, 404)
+
+    const posRows = await database
+      .select({
+        id: positions.id,
+        symbol: positions.symbol,
+        companyName: positions.companyName,
+        quantity: positions.quantity,
+        averageCostBasis: positions.averageCostBasis,
+        instrumentCurrency: positions.instrumentCurrency,
+        isOpen: positions.isOpen,
+      })
+      .from(positions)
+      .where(
+        and(
+          eq(positions.userId, identity.id),
+          eq(positions.portfolioId, portfolioId),
+        ),
+      )
+
+    return c.json(posRows.map((p) => ({
+      id: p.id,
+      symbol: p.symbol,
+      companyName: p.companyName,
+      quantity: Number(p.quantity),
+      avgCostBasis: Number(p.averageCostBasis),
+      instrumentCurrency: p.instrumentCurrency,
+      isOpen: p.isOpen,
+    })))
+  })
+
+  // ── E2: GET /:id/positions/cfd-hints — CFD position suggestions ─────
+
+  routes.get("/:id/positions/cfd-hints", async (c) => {
+    const identity = c.get("userIdentity")
+    const database = getDb()!
+    const portfolioId = c.req.param("id") as string
+
+    const portfolio = await loadPortfolio(database, portfolioId, identity.id)
+    if (!portfolio) return c.json({ error: "NotFound", message: "Portfolio not found" }, 404)
+
+    const posRows = await database
+      .select()
+      .from(positions)
+      .where(
+        and(
+          eq(positions.userId, identity.id),
+          eq(positions.portfolioId, portfolioId),
+          eq(positions.isOpen, true),
+        ),
+      )
+
+    const hints = posRows.map((p) => ({
+      symbol: p.symbol,
+      companyName: p.companyName,
+      sector: p.sector,
+      country: p.country,
+      quantity: Number(p.quantity),
+      avgCostBasis: Number(p.averageCostBasis),
+      unrealizedPnl: p.unrealizedGainLoss != null ? Number(p.unrealizedGainLoss) : null,
+      dayChange: p.dayChange != null ? Number(p.dayChange) : null,
+      dayChangePercent: p.dayChangePercent != null ? Number(p.dayChangePercent) : null,
+    }))
+
+    return c.json(hints)
+  })
+
   return routes
 }
 

@@ -794,3 +794,129 @@ describe("Portfolio transaction history (§15 Phase D)", () => {
     expect(res.status).toBe(404)
   })
 })
+
+describe("Portfolio positions & allocation (§15 Phase E)", () => {
+  it("GET /:id/allocation — returns breakdown by sector/asset/currency", async () => {
+    const h = await makeHarness()
+    const a = app(h.db)
+
+    const createRes = await a.request("/api/portfolios", {
+      method: "POST",
+      headers: h.headers,
+      body: JSON.stringify({ name: "P", currency: "USD" }),
+    })
+    const portfolio = await createRes.json()
+
+    // Create positions via transactions
+    await a.request(`/api/portfolios/${portfolio.id}/transactions`, {
+      method: "POST",
+      headers: h.headers,
+      body: JSON.stringify({ ...BUY_BODY, sector: "Technology", country: "US" }),
+    })
+    await a.request(`/api/portfolios/${portfolio.id}/transactions`, {
+      method: "POST",
+      headers: h.headers,
+      body: JSON.stringify({ ...BUY_BODY, symbol: "MSFT", instrumentName: "Microsoft", sector: "Technology", country: "US" }),
+    })
+
+    const res = await a.request(`/api/portfolios/${portfolio.id}/allocation`, { headers: h.headers })
+    expect(res.status).toBe(200)
+    const body = await res.json()
+    expect(body.totalValue).toBeGreaterThan(0)
+    expect(body.bySector.length).toBe(1)
+    expect(body.bySector[0].name).toBe("Technology")
+    expect(body.byAssetType.length).toBe(1)
+    expect(body.byAssetType[0].name).toBe("STOCK")
+    expect(body.byCurrency.length).toBe(1)
+    expect(body.byCurrency[0].name).toBe("USD")
+  })
+
+  it("GET /:id/allocation — empty portfolio", async () => {
+    const h = await makeHarness()
+    const a = app(h.db)
+
+    const createRes = await a.request("/api/portfolios", {
+      method: "POST",
+      headers: h.headers,
+      body: JSON.stringify({ name: "P", currency: "USD" }),
+    })
+    const portfolio = await createRes.json()
+
+    const res = await a.request(`/api/portfolios/${portfolio.id}/allocation`, { headers: h.headers })
+    expect(res.status).toBe(200)
+    const body = await res.json()
+    expect(body.totalValue).toBe(0)
+    expect(body.bySector).toEqual([])
+  })
+
+  it("GET /:id/positions/bare — returns minimal position list", async () => {
+    const h = await makeHarness()
+    const a = app(h.db)
+
+    const createRes = await a.request("/api/portfolios", {
+      method: "POST",
+      headers: h.headers,
+      body: JSON.stringify({ name: "P", currency: "USD" }),
+    })
+    const portfolio = await createRes.json()
+
+    await a.request(`/api/portfolios/${portfolio.id}/transactions`, {
+      method: "POST",
+      headers: h.headers,
+      body: JSON.stringify(BUY_BODY),
+    })
+
+    const res = await a.request(`/api/portfolios/${portfolio.id}/positions/bare`, { headers: h.headers })
+    expect(res.status).toBe(200)
+    const body = await res.json()
+    expect(body.length).toBe(1)
+    expect(body[0].symbol).toBe("AAPL")
+    expect(body[0].quantity).toBe(10)
+    expect(body[0].isOpen).toBe(true)
+    // Minimal: no metrics, no marketValue
+    expect(body[0].marketValue).toBeUndefined()
+  })
+
+  it("GET /:id/positions/cfd-hints — returns enriched hints", async () => {
+    const h = await makeHarness()
+    const a = app(h.db)
+
+    const createRes = await a.request("/api/portfolios", {
+      method: "POST",
+      headers: h.headers,
+      body: JSON.stringify({ name: "P", currency: "USD" }),
+    })
+    const portfolio = await createRes.json()
+
+    await a.request(`/api/portfolios/${portfolio.id}/transactions`, {
+      method: "POST",
+      headers: h.headers,
+      body: JSON.stringify(BUY_BODY),
+    })
+
+    const res = await a.request(`/api/portfolios/${portfolio.id}/positions/cfd-hints`, { headers: h.headers })
+    expect(res.status).toBe(200)
+    const body = await res.json()
+    expect(body.length).toBe(1)
+    expect(body[0].symbol).toBe("AAPL")
+    expect(body[0].sector).toBe("Technology")
+    expect(body[0].quantity).toBe(10)
+  })
+
+  it("GET /:id/allocation — foreign portfolio → 404", async () => {
+    const h = await makeHarness("user-a")
+    const h2 = await makeHarness("user-b")
+    const a = app(h.db)
+
+    const createRes = await a.request("/api/portfolios", {
+      method: "POST",
+      headers: h.headers,
+      body: JSON.stringify({ name: "A's", currency: "USD" }),
+    })
+    const portfolio = await createRes.json()
+
+    const a2 = app(h2.db)
+    const res = await a2.request(`/api/portfolios/${portfolio.id}/allocation`, { headers: h2.headers })
+    expect(res.status).toBe(404)
+  })
+})
