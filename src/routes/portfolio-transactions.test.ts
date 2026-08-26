@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest"
 import { Hono } from "hono"
 import { createPortfolioRoutes } from "./portfolios.js"
+import { createPublicShareRoutes } from "./portfolios.js"
 import { createCrossPortfolioTransactionsRoute } from "./portfolio-transactions.js"
 import { makeHarness } from "./test-utils.js"
 import {
@@ -17,6 +18,12 @@ function app(db: Parameters<typeof makeHarness>[0] extends string ? never : Para
   // Cross-portfolio feed must be mounted BEFORE portfolio routes to avoid /:id collision
   a.route("/api/portfolios/transactions", createCrossPortfolioTransactionsRoute(db))
   a.route("/api/portfolios", createPortfolioRoutes(db))
+  return a
+}
+
+function publicApp(db: Parameters<typeof makeHarness>[0] extends string ? never : Parameters<typeof createPortfolioRoutes>[0]) {
+  const a = new Hono()
+  a.route("/api/portfolios/public", createPublicShareRoutes(db))
   return a
 }
 
@@ -1033,5 +1040,163 @@ describe("Aggregates & metrics (§15 Phase G)", () => {
     expect(body.positionCount).toBe(1)
     // realizedPnl should be > 0 (sell proceeds minus cost basis minus fees)
     expect(body.realizedPnl).toBeGreaterThan(0)
+  })
+})
+
+describe("Shares CRUD (§15 Phase G3/G4)", () => {
+  it("POST /shares — create share", async () => {
+    const h = await makeHarness()
+    const a = app(h.db)
+
+    const createRes = await a.request("/api/portfolios", {
+      method: "POST",
+      headers: h.headers,
+      body: JSON.stringify({ name: "P1", currency: "USD" }),
+    })
+    const portfolio = await createRes.json()
+
+    const res = await a.request("/api/portfolios/shares", {
+      method: "POST",
+      headers: h.headers,
+      body: JSON.stringify({ portfolioId: portfolio.id, displayName: "My P1" }),
+    })
+    expect(res.status).toBe(201)
+    const body = await res.json()
+    expect(body.portfolioId).toBe(portfolio.id)
+    expect(body.displayName).toBe("My P1")
+    expect(body.viewCount).toBe(0)
+    expect(body.privacySettings.showValues).toBe(true)
+  })
+
+  it("POST /shares — portfolio not found → 404", async () => {
+    const h = await makeHarness()
+    const a = app(h.db)
+
+    const res = await a.request("/api/portfolios/shares", {
+      method: "POST",
+      headers: h.headers,
+      body: JSON.stringify({ portfolioId: "00000000-0000-0000-0000-000000000000" }),
+    })
+    expect(res.status).toBe(404)
+  })
+
+  it("POST /shares — 10-limit enforcement", async () => {
+    const h = await makeHarness()
+    const a = app(h.db)
+
+    const createRes = await a.request("/api/portfolios", {
+      method: "POST",
+      headers: h.headers,
+      body: JSON.stringify({ name: "P1", currency: "USD" }),
+    })
+    const portfolio = await createRes.json()
+
+    // Create 10 shares
+    for (let i = 0; i < 10; i++) {
+      await a.request("/api/portfolios/shares", {
+        method: "POST",
+        headers: h.headers,
+        body: JSON.stringify({ portfolioId: portfolio.id, displayName: `Share ${i}` }),
+      })
+    }
+
+    // 11th should fail
+    const res = await a.request("/api/portfolios/shares", {
+      method: "POST",
+      headers: h.headers,
+      body: JSON.stringify({ portfolioId: portfolio.id, displayName: "Too many" }),
+    })
+    expect(res.status).toBe(422)
+    const body = await res.json()
+    expect(body.error).toBe("LimitReached")
+  })
+
+  it("GET /shares — list user shares", async () => {
+    const h = await makeHarness()
+    const a = app(h.db)
+
+    const createRes = await a.request("/api/portfolios", {
+      method: "POST",
+      headers: h.headers,
+      body: JSON.stringify({ name: "P1", currency: "USD" }),
+    })
+    const portfolio = await createRes.json()
+
+    await a.request("/api/portfolios/shares", {
+      method: "POST",
+      headers: h.headers,
+      body: JSON.stringify({ portfolioId: portfolio.id, displayName: "My Share" }),
+    })
+
+    const res = await a.request("/api/portfolios/shares", { headers: h.headers })
+    expect(res.status).toBe(200)
+    const body = await res.json()
+    expect(body.length).toBe(1)
+    expect(body[0].portfolioName).toBe("P1")
+  })
+
+  it("DELETE /shares/:id — delete share", async () => {
+    const h = await makeHarness()
+    const a = app(h.db)
+
+    const createRes = await a.request("/api/portfolios", {
+      method: "POST",
+      headers: h.headers,
+      body: JSON.stringify({ name: "P1", currency: "USD" }),
+    })
+    const portfolio = await createRes.json()
+
+    const shareRes = await a.request("/api/portfolios/shares", {
+      method: "POST",
+      headers: h.headers,
+      body: JSON.stringify({ portfolioId: portfolio.id, displayName: "To Delete" }),
+    })
+    const share = await shareRes.json()
+
+    const res = await a.request(`/api/portfolios/shares/${share.id}`, {
+      method: "DELETE",
+      headers: h.headers,
+    })
+    expect(res.status).toBe(204)
+
+    // Verify deleted
+    const listRes = await a.request("/api/portfolios/shares", { headers: h.headers })
+    const body = await listRes.json()
+    expect(body.length).toBe(0)
+  })
+
+  it("GET /public/:shareId — public view increments view count", async () => {
+    const h = await makeHarness()
+    const a = app(h.db)
+    const pa = publicApp(h.db)
+
+    const createRes = await a.request("/api/portfolios", {
+      method: "POST",
+      headers: h.headers,
+      body: JSON.stringify({ name: "P1", currency: "USD" }),
+    })
+    const portfolio = await createRes.json()
+
+    const shareRes = await a.request("/api/portfolios/shares", {
+      method: "POST",
+      headers: h.headers,
+      body: JSON.stringify({ portfolioId: portfolio.id, displayName: "Public" }),
+    })
+    const share = await shareRes.json()
+
+    // View public share (no auth needed)
+    const res = await pa.request(`/api/portfolios/public/${share.id}`)
+    expect(res.status).toBe(200)
+    const body = await res.json()
+    expect(body.displayName).toBe("Public")
+    expect(body.portfolio.name).toBe("P1")
+  })
+
+  it("GET /public/:shareId — not found → 404", async () => {
+    const h = await makeHarness()
+    const pa = publicApp(h.db)
+
+    const res = await pa.request("/api/portfolios/public/00000000-0000-0000-0000-000000000000")
+    expect(res.status).toBe(404)
   })
 })

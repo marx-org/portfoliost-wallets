@@ -318,6 +318,113 @@ export function createPortfolioRoutes(db?: DB) {
     return c.json({ stocks, totalCount: stocks.length })
   })
 
+  // ── G3: Shares CRUD ──────────────────────────────────────────────────
+  // Must be before /:id routes so Hono matches as static path.
+
+  routes.get("/shares", async (c) => {
+    const identity = c.get("userIdentity")
+    const database = getDbInstance()
+
+    const rows = await database
+      .select()
+      .from(shares)
+      .where(sql`${shares.userId} = ${identity.id}`)
+      .orderBy(sql`${shares.createdAt} DESC`)
+
+    const enriched = await Promise.all(
+      rows.map(async (s) => {
+        const [p] = await database
+          .select({ name: portfolios.name })
+          .from(portfolios)
+          .where(eq(portfolios.id, s.portfolioId))
+        return {
+          ...s,
+          portfolioName: p?.name ?? "",
+        }
+      }),
+    )
+
+    return c.json(enriched)
+  })
+
+  routes.post("/shares", async (c) => {
+    const identity = c.get("userIdentity")
+    const database = getDbInstance()
+    const body = await c.req.json().catch(() => ({}))
+    const { portfolioId, displayName = "" } = body
+
+    if (!portfolioId) {
+      return c.json({ error: "ValidationError", message: "portfolioId is required" }, 422)
+    }
+
+    const [portfolio] = await database
+      .select()
+      .from(portfolios)
+      .where(and(eq(portfolios.id, portfolioId), eq(portfolios.userId, identity.id)))
+
+    if (!portfolio) {
+      return c.json({ error: "NotFound", message: "Portfolio not found" }, 404)
+    }
+
+    const [cnt] = await database
+      .select({ count: drizzleCount() })
+      .from(shares)
+      .where(eq(shares.userId, identity.id))
+
+    if (cnt && cnt.count >= 10) {
+      return c.json({ error: "LimitReached", message: "You can have up to 10 active shares" }, 422)
+    }
+
+    const defaultPrivacy = {
+      benchmarks: ["SPY"],
+      showValues: true,
+      displayName,
+      showHoldings: true,
+      showPositions: true,
+      positionsToHide: [],
+      showMonthlyReturns: true,
+      showAssetAllocation: true,
+      showPerformanceChart: true,
+      showPositionAllocation: true,
+      showSectorDistribution: true,
+      showTransactionHistory: true,
+    }
+
+    const [created] = await database
+      .insert(shares)
+      .values({
+        userId: identity.id,
+        portfolioId,
+        displayName,
+        privacySettings: defaultPrivacy,
+      })
+      .returning()
+
+    return c.json({
+      ...created,
+      portfolioName: portfolio.name,
+      privacySettings: defaultPrivacy,
+    }, 201)
+  })
+
+  routes.delete("/shares/:shareId", async (c) => {
+    const identity = c.get("userIdentity")
+    const database = getDbInstance()
+    const shareId = c.req.param("shareId") as string
+
+    const [share] = await database
+      .select()
+      .from(shares)
+      .where(and(eq(shares.id, shareId), eq(shares.userId, identity.id)))
+
+    if (!share) {
+      return c.json({ error: "NotFound", message: "Share not found" }, 404)
+    }
+
+    await database.delete(shares).where(eq(shares.id, shareId))
+    return c.body(null, 204)
+  })
+
   // POST /api/portfolios — create
   routes.post("/", async (c) => {
     const parsed = CreatePortfolioSchema.safeParse(await c.req.json().catch(() => ({})))
@@ -638,22 +745,56 @@ export function createPortfolioRoutes(db?: DB) {
     })
   })
 
-  // Shares stubs (Phase G will implement)
-  routes.get("/shares", (c) => {
-    return c.json([])
-  })
+  return routes
+}
 
-  routes.post("/shares", (c) => {
-    return c.json({ error: "NotImplemented", message: "shares not yet available" }, 501)
-  })
+// ── G3: Public share view (auth-exempt) ──────────────────────────────────
+// Exported separately to mount without auth middleware.
 
-  routes.delete("/shares/:shareId", (c) => {
-    return c.body(null, 204)
-  })
+export function createPublicShareRoutes(db?: DB) {
+  const routes = new Hono()
 
-  // Public share view stub
-  routes.get("/public/:shareId", (c) => {
-    return c.json({ error: "NotFound", message: "share not found" }, 404)
+  routes.get("/:shareId", async (c) => {
+    const database = db ?? getDb()
+    const shareId = c.req.param("shareId") as string
+
+    const [share] = await database!
+      .select()
+      .from(shares)
+      .where(eq(shares.id, shareId))
+
+    if (!share) {
+      return c.json({ error: "NotFound", message: "Share not found" }, 404)
+    }
+
+    // Increment view count
+    await database!
+      .update(shares)
+      .set({ viewCount: sql`${shares.viewCount} + 1`, updatedAt: new Date() })
+      .where(eq(shares.id, shareId))
+
+    const [portfolio] = await database!
+      .select()
+      .from(portfolios)
+      .where(eq(portfolios.id, share.portfolioId))
+
+    if (!portfolio) {
+      return c.json({ error: "NotFound", message: "Portfolio not found" }, 404)
+    }
+
+    const privacy = share.privacySettings as Record<string, unknown>
+
+    return c.json({
+      shareId: share.id,
+      displayName: share.displayName || portfolio.name,
+      privacySettings: privacy,
+      portfolio: {
+        name: portfolio.name,
+        description: portfolio.description,
+        strategy: portfolio.strategy,
+        currency: portfolio.currency,
+      },
+    })
   })
 
   return routes

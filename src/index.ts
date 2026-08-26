@@ -9,6 +9,7 @@ import { createHistoryRoutes } from "./routes/history.js"
 import { createRegistryRoutes } from "./routes/registry.js"
 import { createAdminRoutes } from "./routes/admin.js"
 import { createPortfolioRoutes } from "./routes/portfolios.js"
+import { createPublicShareRoutes } from "./routes/portfolios.js"
 import { createCrossPortfolioTransactionsRoute } from "./routes/portfolio-transactions.js"
 import { moduleMeta } from "./meta.js"
 
@@ -39,6 +40,8 @@ api.route("/admin", createAdminRoutes())
 // D2: cross-portfolio transaction feed (must be mounted before portfolio routes to avoid /:id collision)
 api.route("/portfolios/transactions", createCrossPortfolioTransactionsRoute())
 api.route("/portfolios", createPortfolioRoutes())
+// G3: public share view (auth-exempt) — mounted at /portfolios/public to avoid auth middleware
+api.route("/portfolios/public", createPublicShareRoutes())
 
 app.route("/api", api)
 
