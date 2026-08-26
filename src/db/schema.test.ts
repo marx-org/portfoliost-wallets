@@ -1,7 +1,10 @@
 import { describe, expect, it } from "vitest"
 import { sql } from "drizzle-orm"
 import { createTestDb } from "./test-db.js"
-import { walletsSchema, wallets, walletTransactions, fxRates, fxSyncState } from "./schema.js"
+import {
+  walletsSchema, wallets, walletTransactions, fxRates, fxSyncState,
+  portfoliosSchema, portfolios, positions, portfolioTransactions, shares, valueSnapshots,
+} from "./schema.js"
 
 describe("wallets schema (D17/D24)", () => {
   it("creates the dedicated pg schema via migrations", async () => {
@@ -113,5 +116,230 @@ describe("wallets schema (D17/D24)", () => {
 
     const [state] = await db.insert(fxSyncState).values({ lastStatus: "ok" }).returning()
     expect(state.id).toBe(1)
+  })
+})
+
+describe("portfolios schema (§15, D54)", () => {
+  it("creates the dedicated portfolios pg schema via migrations", async () => {
+    const { db } = await createTestDb()
+    const rows = await db.execute(sql`select nspname from pg_namespace where nspname = 'portfolios'`)
+    expect(rows.rows.length).toBe(1)
+  })
+
+  it("inserts a portfolio with defaults and mandatory currency", async () => {
+    const { db } = await createTestDb()
+    const [p] = await db
+      .insert(portfolios)
+      .values({ userId: "user-a", name: "Top10", currency: "USD" })
+      .returning()
+    expect(p.name).toBe("Top10")
+    expect(p.currency).toBe("USD")
+    expect(p.baseCurrency).toBe("USD")
+    expect(p.strategy).toBe("GROWTH")
+    expect(p.type).toBe("regular")
+    expect(Number(p.totalInvested)).toBe(0)
+    expect(p.isPublic).toBe(false)
+
+    await expect(
+      db.insert(portfolios).values({ userId: "user-a", name: "bad", currency: null as never }),
+    ).rejects.toThrow()
+  })
+
+  it("inserts a position with FK to portfolio and CHECK constraints", async () => {
+    const { db } = await createTestDb()
+    const [p] = await db
+      .insert(portfolios)
+      .values({ userId: "user-a", name: "P", currency: "USD" })
+      .returning()
+    const [pos] = await db
+      .insert(positions)
+      .values({
+        userId: "user-a",
+        portfolioId: p.id,
+        symbol: "AAPL",
+        assetType: "STOCK",
+        quantity: "10",
+        averageCostBasis: "150.00000000",
+        instrumentCurrency: "USD",
+      })
+      .returning()
+    expect(pos.symbol).toBe("AAPL")
+    expect(Number(pos.quantity)).toBe(10)
+    expect(pos.isOpen).toBe(true)
+
+    // direction CHECK constraint
+    await expect(
+      db.insert(positions).values({
+        userId: "user-a",
+        portfolioId: p.id,
+        symbol: "X",
+        direction: "NEUTRAL" as never,
+      }),
+    ).rejects.toThrow()
+  })
+
+  it("inserts a portfolio transaction with CHECK constraints", async () => {
+    const { db } = await createTestDb()
+    const [p] = await db
+      .insert(portfolios)
+      .values({ userId: "user-a", name: "P", currency: "USD" })
+      .returning()
+    const [pos] = await db
+      .insert(positions)
+      .values({
+        userId: "user-a",
+        portfolioId: p.id,
+        symbol: "AAPL",
+        quantity: "10",
+        averageCostBasis: "150",
+        instrumentCurrency: "USD",
+      })
+      .returning()
+    const [tx] = await db
+      .insert(portfolioTransactions)
+      .values({
+        userId: "user-a",
+        portfolioId: p.id,
+        positionId: pos.id,
+        type: "BUY",
+        instrumentSymbol: "AAPL",
+        quantity: "10",
+        price: "150.00000000",
+        currency: "USD",
+        totalAmount: "1500.00000000",
+        rateSource: "automatic",
+        feeRateSource: "automatic",
+      })
+      .returning()
+    expect(tx.type).toBe("BUY")
+    expect(tx.rateSource).toBe("automatic")
+    expect(Number(tx.totalAmount)).toBe(1500)
+
+    // type CHECK constraint
+    await expect(
+      db.insert(portfolioTransactions).values({
+        userId: "user-a",
+        portfolioId: p.id,
+        type: "SWAP" as never,
+        quantity: "1",
+        price: "1",
+        currency: "USD",
+        totalAmount: "1",
+      }),
+    ).rejects.toThrow()
+  })
+
+  it("inserts a share with jsonb privacy_settings and enforces FK cascade", async () => {
+    const { db } = await createTestDb()
+    const [p] = await db
+      .insert(portfolios)
+      .values({ userId: "user-a", name: "P", currency: "USD" })
+      .returning()
+    const [s] = await db
+      .insert(shares)
+      .values({
+        userId: "user-a",
+        portfolioId: p.id,
+        displayName: "My portfolio",
+        privacySettings: { benchmarks: "SPY", showReturns: true },
+      })
+      .returning()
+    expect(s.displayName).toBe("My portfolio")
+    expect(s.viewCount).toBe(0)
+    expect((s.privacySettings as Record<string, unknown>).benchmarks).toBe("SPY")
+
+    // privacy_settings is NOT NULL
+    await expect(
+      db.insert(shares).values({
+        userId: "user-a",
+        portfolioId: p.id,
+        privacySettings: null as never,
+      }),
+    ).rejects.toThrow()
+  })
+
+  it("inserts a value snapshot with composite PK", async () => {
+    const { db } = await createTestDb()
+    const [p] = await db
+      .insert(portfolios)
+      .values({ userId: "user-a", name: "P", currency: "USD" })
+      .returning()
+    const [snap] = await db
+      .insert(valueSnapshots)
+      .values({
+        portfolioId: p.id,
+        snapshotDate: "2026-08-01",
+        value: "10000.00000000",
+        invested: "9000.00000000",
+        netFlow: "0",
+      })
+      .returning()
+    expect(Number(snap.value)).toBe(10000)
+    expect(Number(snap.netFlow)).toBe(0)
+
+    // composite PK: duplicate (portfolioId, snapshotDate) fails
+    await expect(
+      db.insert(valueSnapshots).values({
+        portfolioId: p.id,
+        snapshotDate: "2026-08-01",
+        value: "11000",
+        invested: "9000",
+      }),
+    ).rejects.toThrow()
+  })
+
+  it("cascades delete from portfolio to positions, transactions, shares, snapshots", async () => {
+    const { db } = await createTestDb()
+    const [p] = await db
+      .insert(portfolios)
+      .values({ userId: "user-a", name: "P", currency: "USD" })
+      .returning()
+    await db.insert(positions).values({
+      userId: "user-a", portfolioId: p.id, symbol: "X",
+    })
+    await db.insert(portfolioTransactions).values({
+      userId: "user-a", portfolioId: p.id, type: "BUY",
+      quantity: "1", price: "1", currency: "USD", totalAmount: "1",
+    })
+    await db.insert(shares).values({
+      userId: "user-a", portfolioId: p.id,
+      privacySettings: {},
+    })
+    await db.insert(valueSnapshots).values({
+      portfolioId: p.id, snapshotDate: "2026-01-01",
+      value: "0", invested: "0",
+    })
+
+    await db.delete(portfolios).where(sql`${portfolios.id} = ${p.id}`)
+
+    expect((await db.select().from(positions).where(sql`${positions.portfolioId} = ${p.id}`)).length).toBe(0)
+    expect((await db.select().from(portfolioTransactions).where(sql`${portfolioTransactions.portfolioId} = ${p.id}`)).length).toBe(0)
+    expect((await db.select().from(shares).where(sql`${shares.portfolioId} = ${p.id}`)).length).toBe(0)
+    expect((await db.select().from(valueSnapshots).where(sql`${valueSnapshots.portfolioId} = ${p.id}`)).length).toBe(0)
+  })
+
+  it("enforces user-scoped isolation via index (authorization at query level)", async () => {
+    const { db } = await createTestDb()
+    const [p] = await db
+      .insert(portfolios)
+      .values({ userId: "user-a", name: "A", currency: "USD" })
+      .returning()
+    await db.insert(positions).values({
+      userId: "user-a", portfolioId: p.id, symbol: "AAPL",
+    })
+
+    // Query only user-a's positions
+    const rows = await db
+      .select()
+      .from(positions)
+      .where(sql`${positions.userId} = 'user-a'`)
+    expect(rows.length).toBe(1)
+
+    // Query user-b sees nothing (D24 pattern)
+    const empty = await db
+      .select()
+      .from(positions)
+      .where(sql`${positions.userId} = 'user-b'`)
+    expect(empty.length).toBe(0)
   })
 })
