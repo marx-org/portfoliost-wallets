@@ -982,6 +982,87 @@ export function createTransactionRoutes(db?: DB) {
     return c.json({ items, total, page, limit })
   })
 
+  // ── E1: GET /:id/positions — full position list (example-service wire shape) ──
+
+  routes.get("/:id/positions", async (c) => {
+    const identity = c.get("userIdentity")
+    const database = getDb()!
+    const portfolioId = c.req.param("id") as string
+
+    const portfolio = await loadPortfolio(database, portfolioId, identity.id)
+    if (!portfolio) return c.json({ error: "NotFound", message: "Portfolio not found" }, 404)
+
+    const posRows = await database
+      .select()
+      .from(positions)
+      .where(
+        and(
+          eq(positions.userId, identity.id),
+          eq(positions.portfolioId, portfolioId),
+        ),
+      )
+
+    const totalValue = posRows
+      .filter((p) => p.isOpen)
+      .reduce(
+        (sum, p) => sum + (p.marketValue != null ? Number(p.marketValue) : Number(p.quantity) * Number(p.averageCostBasis)),
+        0,
+      )
+
+    return c.json(
+      posRows.map((p) => {
+        const avg = Number(p.averageCostBasis)
+        const qty = Number(p.quantity)
+        const price = p.currentPrice != null ? Number(p.currentPrice) : null
+        const mv = p.marketValue != null ? Number(p.marketValue) : price != null ? price * qty : null
+        const pct = price != null && avg > 0 ? ((price - avg) / avg) * 100 : null
+        return {
+          id: p.id,
+          portfolioId: portfolio.id,
+          symbol: p.symbol,
+          companyName: p.companyName,
+          assetType: p.assetType,
+          contractSize: p.contractSize != null ? Number(p.contractSize) : null,
+          direction: p.direction,
+          optionType: p.optionType,
+          strikePrice: p.strikePrice != null ? Number(p.strikePrice) : null,
+          expirationDate: p.expirationDate,
+          purchaseCurrency: p.purchaseCurrency,
+          instrumentCurrency: p.instrumentCurrency,
+          quantity: qty,
+          averageCostBasis: avg,
+          avgCostBasis: avg,
+          instrumentAvgCostBasis: avg,
+          totalCostBasis: avg * qty,
+          costBasis: avg * qty,
+          realizedGainLoss: 0,
+          sector: p.sector,
+          industry: p.industry,
+          country: p.country,
+          isOpen: p.isOpen,
+          openedAt: p.openedAt,
+          closedAt: p.closedAt,
+          currentPrice: price,
+          priceSource: p.priceSource,
+          priceAsOf: p.priceAsOf,
+          marketValue: mv,
+          unrealizedGainLoss: p.unrealizedGainLoss != null ? Number(p.unrealizedGainLoss) : null,
+          percentageChange: pct != null ? round2(pct) : null,
+          percentOfPortfolio: mv != null && totalValue > 0 ? round2((mv / totalValue) * 100) : null,
+          dayChange: p.dayChange != null ? Number(p.dayChange) : null,
+          dayChangePercent: p.dayChangePercent != null ? Number(p.dayChangePercent) : null,
+          preMarketPrice: null,
+          preMarketChangePercent: null,
+          afterHoursPrice: null,
+          afterHoursChangePercent: null,
+          metrics: null,
+          displayCurrency: portfolio.baseCurrency,
+          logo: null,
+        }
+      }),
+    )
+  })
+
   // ── E3: GET /:id/allocation — sector/asset/currency breakdown ────────
 
   routes.get("/:id/allocation", async (c) => {

@@ -856,6 +856,73 @@ describe("Portfolio positions & allocation (§15 Phase E)", () => {
     expect(body.bySector).toEqual([])
   })
 
+  it("GET /:id/positions — returns full position list (example-service wire shape)", async () => {
+    const h = await makeHarness()
+    const a = app(h.db)
+
+    const createRes = await a.request("/api/portfolios", {
+      method: "POST",
+      headers: h.headers,
+      body: JSON.stringify({ name: "P", currency: "USD" }),
+    })
+    const portfolio = await createRes.json()
+
+    await a.request(`/api/portfolios/${portfolio.id}/transactions`, {
+      method: "POST",
+      headers: h.headers,
+      body: JSON.stringify(BUY_BODY),
+    })
+
+    const res = await a.request(`/api/portfolios/${portfolio.id}/positions`, { headers: h.headers })
+    expect(res.status).toBe(200)
+    const body = await res.json()
+    expect(body.length).toBe(1)
+    const p = body[0]
+    expect(p.id).toBeDefined()
+    expect(p.portfolioId).toBe(portfolio.id)
+    expect(p.symbol).toBe("AAPL")
+    expect(p.quantity).toBe(10)
+    expect(p.isOpen).toBe(true)
+    expect(p.totalCostBasis).toBeCloseTo(10 * BUY_BODY.price, 1)
+    expect(p.costBasis).toBeCloseTo(10 * BUY_BODY.price, 1)
+    expect(p.avgCostBasis).toBeCloseTo(p.averageCostBasis, 8)
+    expect(p.displayCurrency).toBe("USD")
+    expect(p.metrics).toBeNull()
+    if (p.currentPrice != null) {
+      expect(p.marketValue).toBeCloseTo(p.currentPrice * p.quantity, 1)
+      expect(p.percentOfPortfolio).toBeCloseTo(100, 1)
+    }
+  })
+
+  it("GET /:id/positions — unauthenticated → 401", async () => {
+    const h = await makeHarness()
+    const a = app(h.db)
+    const createRes = await a.request("/api/portfolios", {
+      method: "POST",
+      headers: h.headers,
+      body: JSON.stringify({ name: "P", currency: "USD" }),
+    })
+    const portfolio = await createRes.json()
+
+    const res = await a.request(`/api/portfolios/${portfolio.id}/positions`)
+    expect(res.status).toBe(401)
+  })
+
+  it("GET /:id/positions — foreign portfolio → 404", async () => {
+    const h = await makeHarness("user-a")
+    const a = app(h.db)
+    const createRes = await a.request("/api/portfolios", {
+      method: "POST",
+      headers: h.headers,
+      body: JSON.stringify({ name: "P", currency: "USD" }),
+    })
+    const portfolio = await createRes.json()
+
+    const h2 = await makeHarness("user-b")
+    const res = await a.request(`/api/portfolios/${portfolio.id}/positions`, { headers: h2.headers })
+    expect(res.status).toBe(404)
+  })
+
   it("GET /:id/positions/bare — returns minimal position list", async () => {
     const h = await makeHarness()
     const a = app(h.db)
