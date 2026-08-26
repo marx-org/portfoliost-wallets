@@ -403,5 +403,88 @@ export function createPortfolioRoutes(db?: DB) {
   // Mount transaction + position routes (Phase C)
   routes.route("/", createTransactionRoutes(getDbInstance()))
 
+  // ── Stubs for unimplemented endpoints (Phase F) ──────────────────────
+  // Returns valid empty content so the SPA doesn't break before these are wired.
+
+  routes.get("/total-metrics", (c) => {
+    return c.json({
+      totalValue: 0,
+      totalCostBasis: 0,
+      totalRealizedPnl: 0,
+      totalUnrealizedPnl: 0,
+      dayChange: 0,
+      dayChangePercent: 0,
+      totalDividends: 0,
+      totalFees: 0,
+    })
+  })
+
+  routes.get("/:id/summary-metrics", (c) => {
+    return c.json({
+      totalValue: 0,
+      totalCostBasis: 0,
+      unrealizedPnl: 0,
+      unrealizedPnlPercent: 0,
+      realizedPnl: 0,
+      dayChange: 0,
+      dayChangePercent: 0,
+      weight: 0,
+      positionCount: 0,
+    })
+  })
+
+  routes.get("/:id/analytics", (c) => {
+    return c.json({
+      timeframe: c.req.query("timeframe") || "1Y",
+      performance: [],
+      benchmarks: [],
+    })
+  })
+
+  routes.get("/:id/dividends", (c) => {
+    return c.json({ totalDividends: 0, count: 0, items: [] })
+  })
+
+  routes.get("/:id/calendar", (c) => {
+    return c.json({ events: [] })
+  })
+
+  routes.get("/:id/news", (c) => {
+    return c.json({ articles: [], total: 0 })
+  })
+
+  routes.get("/:id/compare", (c) => {
+    return c.json({ portfolios: [], timeframe: "1Y" })
+  })
+
+  routes.get("/:id/risk-metrics", (c) => {
+    return c.json({
+      volatility: 0,
+      sharpeRatio: 0,
+      maxDrawdown: 0,
+      beta: 0,
+      alpha: 0,
+      correlation: {},
+    })
+  })
+
+  // Shares stubs (Phase G will implement)
+  routes.get("/shares", (c) => {
+    return c.json([])
+  })
+
+  routes.post("/shares", (c) => {
+    return c.json({ error: "NotImplemented", message: "shares not yet available" }, 501)
+  })
+
+  routes.delete("/shares/:shareId", (c) => {
+    return c.body(null, 204)
+  })
+
+  // Public share view stub
+  routes.get("/public/:shareId", (c) => {
+    return c.json({ error: "NotFound", message: "share not found" }, 404)
+  })
+
   return routes
 }
