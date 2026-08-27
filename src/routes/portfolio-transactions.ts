@@ -1031,37 +1031,7 @@ export function createTransactionRoutes(db?: DB) {
       .limit(limit)
       .offset(offset)
 
-    const items = rows.map((r) => ({
-      id: r.id,
-      portfolioId: r.portfolioId,
-      positionId: r.positionId,
-      walletId: r.walletId,
-      type: r.type,
-      instrumentSymbol: r.instrumentSymbol,
-      instrumentName: r.instrumentName,
-      sector: r.sector,
-      country: r.country,
-      quantity: Number(r.quantity),
-      price: Number(r.price),
-      fees: r.fees != null ? Number(r.fees) : 0,
-      feesType: r.feesType,
-      feeCurrency: r.feeCurrency,
-      feesSettled: Number(r.feesSettled),
-      totalAmount: Number(r.totalAmount),
-      currency: r.currency,
-      instrumentCurrency: r.instrumentCurrency,
-      assetType: r.assetType,
-      exchangeRate: Number(r.exchangeRate),
-      rateSource: r.rateSource,
-      convertedTotalAmount: Number(r.convertedTotalAmount),
-      convertedPrice: Number(r.convertedPrice),
-      convertedFees: Number(r.convertedFees),
-      realizedGainLoss: r.realizedGainLoss != null ? Number(r.realizedGainLoss) : null,
-      isGift: r.isGift,
-      synthesizedOpeningLot: r.synthesizedOpeningLot,
-      executedAt: r.executedAt?.toISOString?.() ?? r.executedAt,
-      createdAt: r.createdAt?.toISOString?.() ?? r.createdAt,
-    }))
+    const items = rows.map(serializeTx)
 
     return c.json({ items, total, page, limit })
   })
@@ -1465,6 +1435,8 @@ function serializeTx(r: typeof portfolioTransactions.$inferSelect) {
     feesType: r.feesType,
     feeCurrency: r.feeCurrency,
     feesSettled: Number(r.feesSettled),
+    feeRateSource: r.feeRateSource,
+    feeExchangeRate: r.feeExchangeRate != null ? Number(r.feeExchangeRate) : null,
     totalAmount: Number(r.totalAmount),
     currency: r.currency,
     instrumentCurrency: r.instrumentCurrency,
@@ -1475,6 +1447,7 @@ function serializeTx(r: typeof portfolioTransactions.$inferSelect) {
     convertedPrice: Number(r.convertedPrice),
     convertedFees: Number(r.convertedFees),
     realizedGainLoss: r.realizedGainLoss != null ? Number(r.realizedGainLoss) : null,
+    convertedRealizedGainLoss: r.realizedGainLoss != null ? Number(r.realizedGainLoss) : null,
     isGift: r.isGift,
     synthesizedOpeningLot: r.synthesizedOpeningLot,
     executedAt: r.executedAt?.toISOString?.() ?? r.executedAt,
