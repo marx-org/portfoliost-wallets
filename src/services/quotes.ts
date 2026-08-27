@@ -54,11 +54,13 @@ function instrumentsBase(): string {
 
 // ── Fetchers ──────────────────────────────────────────────────────────────
 
-async function fetchQuote(symbol: string): Promise<CachedQuote | null> {
+async function fetchQuote(symbol: string, authToken: string): Promise<CachedQuote | null> {
   const base = instrumentsBase()
   if (!base) return null
   try {
-    const res = await fetch(`${base}/api/instruments/${symbol}/quote`)
+    const res = await fetch(`${base}/api/instruments/${symbol}/quote`, {
+      headers: { Authorization: authToken },
+    })
     if (!res.ok) return null
     const data = (await res.json()) as Record<string, unknown>
     const price = Number(data.currentPrice ?? 0)
@@ -77,11 +79,13 @@ async function fetchQuote(symbol: string): Promise<CachedQuote | null> {
   }
 }
 
-async function fetchProfile(symbol: string): Promise<CachedProfile | null> {
+async function fetchProfile(symbol: string, authToken: string): Promise<CachedProfile | null> {
   const base = instrumentsBase()
   if (!base) return null
   try {
-    const res = await fetch(`${base}/api/instruments/${symbol}/profile`)
+    const res = await fetch(`${base}/api/instruments/${symbol}/profile`, {
+      headers: { Authorization: authToken },
+    })
     if (!res.ok) return null
     const data = (await res.json()) as Record<string, unknown>
     const entry: CachedProfile = {
@@ -143,6 +147,7 @@ export async function refreshQuotes(
   db: DB,
   userId: string,
   portfolioId: string,
+  authToken: string,
 ): Promise<void> {
   if (!instrumentsBase()) return
 
@@ -170,8 +175,8 @@ export async function refreshQuotes(
 
   // Fetch quotes + profiles in parallel
   await Promise.all([
-    ...[...symbolsForQuote].map((sym) => fetchQuote(sym)),
-    ...[...symbolsForProfile].map((sym) => fetchProfile(sym)),
+    ...[...symbolsForQuote].map((sym) => fetchQuote(sym, authToken)),
+    ...[...symbolsForProfile].map((sym) => fetchProfile(sym, authToken)),
   ])
 
   // Persist snapshots for each position

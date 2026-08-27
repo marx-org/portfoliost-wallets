@@ -508,7 +508,7 @@ export function createPortfolioRoutes(db?: DB) {
     metrics.returnBasis = metrics.totalInvested
 
     // D58: refresh live quotes before building position summaries
-    await refreshQuotes(database, identity.id, p.id)
+    await refreshQuotes(database, identity.id, p.id, c.req.header("Authorization") ?? "")
 
     // Fetch position summaries
     const posRows = await database

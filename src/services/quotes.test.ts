@@ -99,7 +99,7 @@ describe("refreshQuotes (D58)", () => {
     const { pf, pos } = await seedPortfolioAndPosition(db, user.id, { qty: 10, avg: 150 })
     mockFetch(180, 3, 1.7)
 
-    await refreshQuotes(db, user.id, pf.id)
+    await refreshQuotes(db, user.id, pf.id, "Bearer test-token")
 
     const [updated] = await db.select().from(positions).where(eq(positions.id, pos.id))
     expect(Number(updated.currentPrice)).toBeCloseTo(180)
@@ -116,7 +116,7 @@ describe("refreshQuotes (D58)", () => {
     const { pf, pos } = await seedPortfolioAndPosition(db, user.id, { qty: 5, avg: 200 })
     mockFetch(210)
 
-    await refreshQuotes(db, user.id, pf.id)
+    await refreshQuotes(db, user.id, pf.id, "Bearer test-token")
 
     const [updated] = await db.select().from(positions).where(eq(positions.id, pos.id))
     expect(updated.companyName).toBe("Apple Inc.")
@@ -133,7 +133,7 @@ describe("refreshQuotes (D58)", () => {
     })
     mockFetchFail()
 
-    await refreshQuotes(db, user.id, pf.id)
+    await refreshQuotes(db, user.id, pf.id, "Bearer test-token")
 
     const [updated] = await db.select().from(positions).where(eq(positions.id, pos.id))
     expect(updated.priceSource).toBe("fallback")
@@ -148,7 +148,7 @@ describe("refreshQuotes (D58)", () => {
     const spy = vi.fn()
     vi.stubGlobal("fetch", spy)
 
-    await expect(refreshQuotes(db, user.id, pf.id)).resolves.toBeUndefined()
+    await expect(refreshQuotes(db, user.id, pf.id, "")).resolves.toBeUndefined()
     expect(spy).not.toHaveBeenCalled()
   })
 
@@ -170,7 +170,7 @@ describe("refreshQuotes (D58)", () => {
     const spy = vi.fn().mockResolvedValue({ ok: true, json: async () => ({ currentPrice: 300 }) })
     vi.stubGlobal("fetch", spy)
 
-    await refreshQuotes(db, user.id, pf.id)
+    await refreshQuotes(db, user.id, pf.id, "Bearer test-token")
     expect(spy).not.toHaveBeenCalled()
   })
 })

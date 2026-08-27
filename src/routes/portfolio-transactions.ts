@@ -1268,7 +1268,7 @@ export function createTransactionRoutes(db?: DB) {
     }
 
     // D58: enrich with live quote so 201 response has current price/market value
-    await refreshQuotes(database, identity.id, portfolioId)
+    await refreshQuotes(database, identity.id, portfolioId, c.req.header("Authorization") ?? "")
     await recomputePortfolioTotals(database, identity.id, portfolioId)
 
     const [fresh] = await database
@@ -1290,7 +1290,7 @@ export function createTransactionRoutes(db?: DB) {
     const portfolio = await loadPortfolio(database, portfolioId, identity.id)
     if (!portfolio) return c.json({ error: "NotFound", message: "Portfolio not found" }, 404)
 
-    await refreshQuotes(database, identity.id, portfolioId)
+    await refreshQuotes(database, identity.id, portfolioId, c.req.header("Authorization") ?? "")
 
     const posRows = await database
       .select()
@@ -1317,7 +1317,7 @@ export function createTransactionRoutes(db?: DB) {
     const portfolio = await loadPortfolio(database, portfolioId, identity.id)
     if (!portfolio) return c.json({ error: "NotFound", message: "Portfolio not found" }, 404)
 
-    await refreshQuotes(database, identity.id, portfolioId)
+    await refreshQuotes(database, identity.id, portfolioId, c.req.header("Authorization") ?? "")
 
     const posRows = await database
       .select()
@@ -1404,7 +1404,7 @@ export function createTransactionRoutes(db?: DB) {
     const portfolio = await loadPortfolio(database, portfolioId, identity.id)
     if (!portfolio) return c.json({ error: "NotFound", message: "Portfolio not found" }, 404)
 
-    await refreshQuotes(database, identity.id, portfolioId)
+    await refreshQuotes(database, identity.id, portfolioId, c.req.header("Authorization") ?? "")
 
     const posRows = await database
       .select()
