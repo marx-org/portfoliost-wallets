@@ -27,6 +27,7 @@ interface CachedProfile {
   name: string | null
   sector: string | null
   country: string | null
+  instrumentCurrency: string | null
   fetchedAt: number
 }
 
@@ -97,6 +98,7 @@ async function fetchProfile(symbol: string, authToken: string): Promise<CachedPr
           ? data.gicsSector
           : null,
       country: typeof data.country === "string" && data.country ? data.country : null,
+      instrumentCurrency: typeof data.currency === "string" && data.currency ? data.currency.toUpperCase() : null,
       fetchedAt: Date.now(),
     }
     profileCache.set(symbol, entry)
@@ -124,7 +126,6 @@ function needsPriceRefresh(pos: { priceAsOf: Date | null }): boolean {
 }
 
 function needsProfileRefresh(pos: { companyName: string | null; updatedAt: Date }): boolean {
-  // Re-fetch profile if we don't yet have a name or it's been > STALE_MS since last update
   if (!pos.companyName) return true
   return Date.now() - pos.updatedAt.getTime() > STALE_MS
 }
@@ -186,15 +187,16 @@ export async function refreshQuotes(
       const quote = quoteCache.get(p.symbol)
       const profile = profileCache.get(p.symbol)
 
-      // ── Profile fields (companyName, sector, country) ──────────────────
+      // ── Profile fields (companyName, sector, country, instrumentCurrency) ─
       const profileUpdate: Record<string, unknown> = {}
       if (profile) {
         if (profile.name !== null) profileUpdate.companyName = profile.name
         if (profile.sector !== null) {
           profileUpdate.sector = profile.sector
-          profileUpdate.industry = profile.sector // industry mirrors sector until finer data available
+          profileUpdate.industry = profile.sector
         }
         if (profile.country !== null) profileUpdate.country = profile.country
+        if (profile.instrumentCurrency !== null) profileUpdate.instrumentCurrency = profile.instrumentCurrency
       }
 
       // ── Quote fields ────────────────────────────────────────────────────
