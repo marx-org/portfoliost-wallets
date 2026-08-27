@@ -523,7 +523,7 @@ export function createPortfolioRoutes(db?: DB) {
       companyName: pos.companyName,
       assetType: pos.assetType,
       quantity: Number(pos.quantity),
-      avgCostBasis: Number(pos.averageCostBasis),
+      averageCostBasis: Number(pos.averageCostBasis),
       totalCostBasis: Number(pos.quantity) * Number(pos.averageCostBasis),
       currentPrice: pos.currentPrice != null ? Number(pos.currentPrice) : null,
       marketValue: pos.marketValue != null ? Number(pos.marketValue) : null,

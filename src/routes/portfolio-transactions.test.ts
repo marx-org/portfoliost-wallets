@@ -113,7 +113,7 @@ describe("Portfolio transactions (§15 Phase C)", () => {
     expect(body.positions.length).toBe(1) // merged, not 2
     expect(Number(body.positions[0].quantity)).toBe(15) // 10 + 5
     // avg cost: (10*150 + 5*160)/15 = 2300/15 ≈ 153.33
-    expect(body.positions[0].avgCostBasis).toBeCloseTo(153.33, 1)
+    expect(body.positions[0].averageCostBasis).toBeCloseTo(153.33, 1)
   })
 
   it("POST /:id/transactions — SELL computes realized P/L", async () => {
@@ -892,8 +892,6 @@ describe("Portfolio positions & allocation (§15 Phase E)", () => {
     expect(p.quantity).toBe(10)
     expect(p.isOpen).toBe(true)
     expect(p.totalCostBasis).toBeCloseTo(10 * BUY_BODY.price, 1)
-    expect(p.costBasis).toBeCloseTo(10 * BUY_BODY.price, 1)
-    expect(p.avgCostBasis).toBeCloseTo(p.averageCostBasis, 8)
     expect(p.displayCurrency).toBe("USD")
     expect(p.metrics).toBeNull()
     if (p.currentPrice != null) {
@@ -1030,7 +1028,6 @@ describe("Position CRUD (§15 D4.2–D4.8)", () => {
     expect(p.quantity).toBe(4)
     expect(p.averageCostBasis).toBe(250)
     expect(p.totalCostBasis).toBe(1000)
-    expect(p.costBasis).toBe(1000)
     expect(p.isOpen).toBe(true)
     expect(p.displayCurrency).toBe("USD")
     expect(p.portfolioId).toBe(portfolio.id)

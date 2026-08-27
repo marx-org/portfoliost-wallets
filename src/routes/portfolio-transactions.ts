@@ -397,10 +397,7 @@ function positionWire(
     instrumentCurrency: p.instrumentCurrency,
     quantity: qty,
     averageCostBasis: avg,
-    avgCostBasis: avg,
-    instrumentAvgCostBasis: avg,
     totalCostBasis: avg * qty,
-    costBasis: avg * qty,
     realizedGainLoss: 0,
     sector: p.sector,
     industry: p.industry,
@@ -423,7 +420,6 @@ function positionWire(
     afterHoursChangePercent: null,
     metrics: null,
     displayCurrency: portfolio.baseCurrency,
-    logo: null,
   }
 }
 

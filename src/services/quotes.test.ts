@@ -6,18 +6,35 @@ import { refreshQuotes, _clearQuoteCache } from "./quotes.js"
 
 // ── helpers ──────────────────────────────────────────────────────────────
 
+/** Mock fetch: returns appropriate shape based on the URL path. */
 function mockFetch(price: number, change = 2, percentChange = 1.5) {
   vi.stubGlobal(
     "fetch",
-    vi.fn().mockResolvedValue({
-      ok: true,
-      json: async () => ({
-        symbol: "AAPL",
-        currentPrice: price,
-        change,
-        percentChange,
-        currency: "USD",
-      }),
+    vi.fn().mockImplementation((url: string) => {
+      const u = String(url)
+      if (u.includes("/profile")) {
+        return Promise.resolve({
+          ok: true,
+          json: async () => ({
+            ticker: "AAPL",
+            name: "Apple Inc.",
+            country: "US",
+            finnhubIndustry: "Technology",
+            currency: "USD",
+          }),
+        })
+      }
+      // quote endpoint
+      return Promise.resolve({
+        ok: true,
+        json: async () => ({
+          symbol: "AAPL",
+          currentPrice: price,
+          change,
+          percentChange,
+          currency: "USD",
+        }),
+      })
     }),
   )
 }
@@ -66,9 +83,7 @@ async function seedPortfolioAndPosition(
 
 describe("refreshQuotes (D58)", () => {
   beforeEach(() => {
-    // Set the instruments URL so the service actually attempts fetch
     process.env.INSTRUMENTS_URL = "http://instruments:3000"
-    // Flush the module-level cache so prior test results don't bleed in
     _clearQuoteCache()
   })
 
@@ -96,6 +111,19 @@ describe("refreshQuotes (D58)", () => {
     expect(updated.priceAsOf).toBeTruthy()
   })
 
+  it("populates companyName, sector, country from instrument profile", async () => {
+    const { db, user } = await makeHarness("q-user-5")
+    const { pf, pos } = await seedPortfolioAndPosition(db, user.id, { qty: 5, avg: 200 })
+    mockFetch(210)
+
+    await refreshQuotes(db, user.id, pf.id)
+
+    const [updated] = await db.select().from(positions).where(eq(positions.id, pos.id))
+    expect(updated.companyName).toBe("Apple Inc.")
+    expect(updated.sector).toBe("Technology")
+    expect(updated.country).toBe("US")
+  })
+
   it("marks priceSource fallback when instruments is unreachable", async () => {
     const { db, user } = await makeHarness("q-user-2")
     const { pf, pos } = await seedPortfolioAndPosition(db, user.id, {
@@ -117,7 +145,6 @@ describe("refreshQuotes (D58)", () => {
     delete process.env.INSTRUMENTS_URL
     const { db, user } = await makeHarness("q-user-3")
     const { pf } = await seedPortfolioAndPosition(db, user.id)
-    // fetch should never be called
     const spy = vi.fn()
     vi.stubGlobal("fetch", spy)
 
@@ -138,7 +165,7 @@ describe("refreshQuotes (D58)", () => {
       quantity: "10",
       averageCostBasis: "200",
       instrumentCurrency: "USD",
-      isOpen: false, // closed
+      isOpen: false,
     })
     const spy = vi.fn().mockResolvedValue({ ok: true, json: async () => ({ currentPrice: 300 }) })
     vi.stubGlobal("fetch", spy)
