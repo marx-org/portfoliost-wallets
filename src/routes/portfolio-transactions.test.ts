@@ -463,7 +463,7 @@ describe("Portfolio transactions (§15 Phase C)", () => {
     expect(Number(patched.unrealizedGainLoss)).toBeCloseTo(300, 0) // (180-150)*10
   })
 
-  it("DELETE /:id/positions/:positionId — soft-close empty position", async () => {
+  it("DELETE /:id/positions/:positionId — removes position with its transactions (D4.8)", async () => {
     const h = await makeHarness()
     const a = app(h.db)
 
@@ -484,12 +484,20 @@ describe("Portfolio transactions (§15 Phase C)", () => {
     const detailBody = await detail.json()
     const posId = detailBody.positions[0].id
 
-    // Position has transactions → 409
     const delRes = await a.request(`/api/portfolios/${portfolio.id}/positions/${posId}`, {
       method: "DELETE",
       headers: h.headers,
     })
-    expect(delRes.status).toBe(409)
+    expect(delRes.status).toBe(200)
+    const removed = await delRes.json()
+    expect(removed.isOpen).toBe(false)
+
+    const txRes = await a.request(`/api/portfolios/${portfolio.id}/transactions`, { headers: h.headers })
+    const txBody = await txRes.json()
+    expect(txBody.items.length).toBe(0)
+
+    const listRes = await a.request(`/api/portfolios/${portfolio.id}/positions`, { headers: h.headers })
+    expect(await listRes.json()).toEqual([])
   })
 
   it("POST /:id/transactions — wallet linked BUY debits wallet", async () => {
@@ -992,6 +1000,186 @@ describe("Portfolio positions & allocation (§15 Phase E)", () => {
     const a2 = app(h2.db)
     const res = await a2.request(`/api/portfolios/${portfolio.id}/allocation`, { headers: h2.headers })
     expect(res.status).toBe(404)
+  })
+})
+
+describe("Position CRUD (§15 D4.2–D4.8)", () => {
+  async function setup() {
+    const h = await makeHarness()
+    const a = app(h.db)
+    const createRes = await a.request("/api/portfolios", {
+      method: "POST",
+      headers: h.headers,
+      body: JSON.stringify({ name: "P", currency: "USD" }),
+    })
+    const portfolio = await createRes.json()
+    return { h, a, portfolio }
+  }
+
+  it("POST /:id/positions — creates stock position (201, example-service wire)", async () => {
+    const { h, a, portfolio } = await setup()
+
+    const res = await a.request(`/api/portfolios/${portfolio.id}/positions`, {
+      method: "POST",
+      headers: h.headers,
+      body: JSON.stringify({ symbol: "TSLA", quantity: 4, price: 250, fees: 2.5, assetType: "STOCK" }),
+    })
+    expect(res.status).toBe(201)
+    const p = await res.json()
+    expect(p.symbol).toBe("TSLA")
+    expect(p.quantity).toBe(4)
+    expect(p.averageCostBasis).toBe(250)
+    expect(p.totalCostBasis).toBe(1000)
+    expect(p.costBasis).toBe(1000)
+    expect(p.isOpen).toBe(true)
+    expect(p.displayCurrency).toBe("USD")
+    expect(p.portfolioId).toBe(portfolio.id)
+
+    const listRes = await a.request(`/api/portfolios/${portfolio.id}/positions`, { headers: h.headers })
+    const list = await listRes.json()
+    expect(list.length).toBe(1)
+    expect(list[0].id).toBe(p.id)
+  })
+
+  it("POST /:id/positions — same symbol merges into existing position", async () => {
+    const { h, a, portfolio } = await setup()
+
+    await a.request(`/api/portfolios/${portfolio.id}/transactions`, {
+      method: "POST",
+      headers: h.headers,
+      body: JSON.stringify(BUY_BODY),
+    })
+
+    const res = await a.request(`/api/portfolios/${portfolio.id}/positions`, {
+      method: "POST",
+      headers: h.headers,
+      body: JSON.stringify({ symbol: "AAPL", quantity: 5, price: 200 }),
+    })
+    expect(res.status).toBe(201)
+    const p = await res.json()
+    expect(p.quantity).toBe(15)
+    expect(p.averageCostBasis).toBeCloseTo((10 * 150 + 5 * 200) / 15, 1)
+  })
+
+  it("POST /:id/positions — option position persists contract fields", async () => {
+    const { h, a, portfolio } = await setup()
+
+    const res = await a.request(`/api/portfolios/${portfolio.id}/positions`, {
+      method: "POST",
+      headers: h.headers,
+      body: JSON.stringify({
+        symbol: "AAPL260919C320",
+        quantity: 1,
+        price: 550,
+        assetType: "OPTION",
+        contractSize: 100,
+        optionType: "CALL",
+        strikePrice: 320,
+        expirationDate: "2026-09-19",
+      }),
+    })
+    expect(res.status).toBe(201)
+    const p = await res.json()
+    expect(p.assetType).toBe("OPTION")
+    expect(p.contractSize).toBe(100)
+    expect(p.optionType).toBe("CALL")
+    expect(p.strikePrice).toBe(320)
+    expect(p.expirationDate).toBe("2026-09-19")
+  })
+
+  it("POST /:id/positions — missing price+averageCostBasis → 422", async () => {
+    const { h, a, portfolio } = await setup()
+
+    const res = await a.request(`/api/portfolios/${portfolio.id}/positions`, {
+      method: "POST",
+      headers: h.headers,
+      body: JSON.stringify({ symbol: "TSLA", quantity: 4 }),
+    })
+    expect(res.status).toBe(422)
+  })
+
+  it("POST /:id/positions — unauthenticated → 401", async () => {
+    const { a, portfolio } = await setup()
+    const res = await a.request(`/api/portfolios/${portfolio.id}/positions`, {
+      method: "POST",
+      body: JSON.stringify({ symbol: "TSLA", quantity: 4, price: 250 }),
+    })
+    expect(res.status).toBe(401)
+  })
+
+  it("POST /:id/positions — foreign portfolio → 404", async () => {
+    const { h, a, portfolio } = await setup()
+    const h2 = await makeHarness("user-b")
+    const res = await a.request(`/api/portfolios/${portfolio.id}/positions`, {
+      method: "POST",
+      headers: h2.headers,
+      body: JSON.stringify({ symbol: "TSLA", quantity: 4, price: 250 }),
+    })
+    expect(res.status).toBe(404)
+  })
+
+  it("PATCH /:id/positions/:positionId — quantity + averageCostBasis sync", async () => {
+    const { h, a, portfolio } = await setup()
+
+    const createRes = await a.request(`/api/portfolios/${portfolio.id}/positions`, {
+      method: "POST",
+      headers: h.headers,
+      body: JSON.stringify({ symbol: "TSLA", quantity: 10, price: 200 }),
+    })
+    const pos = await createRes.json()
+
+    const res = await a.request(`/api/portfolios/${portfolio.id}/positions/${pos.id}`, {
+      method: "PATCH",
+      headers: h.headers,
+      body: JSON.stringify({ quantity: 25, averageCostBasis: 180, avgCostBasis: 180 }),
+    })
+    expect(res.status).toBe(200)
+    const p = await res.json()
+    expect(p.quantity).toBe(25)
+    expect(p.averageCostBasis).toBe(180)
+    expect(p.totalCostBasis).toBe(4500)
+  })
+
+  it("DELETE /:id/positions/:positionId — removes position + transactions", async () => {
+    const { h, a, portfolio } = await setup()
+
+    await a.request(`/api/portfolios/${portfolio.id}/transactions`, {
+      method: "POST",
+      headers: h.headers,
+      body: JSON.stringify(BUY_BODY),
+    })
+    const listRes = await a.request(`/api/portfolios/${portfolio.id}/positions`, { headers: h.headers })
+    const [pos] = await listRes.json()
+
+    const delRes = await a.request(`/api/portfolios/${portfolio.id}/positions/${pos.id}`, {
+      method: "DELETE",
+      headers: h.headers,
+    })
+    expect(delRes.status).toBe(200)
+    const removed = await delRes.json()
+    expect(removed.isOpen).toBe(false)
+    expect(removed.closedAt).toBeTruthy()
+
+    const afterList = await a.request(`/api/portfolios/${portfolio.id}/positions`, { headers: h.headers })
+    expect(await afterList.json()).toEqual([])
+
+    const txRes = await a.request(`/api/portfolios/${portfolio.id}/transactions`, { headers: h.headers })
+    const txBody = await txRes.json()
+    expect(txBody.items.length).toBe(0)
+  })
+
+  it("DELETE /:id/positions/:positionId — unauthenticated → 401", async () => {
+    const { h, a, portfolio } = await setup()
+    await a.request(`/api/portfolios/${portfolio.id}/positions`, {
+      method: "POST",
+      headers: h.headers,
+      body: JSON.stringify({ symbol: "TSLA", quantity: 4, price: 250 }),
+    })
+    const listRes = await a.request(`/api/portfolios/${portfolio.id}/positions`, { headers: h.headers })
+    const [pos] = await listRes.json()
+
+    const res = await a.request(`/api/portfolios/${portfolio.id}/positions/${pos.id}`, { method: "DELETE" })
+    expect(res.status).toBe(401)
   })
 })
 

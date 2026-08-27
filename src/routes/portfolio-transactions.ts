@@ -103,6 +103,12 @@ async function upsertPositionOnBuy(
     positionId?: string
     walletId?: string
     feesSettled: number
+    contractSize?: number
+    direction?: "LONG" | "SHORT"
+    optionType?: "CALL" | "PUT"
+    strikePrice?: number
+    expirationDate?: string
+    openedAt?: Date
   },
 ) {
   const symbol = body.symbol.toUpperCase()
@@ -177,12 +183,17 @@ async function upsertPositionOnBuy(
       averageCostBasis: String(body.price),
       instrumentCurrency: instCcy,
       assetType: body.assetType ?? "STOCK",
+      contractSize: body.contractSize != null ? String(body.contractSize) : null,
+      direction: body.direction ?? null,
+      optionType: body.optionType ?? null,
+      strikePrice: body.strikePrice != null ? String(body.strikePrice) : null,
+      expirationDate: body.expirationDate ?? null,
       sector: body.sector ?? "Other",
       country: body.country ?? "Other",
       walletId: body.walletId ?? null,
       fees: String(body.feesSettled),
       isOpen: true,
-      openedAt: new Date(),
+      openedAt: body.openedAt ?? new Date(),
     })
     .returning()
   return created
@@ -329,6 +340,107 @@ async function createWalletLink(
     .returning()
 
   return { walletTx: wt, newBalance, newAvailable }
+}
+
+const PositionCreateSchema = z.object({
+  symbol: z.string().min(1).max(20),
+  quantity: z.number().positive(),
+  price: z.number().positive().optional(),
+  averageCostBasis: z.number().positive().optional(),
+  assetType: z.string().optional(),
+  contractSize: z.number().optional(),
+  direction: z.enum(["LONG", "SHORT"]).optional(),
+  optionType: z.enum(["CALL", "PUT"]).optional(),
+  strikePrice: z.number().optional(),
+  expirationDate: z.string().optional(),
+  sector: z.string().optional(),
+  country: z.string().optional(),
+  instrumentName: z.string().optional(),
+  walletId: z.string().uuid().optional(),
+  fees: z.number().nonnegative().optional(),
+  feesType: z.enum(["fixed", "pct"]).optional(),
+  feeCurrency: z.string().length(3).optional(),
+  rateSource: z.enum(["automatic", "manual"]).optional(),
+  exchangeRate: z.number().positive().optional(),
+  feeRateSource: z.enum(["automatic", "manual"]).optional(),
+  feeExchangeRate: z.number().positive().optional(),
+  openedAt: z.string().optional(),
+  executedAt: z.string().optional(),
+})
+
+type PositionRow = typeof positions.$inferSelect
+
+/** Example service wire shape for a single position (GET list / create / edit / remove). */
+function positionWire(
+  p: PositionRow,
+  portfolio: { id: string; baseCurrency: string },
+  totalValue: number,
+) {
+  const avg = Number(p.averageCostBasis)
+  const qty = Number(p.quantity)
+  const price = p.currentPrice != null ? Number(p.currentPrice) : null
+  const mv = p.marketValue != null ? Number(p.marketValue) : price != null ? price * qty : null
+  const pct = price != null && avg > 0 ? ((price - avg) / avg) * 100 : null
+  return {
+    id: p.id,
+    portfolioId: portfolio.id,
+    symbol: p.symbol,
+    companyName: p.companyName,
+    assetType: p.assetType,
+    contractSize: p.contractSize != null ? Number(p.contractSize) : null,
+    direction: p.direction,
+    optionType: p.optionType,
+    strikePrice: p.strikePrice != null ? Number(p.strikePrice) : null,
+    expirationDate: p.expirationDate,
+    purchaseCurrency: p.purchaseCurrency,
+    instrumentCurrency: p.instrumentCurrency,
+    quantity: qty,
+    averageCostBasis: avg,
+    avgCostBasis: avg,
+    instrumentAvgCostBasis: avg,
+    totalCostBasis: avg * qty,
+    costBasis: avg * qty,
+    realizedGainLoss: 0,
+    sector: p.sector,
+    industry: p.industry,
+    country: p.country,
+    isOpen: p.isOpen,
+    openedAt: p.openedAt,
+    closedAt: p.closedAt,
+    currentPrice: price,
+    priceSource: p.priceSource,
+    priceAsOf: p.priceAsOf,
+    marketValue: mv,
+    unrealizedGainLoss: p.unrealizedGainLoss != null ? Number(p.unrealizedGainLoss) : null,
+    percentageChange: pct != null ? round2(pct) : null,
+    percentOfPortfolio: mv != null && totalValue > 0 ? round2((mv / totalValue) * 100) : null,
+    dayChange: p.dayChange != null ? Number(p.dayChange) : null,
+    dayChangePercent: p.dayChangePercent != null ? Number(p.dayChangePercent) : null,
+    preMarketPrice: null,
+    preMarketChangePercent: null,
+    afterHoursPrice: null,
+    afterHoursChangePercent: null,
+    metrics: null,
+    displayCurrency: portfolio.baseCurrency,
+    logo: null,
+  }
+}
+
+async function openPositionsValue(db: DB, userId: string, portfolioId: string) {
+  const rows = await db
+    .select()
+    .from(positions)
+    .where(
+      and(
+        eq(positions.userId, userId),
+        eq(positions.portfolioId, portfolioId),
+        eq(positions.isOpen, true),
+      ),
+    )
+  return rows.reduce(
+    (sum, p) => sum + (p.marketValue != null ? Number(p.marketValue) : Number(p.quantity) * Number(p.averageCostBasis)),
+    0,
+  )
 }
 
 export function createTransactionRoutes(db?: DB) {
@@ -711,6 +823,8 @@ export function createTransactionRoutes(db?: DB) {
       assetType: z.string().optional(),
       currentPrice: z.number().optional(),
       priceSource: z.string().optional(),
+      quantity: z.number().nonnegative().optional(),
+      averageCostBasis: z.number().nonnegative().optional(),
     })
     const parsed = MetadataSchema.safeParse(body)
     if (!parsed.success) {
@@ -731,39 +845,40 @@ export function createTransactionRoutes(db?: DB) {
       )
     if (!pos) return c.json({ error: "NotFound", message: "Position not found" }, 404)
 
+    const newQty = updates.quantity != null ? updates.quantity : Number(pos.quantity)
+    const newAvg = updates.averageCostBasis != null ? updates.averageCostBasis : Number(pos.averageCostBasis)
+    const newPrice =
+      updates.currentPrice != null
+        ? updates.currentPrice
+        : pos.currentPrice != null
+          ? Number(pos.currentPrice)
+          : null
+
+    const setData: Record<string, unknown> = { updatedAt: new Date() }
     if (updates.currentPrice != null) {
-      const qty = Number(pos.quantity)
-      const avgCost = Number(pos.averageCostBasis)
-      const mktVal = round2(qty * updates.currentPrice)
-      const unrealized = round2((updates.currentPrice - avgCost) * qty)
-
-      await database
-        .update(positions)
-        .set({
-          currentPrice: String(updates.currentPrice),
-          priceSource: updates.priceSource ?? pos.priceSource,
-          priceAsOf: new Date(),
-          marketValue: String(mktVal),
-          unrealizedGainLoss: String(unrealized),
-          ...(updates.instrumentName != null ? { companyName: updates.instrumentName } : {}),
-          ...(updates.sector != null ? { sector: updates.sector } : {}),
-          ...(updates.country != null ? { country: updates.country } : {}),
-          ...(updates.assetType != null ? { assetType: updates.assetType } : {}),
-          updatedAt: new Date(),
-        })
-        .where(eq(positions.id, positionId))
-    } else if (Object.keys(updates).length > 0) {
-      const setData: Record<string, unknown> = { updatedAt: new Date() }
-      if (updates.instrumentName != null) setData.companyName = updates.instrumentName
-      if (updates.sector != null) setData.sector = updates.sector
-      if (updates.country != null) setData.country = updates.country
-      if (updates.assetType != null) setData.assetType = updates.assetType
-
-      await database
-        .update(positions)
-        .set(setData)
-        .where(eq(positions.id, positionId))
+      setData.currentPrice = String(updates.currentPrice)
+      setData.priceSource = updates.priceSource ?? pos.priceSource
+      setData.priceAsOf = new Date()
     }
+    if (updates.quantity != null) setData.quantity = String(newQty)
+    if (updates.averageCostBasis != null) setData.averageCostBasis = String(newAvg)
+    if (updates.instrumentName != null) setData.companyName = updates.instrumentName
+    if (updates.sector != null) setData.sector = updates.sector
+    if (updates.country != null) setData.country = updates.country
+    if (updates.assetType != null) setData.assetType = updates.assetType
+
+    if (updates.currentPrice != null || updates.quantity != null || updates.averageCostBasis != null) {
+      const mktVal = newPrice != null ? round2(newQty * newPrice) : null
+      setData.marketValue = mktVal != null ? String(mktVal) : (updates.quantity != null || updates.averageCostBasis != null ? "0" : pos.marketValue)
+      if (newPrice != null) setData.unrealizedGainLoss = String(round2((newPrice - newAvg) * newQty))
+    }
+
+    await database
+      .update(positions)
+      .set(setData)
+      .where(eq(positions.id, positionId))
+
+    await recomputePortfolioTotals(database, identity.id, portfolioId)
 
     const [updated] = await database
       .select()
@@ -771,10 +886,13 @@ export function createTransactionRoutes(db?: DB) {
       .where(eq(positions.id, positionId))
     if (!updated) return c.json({ error: "NotFound", message: "Position not found" }, 404)
 
-    return c.json(updated)
+    const totalValue = await openPositionsValue(database, identity.id, portfolioId)
+    return c.json(positionWire(updated, portfolio, totalValue))
   })
 
-  // DELETE /:id/positions/:positionId — soft-close (only if open + no transactions)
+  // DELETE /:id/positions/:positionId — remove position + its transactions
+  // (D4.8: cash from trades returned to linked wallets), mock parity:
+  // returns the closed position
   routes.delete("/:id/positions/:positionId", async (c) => {
     const identity = c.get("userIdentity")
     const database = getDb()!
@@ -796,34 +914,66 @@ export function createTransactionRoutes(db?: DB) {
       )
     if (!pos) return c.json({ error: "NotFound", message: "Position not found" }, 404)
 
-    if (!pos.isOpen) {
-      return c.json({ error: "ValidationError", message: "Position is already closed" }, 422)
-    }
+    const closed = { ...pos, isOpen: false, closedAt: new Date() } as PositionRow
 
-    const txCount = await database
-      .select({ count: sql<number>`count(*)::int` })
+    const linked = await database
+      .select()
       .from(portfolioTransactions)
       .where(
         and(
           eq(portfolioTransactions.userId, identity.id),
           eq(portfolioTransactions.portfolioId, portfolioId),
-          sql`${portfolioTransactions.instrumentSymbol} = ${pos.symbol}`,
+          eq(portfolioTransactions.positionId, positionId),
         ),
       )
-      .then((rows) => rows[0]?.count ?? 0)
 
-    if (txCount > 0) {
-      return c.json(
-        { error: "Conflict", message: "Cannot delete position with existing transactions" },
-        409,
-      )
-    }
+    await database.transaction(async (tx) => {
+      for (const existing of linked) {
+        if (existing.walletId) {
+          const ref = `PORTFOLIO_${existing.type}_${existing.instrumentSymbol}_${existing.id.slice(0, 8)}`
+          await tx
+            .delete(walletTransactions)
+            .where(
+              and(
+                eq(walletTransactions.portfolioId, portfolioId),
+                eq(walletTransactions.reference, ref),
+              ),
+            )
 
-    await database
-      .delete(positions)
-      .where(eq(positions.id, positionId))
+          const [wallet] = await tx
+            .select()
+            .from(wallets)
+            .where(eq(wallets.id, existing.walletId))
+            .then((rows) => rows.slice(0, 1))
+          if (wallet) {
+            const notional = Number(existing.totalAmount)
+            const feesSettled = Number(existing.feesSettled)
+            const reversal = existing.type === "BUY"
+              ? notional + feesSettled
+              : -(notional - feesSettled)
+            const newBal = Math.round((Number(wallet.balance) + reversal) * 1e8) / 1e8
+            const newAvail = Math.round((Number(wallet.availableBalance) + reversal) * 1e8) / 1e8
+            await tx
+              .update(wallets)
+              .set({ balance: scale8(newBal), availableBalance: scale8(newAvail), updatedAt: new Date() })
+              .where(eq(wallets.id, wallet.id))
+          }
+        }
+      }
 
-    return c.body(null, 204)
+      await tx
+        .delete(portfolioTransactions)
+        .where(
+          and(
+            eq(portfolioTransactions.positionId, positionId),
+            eq(portfolioTransactions.portfolioId, portfolioId),
+          ),
+        )
+      await tx.delete(positions).where(eq(positions.id, positionId))
+      await recomputePortfolioTotals(tx, identity.id, portfolioId)
+    })
+
+    return c.json(positionWire(closed, portfolio, 0))
   })
 
   // ── D1: GET /:id/transactions — paginated with filters + sorting ─────
@@ -982,6 +1132,153 @@ export function createTransactionRoutes(db?: DB) {
     return c.json({ items, total, page, limit })
   })
 
+  // ── POST /:id/positions — add position (BUY delegation, D4.2–4.4) ─────
+
+  routes.post("/:id/positions", async (c) => {
+    const identity = c.get("userIdentity")
+    const database = getDb()!
+    const portfolioId = c.req.param("id") as string
+
+    const portfolio = await loadPortfolio(database, portfolioId, identity.id)
+    if (!portfolio) return c.json({ error: "NotFound", message: "Portfolio not found" }, 404)
+
+    const parsed = PositionCreateSchema.safeParse(await c.req.json().catch(() => ({})))
+    if (!parsed.success) {
+      return c.json({ error: "ValidationError", message: parsed.error.issues[0]?.message }, 422)
+    }
+    const body = parsed.data
+    const symbol = body.symbol.toUpperCase()
+    // Frontend omits currency — price is denominated in the portfolio base currency
+    const currency = (portfolio.baseCurrency ?? "USD").toUpperCase()
+    const price = body.price ?? body.averageCostBasis
+    if (price == null) {
+      return c.json({ error: "ValidationError", message: "price or averageCostBasis is required" }, 422)
+    }
+    const notional = body.quantity * price
+
+    const fx = await resolveFeeFx(
+      database,
+      {
+        fees: body.fees,
+        feesType: body.feesType,
+        feeCurrency: body.feeCurrency,
+        rateSource: body.rateSource,
+        exchangeRate: body.exchangeRate,
+        feeRateSource: body.feeRateSource,
+        feeExchangeRate: body.feeExchangeRate,
+      },
+      currency,
+      { notional },
+    )
+    if (!fx.ok) return c.json({ error: "ValidationError", message: fx.message }, 422)
+
+    const executedAt =
+      body.executedAt != null || body.openedAt != null
+        ? new Date(body.executedAt ?? body.openedAt!)
+        : new Date()
+
+    const result = await database.transaction(async (tx) => {
+      const [inserted] = await tx
+        .insert(portfolioTransactions)
+        .values({
+          userId: identity.id,
+          portfolioId,
+          positionId: null,
+          walletId: body.walletId ?? null,
+          type: "BUY",
+          instrumentSymbol: symbol,
+          instrumentName: body.instrumentName ?? null,
+          sector: body.sector ?? null,
+          country: body.country ?? null,
+          quantity: String(body.quantity),
+          price: String(price),
+          currency,
+          instrumentCurrency: currency,
+          assetType: body.assetType ?? "STOCK",
+          fees: body.fees != null ? String(body.fees) : null,
+          feesType: fx.fields.feesType,
+          feeCurrency: fx.fields.feeCurrency,
+          feesSettled: String(fx.feesSettled),
+          totalAmount: String(round2(notional)),
+          exchangeRate: String(fx.fields.exchangeRate),
+          rateSource: fx.fields.rateSource,
+          feeRateSource: fx.fields.feeRateSource,
+          feeExchangeRate: fx.fields.feeExchangeRate != null ? String(fx.fields.feeExchangeRate) : null,
+          convertedTotalAmount: String(round2(notional * fx.fields.exchangeRate)),
+          convertedPrice: String(round2(price * fx.fields.exchangeRate)),
+          convertedFees: String(round2(fx.feesSettled * fx.fields.exchangeRate)),
+          displayCurrency: "USD",
+          isGift: false,
+          synthesizedOpeningLot: false,
+          executedAt,
+        })
+        .returning()
+
+      const position = await upsertPositionOnBuy(tx, identity.id, portfolioId, {
+        symbol,
+        instrumentName: body.instrumentName,
+        quantity: body.quantity,
+        price,
+        currency,
+        instrumentCurrency: currency,
+        assetType: body.assetType,
+        sector: body.sector,
+        country: body.country,
+        walletId: body.walletId,
+        feesSettled: fx.feesSettled,
+        contractSize: body.contractSize,
+        direction: body.direction,
+        optionType: body.optionType,
+        strikePrice: body.strikePrice,
+        expirationDate: body.expirationDate,
+        openedAt: executedAt,
+      })
+
+      if (position) {
+        await tx
+          .update(portfolioTransactions)
+          .set({ positionId: position.id })
+          .where(eq(portfolioTransactions.id, inserted.id))
+      }
+
+      await recomputePortfolioTotals(tx, identity.id, portfolioId)
+
+      let walletLink = null
+      if (body.walletId) {
+        walletLink = await createWalletLink(tx, identity.id, {
+          walletId: body.walletId,
+          symbol,
+          type: "BUY",
+          quantity: body.quantity,
+          price,
+          currency,
+          feesSettled: fx.feesSettled,
+          exchangeRate: fx.fields.exchangeRate,
+          transactionId: inserted.id,
+          portfolioId,
+        })
+        if (walletLink && "error" in walletLink) return { error: walletLink.error }
+      }
+
+      return { transaction: inserted, position, walletLink }
+    })
+
+    if ("error" in result) {
+      return c.json({ error: "ValidationError", message: result.error }, 422)
+    }
+    if (!result.position) {
+      return c.json({ error: "NotFound", message: "Position not found" }, 404)
+    }
+
+    const [fresh] = await database
+      .select()
+      .from(positions)
+      .where(eq(positions.id, result.position.id))
+    const totalValue = await openPositionsValue(database, identity.id, portfolioId)
+
+    return c.json(positionWire(fresh, portfolio, totalValue), 201)
+  })
+
   // ── E1: GET /:id/positions — full position list (example-service wire shape) ──
 
   routes.get("/:id/positions", async (c) => {
@@ -1002,65 +1299,9 @@ export function createTransactionRoutes(db?: DB) {
         ),
       )
 
-    const totalValue = posRows
-      .filter((p) => p.isOpen)
-      .reduce(
-        (sum, p) => sum + (p.marketValue != null ? Number(p.marketValue) : Number(p.quantity) * Number(p.averageCostBasis)),
-        0,
-      )
+    const totalValue = await openPositionsValue(database, identity.id, portfolioId)
 
-    return c.json(
-      posRows.map((p) => {
-        const avg = Number(p.averageCostBasis)
-        const qty = Number(p.quantity)
-        const price = p.currentPrice != null ? Number(p.currentPrice) : null
-        const mv = p.marketValue != null ? Number(p.marketValue) : price != null ? price * qty : null
-        const pct = price != null && avg > 0 ? ((price - avg) / avg) * 100 : null
-        return {
-          id: p.id,
-          portfolioId: portfolio.id,
-          symbol: p.symbol,
-          companyName: p.companyName,
-          assetType: p.assetType,
-          contractSize: p.contractSize != null ? Number(p.contractSize) : null,
-          direction: p.direction,
-          optionType: p.optionType,
-          strikePrice: p.strikePrice != null ? Number(p.strikePrice) : null,
-          expirationDate: p.expirationDate,
-          purchaseCurrency: p.purchaseCurrency,
-          instrumentCurrency: p.instrumentCurrency,
-          quantity: qty,
-          averageCostBasis: avg,
-          avgCostBasis: avg,
-          instrumentAvgCostBasis: avg,
-          totalCostBasis: avg * qty,
-          costBasis: avg * qty,
-          realizedGainLoss: 0,
-          sector: p.sector,
-          industry: p.industry,
-          country: p.country,
-          isOpen: p.isOpen,
-          openedAt: p.openedAt,
-          closedAt: p.closedAt,
-          currentPrice: price,
-          priceSource: p.priceSource,
-          priceAsOf: p.priceAsOf,
-          marketValue: mv,
-          unrealizedGainLoss: p.unrealizedGainLoss != null ? Number(p.unrealizedGainLoss) : null,
-          percentageChange: pct != null ? round2(pct) : null,
-          percentOfPortfolio: mv != null && totalValue > 0 ? round2((mv / totalValue) * 100) : null,
-          dayChange: p.dayChange != null ? Number(p.dayChange) : null,
-          dayChangePercent: p.dayChangePercent != null ? Number(p.dayChangePercent) : null,
-          preMarketPrice: null,
-          preMarketChangePercent: null,
-          afterHoursPrice: null,
-          afterHoursChangePercent: null,
-          metrics: null,
-          displayCurrency: portfolio.baseCurrency,
-          logo: null,
-        }
-      }),
-    )
+    return c.json(posRows.map((p) => positionWire(p, portfolio, totalValue)))
   })
 
   // ── E3: GET /:id/allocation — sector/asset/currency breakdown ────────
