@@ -11,6 +11,7 @@ import {
   wallets,
 } from "../db/schema.js"
 import { resolveFeeFx } from "../services/fee-fx.js"
+import { refreshQuotes } from "../services/quotes.js"
 
 const scale8 = (n: number) => n.toFixed(8)
 const round2 = (n: number) => Math.round(n * 100) / 100
@@ -1270,6 +1271,10 @@ export function createTransactionRoutes(db?: DB) {
       return c.json({ error: "NotFound", message: "Position not found" }, 404)
     }
 
+    // D58: enrich with live quote so 201 response has current price/market value
+    await refreshQuotes(database, identity.id, portfolioId)
+    await recomputePortfolioTotals(database, identity.id, portfolioId)
+
     const [fresh] = await database
       .select()
       .from(positions)
@@ -1288,6 +1293,8 @@ export function createTransactionRoutes(db?: DB) {
 
     const portfolio = await loadPortfolio(database, portfolioId, identity.id)
     if (!portfolio) return c.json({ error: "NotFound", message: "Portfolio not found" }, 404)
+
+    await refreshQuotes(database, identity.id, portfolioId)
 
     const posRows = await database
       .select()
@@ -1313,6 +1320,8 @@ export function createTransactionRoutes(db?: DB) {
 
     const portfolio = await loadPortfolio(database, portfolioId, identity.id)
     if (!portfolio) return c.json({ error: "NotFound", message: "Portfolio not found" }, 404)
+
+    await refreshQuotes(database, identity.id, portfolioId)
 
     const posRows = await database
       .select()
@@ -1398,6 +1407,8 @@ export function createTransactionRoutes(db?: DB) {
 
     const portfolio = await loadPortfolio(database, portfolioId, identity.id)
     if (!portfolio) return c.json({ error: "NotFound", message: "Portfolio not found" }, 404)
+
+    await refreshQuotes(database, identity.id, portfolioId)
 
     const posRows = await database
       .select()

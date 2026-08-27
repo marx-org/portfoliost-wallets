@@ -11,6 +11,7 @@ import {
   wallets,
 } from "../db/schema.js"
 import { preferredBaseCurrency } from "../services/preferences.js"
+import { refreshQuotes } from "../services/quotes.js"
 import { createTransactionRoutes } from "./portfolio-transactions.js"
 
 const ISO_CURRENCY = /^[A-Za-z]{3}$/
@@ -505,6 +506,9 @@ export function createPortfolioRoutes(db?: DB) {
         : 0
     metrics.totalReturnAmount = Number(p.currentValue) - metrics.totalInvested
     metrics.returnBasis = metrics.totalInvested
+
+    // D58: refresh live quotes before building position summaries
+    await refreshQuotes(database, identity.id, p.id)
 
     // Fetch position summaries
     const posRows = await database
