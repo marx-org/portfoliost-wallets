@@ -348,6 +348,8 @@ const PositionCreateSchema = z.object({
   quantity: z.number().positive(),
   price: z.number().positive().optional(),
   averageCostBasis: z.number().positive().optional(),
+  currency: z.string().length(3).optional(),
+  instrumentCurrency: z.string().length(3).optional(),
   assetType: z.string().optional(),
   contractSize: z.number().optional(),
   direction: z.enum(["LONG", "SHORT"]).optional(),
@@ -1115,8 +1117,9 @@ export function createTransactionRoutes(db?: DB) {
     }
     const body = parsed.data
     const symbol = body.symbol.toUpperCase()
-    // Frontend omits currency — price is denominated in the portfolio base currency
-    const currency = (portfolio.baseCurrency ?? "USD").toUpperCase()
+    // Use submitted currency when provided; fall back to portfolio base currency
+    const currency = (body.currency ?? body.instrumentCurrency ?? portfolio.baseCurrency ?? "USD").toUpperCase()
+    const instCurrency = (body.instrumentCurrency ?? body.currency ?? portfolio.baseCurrency ?? "USD").toUpperCase()
     const price = body.price ?? body.averageCostBasis
     if (price == null) {
       return c.json({ error: "ValidationError", message: "price or averageCostBasis is required" }, 422)
@@ -1160,7 +1163,7 @@ export function createTransactionRoutes(db?: DB) {
           quantity: String(body.quantity),
           price: String(price),
           currency,
-          instrumentCurrency: currency,
+          instrumentCurrency: instCurrency,
           assetType: body.assetType ?? "STOCK",
           fees: body.fees != null ? String(body.fees) : null,
           feesType: fx.fields.feesType,
@@ -1187,7 +1190,7 @@ export function createTransactionRoutes(db?: DB) {
         quantity: body.quantity,
         price,
         currency,
-        instrumentCurrency: currency,
+        instrumentCurrency: instCurrency,
         assetType: body.assetType,
         sector: body.sector,
         country: body.country,
