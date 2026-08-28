@@ -1011,6 +1011,17 @@ export function createTransactionRoutes(db?: DB) {
     amount: "total_amount",
   }
 
+  // Typed Drizzle column refs for safe sorting (no sql.raw ambiguity with JOIN)
+  const TX_SORT_COLS: Record<string, unknown> = {
+    symbol:   portfolioTransactions.instrumentSymbol,
+    date:     portfolioTransactions.executedAt,
+    type:     portfolioTransactions.type,
+    quantity: portfolioTransactions.quantity,
+    price:    portfolioTransactions.price,
+    fees:     portfolioTransactions.fees,
+    amount:   portfolioTransactions.totalAmount,
+  }
+
   routes.get("/:id/transactions", async (c) => {
     const identity = c.get("userIdentity")
     const database = getDb()!
@@ -1031,16 +1042,12 @@ export function createTransactionRoutes(db?: DB) {
       eq(portfolioTransactions.userId, identity.id),
       eq(portfolioTransactions.portfolioId, portfolioId),
     ]
-    if (typeFilter) {
-      conditions.push(eq(portfolioTransactions.type, typeFilter.toUpperCase()))
-    }
-    if (positionId) {
-      conditions.push(eq(portfolioTransactions.positionId, positionId))
-    }
+    if (typeFilter) conditions.push(eq(portfolioTransactions.type, typeFilter.toUpperCase()))
+    if (positionId) conditions.push(eq(portfolioTransactions.positionId, positionId))
 
-    const sortCol = TX_SORT_FIELDS[sortBy] ?? "executedAt"
-    const sortFn = sortOrder === "asc" ? asc : desc
-    const sortExpr = sql`${sql.raw(`"${sortCol}"`)}`
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const sortColExpr = (TX_SORT_COLS[sortBy] ?? portfolioTransactions.executedAt) as any
+    const sortFn      = sortOrder === "asc" ? asc : desc
 
     const [countRow] = await database
       .select({ count: sql<number>`count(*)::int` })
@@ -1049,15 +1056,24 @@ export function createTransactionRoutes(db?: DB) {
 
     const total = countRow?.count ?? 0
 
+    // LEFT JOIN positions to coalesce sector/country from the live profile
+    // snapshot when the transaction row has them as null (they are only set
+    // at write time if the caller supplies them; the profile refresh only
+    // updates the position row, not old transaction rows).
     const rows = await database
-      .select()
+      .select({ tx: portfolioTransactions, pos: positions })
       .from(portfolioTransactions)
+      .leftJoin(positions, eq(portfolioTransactions.positionId, positions.id))
       .where(and(...conditions))
-      .orderBy(sortFn(sortExpr))
+      .orderBy(sortFn(sortColExpr))
       .limit(limit)
       .offset(offset)
 
-    const items = rows.map(serializeTx)
+    const items = rows.map(({ tx, pos }) => ({
+      ...serializeTx(tx),
+      sector:  tx.sector  ?? pos?.sector  ?? null,
+      country: tx.country ?? pos?.country ?? null,
+    }))
 
     return c.json({ items, total, page, limit })
   })
@@ -1525,9 +1541,11 @@ export function createCrossPortfolioTransactionsRoute(db?: DB) {
       .select({
         tx: portfolioTransactions,
         portfolioName: portfolios.name,
+        positionRow: positions,
       })
       .from(portfolioTransactions)
       .leftJoin(portfolios, eq(portfolioTransactions.portfolioId, portfolios.id))
+      .leftJoin(positions, eq(portfolioTransactions.positionId, positions.id))
       .where(sql`${portfolioTransactions.userId} = ${identity.id}`)
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       .orderBy(sortFn(sortColumn as any))
@@ -1535,7 +1553,12 @@ export function createCrossPortfolioTransactionsRoute(db?: DB) {
       .offset(offset)
 
     return c.json({
-      items: rows.map((r) => ({ ...serializeTx(r.tx), portfolioName: r.portfolioName ?? "" })),
+      items: rows.map((r) => ({
+        ...serializeTx(r.tx),
+        portfolioName: r.portfolioName ?? "",
+        sector:  r.tx.sector  ?? r.positionRow?.sector  ?? null,
+        country: r.tx.country ?? r.positionRow?.country ?? null,
+      })),
       total,
       page,
       limit,
