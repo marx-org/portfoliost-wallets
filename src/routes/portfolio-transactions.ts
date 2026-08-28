@@ -2,7 +2,7 @@ import { Hono, type Context } from "hono"
 import { and, eq, sql, asc, desc } from "drizzle-orm"
 import { z } from "zod"
 import { userIdentityMiddleware } from "../auth.js"
-import { type DB } from "../db/index.js"
+import { getDb as resolveDb, type DB } from "../db/index.js"
 import {
   portfolios,
   positions,
@@ -446,7 +446,7 @@ export function createTransactionRoutes(db?: DB) {
   const routes = new Hono()
   routes.use("*", userIdentityMiddleware)
 
-  const getDb = () => db
+  const getDb = () => db ?? resolveDb()
 
   // POST /:id/transactions — create BUY / SELL / DIVIDEND
   routes.post("/:id/transactions", async (c) => {
@@ -1461,7 +1461,7 @@ function serializeTx(r: typeof portfolioTransactions.$inferSelect) {
 export function createCrossPortfolioTransactionsRoute(db?: DB) {
   const routes = new Hono()
   routes.use("*", userIdentityMiddleware)
-  const getDb = () => db
+  const getDb = () => db ?? resolveDb()
 
   routes.get("/", async (c) => {
     const identity = c.get("userIdentity")
