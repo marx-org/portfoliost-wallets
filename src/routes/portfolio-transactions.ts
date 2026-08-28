@@ -10,7 +10,8 @@ import {
   walletTransactions,
   wallets,
 } from "../db/schema.js"
-import { resolveFeeFx } from "../services/fee-fx.js"
+import { resolveFeeFx, latestRates } from "../services/fee-fx.js"
+import { convert } from "@marx2/contracts/fx"
 import { refreshQuotes } from "../services/quotes.js"
 
 const scale8 = (n: number) => n.toFixed(8)
@@ -378,12 +379,27 @@ function positionWire(
   p: PositionRow,
   portfolio: { id: string; baseCurrency: string },
   totalValue: number,
+  fxTable?: Record<string, number> | null,
 ) {
-  const avg = Number(p.averageCostBasis)
-  const qty = Number(p.quantity)
+  const avg   = Number(p.averageCostBasis)
+  const qty   = Number(p.quantity)
   const price = p.currentPrice != null ? Number(p.currentPrice) : null
-  const mv = p.marketValue != null ? Number(p.marketValue) : price != null ? price * qty : null
-  const pct = price != null && avg > 0 ? ((price - avg) / avg) * 100 : null
+  const mv    = p.marketValue   != null ? Number(p.marketValue)  : price != null ? price * qty : null
+  const ugl   = p.unrealizedGainLoss != null ? Number(p.unrealizedGainLoss) : null
+  const pct   = price != null && avg > 0 ? ((price - avg) / avg) * 100 : null
+
+  // Instrument native currency (e.g. PLN for KRU.WA)
+  const instrCcy = p.instrumentCurrency ?? portfolio.baseCurrency
+
+  // Convert native → displayCurrency using latest FX table (current rate for all fields)
+  function toDisplay(nativeValue: number | null): number | null {
+    if (nativeValue == null) return null
+    if (instrCcy === portfolio.baseCurrency) return nativeValue
+    if (!fxTable) return null
+    const rate = convert(1, instrCcy, portfolio.baseCurrency, fxTable)
+    return rate != null ? round2(nativeValue * rate) : null
+  }
+
   return {
     id: p.id,
     portfolioId: portfolio.id,
@@ -396,10 +412,17 @@ function positionWire(
     strikePrice: p.strikePrice != null ? Number(p.strikePrice) : null,
     expirationDate: p.expirationDate,
     purchaseCurrency: p.purchaseCurrency,
-    instrumentCurrency: p.instrumentCurrency,
+    instrumentCurrency: instrCcy,
     quantity: qty,
-    averageCostBasis: avg,
-    totalCostBasis: avg * qty,
+    // native (instrument currency) cost basis — historical approximation via current FX
+    averageCostBasis:    avg,
+    totalCostBasis:      round2(avg * qty),
+    // converted to displayCurrency
+    convertedAverageCostBasis:  toDisplay(avg),
+    convertedTotalCostBasis:    toDisplay(avg * qty),
+    convertedCurrentPrice:      toDisplay(price),
+    convertedMarketValue:       toDisplay(mv),
+    convertedUnrealizedGainLoss: toDisplay(ugl),
     realizedGainLoss: 0,
     sector: p.sector,
     industry: p.industry,
@@ -411,7 +434,7 @@ function positionWire(
     priceSource: p.priceSource,
     priceAsOf: p.priceAsOf,
     marketValue: mv,
-    unrealizedGainLoss: p.unrealizedGainLoss != null ? Number(p.unrealizedGainLoss) : null,
+    unrealizedGainLoss: ugl,
     percentageChange: pct != null ? round2(pct) : null,
     percentOfPortfolio: mv != null && totalValue > 0 ? round2((mv / totalValue) * 100) : null,
     dayChange: p.dayChange != null ? Number(p.dayChange) : null,
@@ -886,7 +909,8 @@ export function createTransactionRoutes(db?: DB) {
     if (!updated) return c.json({ error: "NotFound", message: "Position not found" }, 404)
 
     const totalValue = await openPositionsValue(database, identity.id, portfolioId)
-    return c.json(positionWire(updated, portfolio, totalValue))
+    const fxTable = await latestRates(database)
+    return c.json(positionWire(updated, portfolio, totalValue, fxTable))
   })
 
   // DELETE /:id/positions/:positionId — remove position + its transactions
@@ -972,7 +996,7 @@ export function createTransactionRoutes(db?: DB) {
       await recomputePortfolioTotals(tx, identity.id, portfolioId)
     })
 
-    return c.json(positionWire(closed, portfolio, 0))
+    return c.json(positionWire(closed, portfolio, 0, await latestRates(database)))
   })
 
   // ── D1: GET /:id/transactions — paginated with filters + sorting ─────
@@ -1249,8 +1273,9 @@ export function createTransactionRoutes(db?: DB) {
       .from(positions)
       .where(eq(positions.id, result.position.id))
     const totalValue = await openPositionsValue(database, identity.id, portfolioId)
+    const fxTable = await latestRates(database)
 
-    return c.json(positionWire(fresh, portfolio, totalValue), 201)
+    return c.json(positionWire(fresh, portfolio, totalValue, fxTable), 201)
   })
 
   // ── E1: GET /:id/positions — full position list (example-service wire shape) ──
@@ -1276,8 +1301,9 @@ export function createTransactionRoutes(db?: DB) {
       )
 
     const totalValue = await openPositionsValue(database, identity.id, portfolioId)
+    const fxTable = await latestRates(database)
 
-    return c.json(posRows.map((p) => positionWire(p, portfolio, totalValue)))
+    return c.json(posRows.map((p) => positionWire(p, portfolio, totalValue, fxTable)))
   })
 
   // ── E3: GET /:id/allocation — sector/asset/currency breakdown ────────
