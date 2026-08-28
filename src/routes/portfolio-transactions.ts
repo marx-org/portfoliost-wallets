@@ -1443,6 +1443,8 @@ function serializeTx(r: typeof portfolioTransactions.$inferSelect) {
     totalAmount: Number(r.totalAmount),
     currency: r.currency,
     instrumentCurrency: r.instrumentCurrency,
+    displayCurrency: r.displayCurrency ?? r.currency,
+    priceCurrency: r.currency,
     assetType: r.assetType,
     exchangeRate: Number(r.exchangeRate),
     rateSource: r.rateSource,
@@ -1473,9 +1475,6 @@ export function createCrossPortfolioTransactionsRoute(db?: DB) {
     const sortBy = c.req.query("sortBy") ?? "date"
     const sortOrder = (c.req.query("sortOrder") ?? "desc").toLowerCase() === "asc" ? "asc" : "desc"
 
-    const sortCol = PORTFOLIO_TX_SORT[sortBy] ?? "executed_at"
-    const sortDir = sortOrder === "asc" ? sql`ASC` : sql`DESC`
-
     const [countRow] = await database
       .select({ count: sql<number>`count(*)::int` })
       .from(portfolioTransactions)
@@ -1483,15 +1482,38 @@ export function createCrossPortfolioTransactionsRoute(db?: DB) {
 
     const total = countRow?.count ?? 0
 
+    // Map sort key to the actual Drizzle column on portfolioTransactions
+    const SORT_COL_MAP: Record<string, unknown> = {
+      symbol: portfolioTransactions.instrumentSymbol,
+      date: portfolioTransactions.executedAt,
+      type: portfolioTransactions.type,
+      quantity: portfolioTransactions.quantity,
+      price: portfolioTransactions.price,
+      fees: portfolioTransactions.fees,
+      amount: portfolioTransactions.totalAmount,
+    }
+    const sortColumn = SORT_COL_MAP[sortBy] ?? portfolioTransactions.executedAt
+    const sortFn = sortOrder === "asc" ? asc : desc
+
     const rows = await database
-      .select()
+      .select({
+        tx: portfolioTransactions,
+        portfolioName: portfolios.name,
+      })
       .from(portfolioTransactions)
+      .leftJoin(portfolios, eq(portfolioTransactions.portfolioId, portfolios.id))
       .where(sql`${portfolioTransactions.userId} = ${identity.id}`)
-      .orderBy(sql`${sql.raw(`"${sortCol}"`)} ${sortDir}`)
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      .orderBy(sortFn(sortColumn as any))
       .limit(limit)
       .offset(offset)
 
-    return c.json({ items: rows.map(serializeTx), total, page, limit })
+    return c.json({
+      items: rows.map((r) => ({ ...serializeTx(r.tx), portfolioName: r.portfolioName ?? "" })),
+      total,
+      page,
+      limit,
+    })
   })
 
   return routes
