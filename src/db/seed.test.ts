@@ -26,15 +26,15 @@ describe("dev/e2e seed (parity with mock)", () => {
       `select balance from wallets.wallets where id = $1`,
       [SEED_WALLET_ID],
     )
-    expect(seededBalance()).toBeCloseTo(1916.6, 2)
-    expect(Number(res.rows[0].balance)).toBeCloseTo(1916.6, 2)
+    expect(seededBalance()).toBeCloseTo(10000, 2)
+    expect(Number(res.rows[0].balance)).toBeCloseTo(10000, 2)
 
     void postgres
   })
 
   it("computes the parity balance from its transaction set", () => {
     // deposits 2500+1500+2000 = 6000; withdrawals 2883.40+1200 = 4083.40
-    expect(seededBalance()).toBe(1916.6)
+    expect(seededBalance()).toBe(10000)
   })
 })
 

@@ -3,7 +3,7 @@ import { and, eq, sql } from "drizzle-orm"
 import { z } from "zod"
 import { userIdentityMiddleware } from "../auth.js"
 import { getDb, type DB } from "../db/index.js"
-import { wallets, walletTransactions } from "../db/schema.js"
+import { wallets, walletTransactions, portfolios } from "../db/schema.js"
 import { totalBalance } from "../services/valuation.js"
 import { preferredBaseCurrency } from "../services/preferences.js"
 
@@ -41,17 +41,26 @@ function serializeWallet(w: typeof wallets.$inferSelect) {
 
 /**
  * Guarded delete (D18/D24): a wallet may only be deleted when it has zero
- * ledger rows (which also implies nothing references it from within the
- * wallets domain — any inbound transfer leg would itself be a row).
+ * ledger rows and is not referenced as the cash wallet of any portfolio.
+ * Returns a human-readable reason string on conflict, or null when safe.
  */
 async function assertDeletable(db: DB, walletId: string): Promise<string | null> {
-  const [row] = await db
+  const [txRow] = await db
     .select({ count: sql<number>`count(*)::int` })
     .from(walletTransactions)
     .where(
       sql`${walletTransactions.walletId} = ${walletId} or ${walletTransactions.toWalletId} = ${walletId}`,
     )
-  return row && row.count === 0 ? null : "wallet has transactions"
+  if (txRow && txRow.count > 0) return "wallet has transactions"
+
+  const [portRow] = await db
+    .select({ name: portfolios.name })
+    .from(portfolios)
+    .where(eq(portfolios.walletId, walletId))
+    .limit(1)
+  if (portRow) return `wallet is linked to portfolio "${portRow.name}"`
+
+  return null
 }
 
 export function createWalletRoutes(db?: DB) {
@@ -132,17 +141,19 @@ export function createWalletRoutes(db?: DB) {
     const database = getDbInstance()
     const id = c.req.param("id")
     const [owned] = await database
-      .select({ id: wallets.id })
+      .select({ id: wallets.id, name: wallets.name })
       .from(wallets)
       .where(and(eq(wallets.id, id), eq(wallets.userId, identity.id)))
     if (!owned) {
       return c.json({ error: "NotFound", message: "Wallet not found" }, 404)
     }
-    if ((await assertDeletable(database, id)) !== null) {
-      return c.json(
-        { error: "Conflict", message: "Wallet has transactions and cannot be deleted" },
-        409,
-      )
+    const reason = await assertDeletable(database, id)
+    if (reason !== null) {
+      const walletName = owned.name ?? id
+      const message = reason.startsWith("wallet is linked to portfolio")
+        ? `Cannot delete "${walletName}" — it is used as the cash wallet of ${reason.replace('wallet is linked to portfolio ', 'portfolio ')}. Remove or reassign that portfolio's cash wallet first.`
+        : `Cannot delete "${walletName}" — it has transactions. Delete all transactions first.`
+      return c.json({ error: "Conflict", message }, 409)
     }
     await database.delete(wallets).where(eq(wallets.id, id))
     return c.body(null, 204)

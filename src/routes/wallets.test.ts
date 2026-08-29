@@ -3,7 +3,7 @@ import { Hono } from "hono"
 import { eq } from "drizzle-orm"
 import { createWalletRoutes } from "./wallets.js"
 import { makeHarness } from "./test-utils.js"
-import { wallets, walletTransactions } from "../db/schema.js"
+import { wallets, walletTransactions, portfolios } from "../db/schema.js"
 
 async function boot() {
   const h = await makeHarness()
@@ -136,5 +136,27 @@ describe("DELETE /api/wallets/:id — guarded delete (D18/D24)", () => {
         })
       ).status,
     ).toBe(404)
+  })
+
+  it("409 with portfolio-name message when wallet is the cash wallet of a portfolio", async () => {
+    const h = await boot()
+    const [w] = await h.db
+      .insert(wallets)
+      .values({ userId: "user-1", name: "My Cash Wallet", currency: "USD" })
+      .returning()
+    await h.db.insert(portfolios).values({
+      userId: "user-1",
+      name: "My Portfolio",
+      currency: "USD",
+      walletId: w.id,
+    })
+    const res = await h.app.request(`/api/wallets/${w.id}`, {
+      method: "DELETE",
+      headers: h.headers,
+    })
+    expect(res.status).toBe(409)
+    const body = await res.json()
+    expect(body.message).toMatch(/My Cash Wallet/)
+    expect(body.message).toMatch(/My Portfolio/)
   })
 })

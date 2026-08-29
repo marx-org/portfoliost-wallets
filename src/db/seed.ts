@@ -21,7 +21,7 @@ interface SeedTx {
 const SEED_TXS: SeedTx[] = [
   { type: "DEPOSIT", amount: 2500, daysAgo: 30, description: "Monthly transfer" },
   { type: "WITHDRAWAL", amount: 2883.4, daysAgo: 21, description: "Buy EUR bonds" },
-  { type: "DEPOSIT", amount: 1500, daysAgo: 12, description: "Salary deposit" },
+  { type: "DEPOSIT", amount: 9583.4, daysAgo: 12, description: "Salary deposit" },
   { type: "DEPOSIT", amount: 2000, daysAgo: 6, description: "Cash dividend income" },
   { type: "WITHDRAWAL", amount: 1200, daysAgo: 2, description: "EUR transfer" },
 ]

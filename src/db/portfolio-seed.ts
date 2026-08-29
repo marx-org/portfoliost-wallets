@@ -13,6 +13,28 @@ import { SEED_USER_ID, SEED_WALLET_ID } from "./seed.js"
 
 export const SEED_PORTFOLIO_ID = "3cb589d8-f92d-428f-aeab-9ee5d4b9cef2"
 
+// Mirrors the mock's single seeded share for "Top10" (mocks/shared/data/raw/portfolios_shares.json)
+// so the settings "shared portfolios" screen and the public share link stay in parity.
+export const SEED_SHARE_ID = "bff18fe0-bbb9-475f-b636-b3bd68a57d08"
+
+const SEED_SHARE_PRIVACY = JSON.stringify({
+  benchmarks: ["SPY"],
+  showValues: true,
+  displayName: "",
+  showHoldings: true,
+  showPositions: true,
+  positionsToHide: [],
+  showMonthlyReturns: true,
+  showAssetAllocation: true,
+  showPerformanceChart: true,
+  showPositionAllocation: true,
+  showSectorDistribution: true,
+  showTransactionHistory: true,
+  showGeographicBreakdown: true,
+  showIndustryDistribution: true,
+  performanceChartReturnType: "twr",
+})
+
 interface SeedPosition {
   id: string
   symbol: string
@@ -95,6 +117,16 @@ export async function seedPortfolios(dbUrl: string): Promise<boolean> {
            ${"GROWTH"}, ${"regular"}, ${"USD"}, ${"USD"}, ${SEED_WALLET_ID},
            ${totalInvested.toFixed(8)}, ${totalInvested.toFixed(8)},
            false, false, ${"0.5000"}, ${"0.2500"}, ${createdAt}, ${updatedAt})
+      `
+
+      // Shared link (parity with the mock's seeded share for Top10)
+      await tx`
+        insert into portfolios.shares
+          (id, user_id, portfolio_id, display_name, view_count, expires_at,
+           privacy_settings, created_at, updated_at)
+        values
+          (${SEED_SHARE_ID}, ${SEED_USER_ID}, ${SEED_PORTFOLIO_ID}, ${""}, ${0}, ${null},
+           ${SEED_SHARE_PRIVACY}::jsonb, ${createdAt}, ${updatedAt})
       `
 
       // Positions
