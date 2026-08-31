@@ -12,6 +12,7 @@
     "db:migrate": "drizzle-kit migrate",
     "db:seed": "node seed/run.mjs",
     "gen:openapi": "tsx src/gen-openapi.ts",
+    "gen:types": "openapi-typescript node_modules/@marx2/contracts/openapi.yaml -o src/generated/api-types.d.ts",
     "fx:sync": "tsx src/scripts/fx-sync.ts"
   },
   "dependencies": {
@@ -29,6 +30,7 @@
     "@electric-sql/pglite": "^0.3.14",
     "@types/node": "^22.0.0",
     "drizzle-kit": "^0.31.10",
+    "openapi-typescript": "^7.13.0",
     "tsx": "^4.19.0",
     "typescript": "^5.7.0",
     "vitest": "^3.1.0"

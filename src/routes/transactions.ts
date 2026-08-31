@@ -5,6 +5,9 @@ import { userIdentityMiddleware } from "../auth.js"
 import { getDb, type DB } from "../db/index.js"
 import { wallets, walletTransactions } from "../db/schema.js"
 import { settleFee } from "@marx2/contracts/fx"
+import type { components } from "../generated/api-types.js"
+
+type CashTransaction = components["schemas"]["CashTransaction"]
 
 const EDITABLE_TYPES = ["DEPOSIT", "WITHDRAWAL", "ADJUSTMENT"] as const
 
@@ -162,7 +165,7 @@ export function createTransactionRoutes(db?: DB) {
       return updatedRow
     })
 
-    return c.json({ ...serializeTx(updated) })
+    return c.json({ ...serializeTx(updated) } satisfies CashTransaction)
   })
 
   routes.delete("/:txId", async (c: Context) => {

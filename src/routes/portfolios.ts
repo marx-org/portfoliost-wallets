@@ -13,6 +13,12 @@ import {
 import { preferredBaseCurrency } from "../services/preferences.js"
 import { refreshQuotes } from "../services/quotes.js"
 import { createTransactionRoutes } from "./portfolio-transactions.js"
+import type { components } from "../generated/api-types.js"
+
+type Portfolio = components["schemas"]["Portfolio"]
+type PortfolioTotalMetrics = components["schemas"]["PortfolioTotalMetrics"]
+type HeldStocks = components["schemas"]["HeldStocks"]
+type PortfolioSummaryMetrics = components["schemas"]["PortfolioSummaryMetrics"]
 
 const ISO_CURRENCY = /^[A-Za-z]{3}$/
 
@@ -57,7 +63,7 @@ function serializePortfolio(p: typeof portfolios.$inferSelect) {
     type: p.type,
     currency: p.currency,
     baseCurrency: p.baseCurrency,
-    walletId: p.walletId,
+    walletId: p.walletId ?? "",
     totalInvested: Number(p.totalInvested),
     currentValue: Number(p.currentValue),
     isPublic: p.isPublic,
@@ -219,25 +225,26 @@ export function createPortfolioRoutes(db?: DB) {
 
         const currentValue = Number(posAgg.totalMarketValue || 0)
         const gainLoss = currentValue - totalInvested
+        const returnPct = totalInvested > 0 ? (gainLoss / totalInvested) * 100 : 0
         return {
-          portfolioId: p.id,
-          portfolioName: p.name,
-          originalCurrency: p.currency,
-          originalValue: Math.round(currentValue * 100) / 100,
-          originalInvested: Math.round(totalInvested * 100) / 100,
-          originalGainLoss: Math.round(gainLoss * 100) / 100,
-          convertedValue: Math.round(currentValue * 100) / 100,
-          convertedInvested: Math.round(totalInvested * 100) / 100,
-          convertedGainLoss: Math.round(gainLoss * 100) / 100,
-          exchangeRate: 1,
+          id: p.id,
+          name: p.name,
+          totalValue: Math.round(currentValue * 100) / 100,
+          totalInvested: Math.round(totalInvested * 100) / 100,
+          returnPercentage: Math.round(returnPct * 100) / 100,
+          weight: 0, // filled in after totals computed
         }
       }),
     )
 
-    const totalValue = portfolioBreakdown.reduce((s, p) => s + p.originalValue, 0)
-    const totalInvested = portfolioBreakdown.reduce((s, p) => s + p.originalInvested, 0)
+    const totalValue = portfolioBreakdown.reduce((s, p) => s + p.totalValue, 0)
+    const totalInvested = portfolioBreakdown.reduce((s, p) => s + p.totalInvested, 0)
     const totalGainLoss = totalValue - totalInvested
     const returnPercentage = totalInvested > 0 ? (totalGainLoss / totalInvested) * 100 : 0
+    // back-fill weights now that totalValue is known
+    for (const p of portfolioBreakdown) {
+      p.weight = totalValue > 0 ? Math.round((p.totalValue / totalValue) * 10000) / 100 : 0
+    }
 
     return c.json({
       totalValue,
@@ -252,7 +259,7 @@ export function createPortfolioRoutes(db?: DB) {
       externalCapitalBasisSource: "none",
       externalCapitalSuppressedReason: null,
       externalCapitalReturnBasisKind: "inception",
-    })
+    } satisfies PortfolioTotalMetrics)
   })
 
   // ── G1: GET /held-stocks — aggregated open position view ─────────────
@@ -316,7 +323,7 @@ export function createPortfolioRoutes(db?: DB) {
       }))
       .sort((a, b) => b.totalValue - a.totalValue)
 
-    return c.json({ stocks, totalCount: stocks.length })
+    return c.json({ stocks, totalCount: stocks.length } satisfies HeldStocks)
   })
 
   // ── G3: Shares CRUD ──────────────────────────────────────────────────
@@ -480,7 +487,7 @@ export function createPortfolioRoutes(db?: DB) {
       })
       .returning()
 
-    return c.json(serializePortfolio(created), 201)
+    return c.json(serializePortfolio(created) satisfies Portfolio, 201)
   })
 
   // GET /api/portfolios/:id — detail with metrics
@@ -597,7 +604,7 @@ export function createPortfolioRoutes(db?: DB) {
       .where(sql`${portfolios.id} = ${id}`)
       .returning()
 
-    return c.json(serializePortfolio(updated))
+    return c.json(serializePortfolio(updated) satisfies Portfolio)
   })
 
   // DELETE /api/portfolios/:id — guarded (D59): 409 while tx or open positions exist

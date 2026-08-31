@@ -1207,7 +1207,7 @@ describe("Aggregates & metrics (§15 Phase G)", () => {
     expect(body.totalValue).toBeGreaterThan(0)
     expect(body.totalInvested).toBeGreaterThan(0)
     expect(body.portfolioBreakdown.length).toBe(1)
-    expect(body.portfolioBreakdown[0].portfolioName).toBe("P1")
+    expect(body.portfolioBreakdown[0].name).toBe("P1")
   })
 
   it("GET /held-stocks — open positions grouped by symbol", async () => {

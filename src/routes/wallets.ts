@@ -6,6 +6,10 @@ import { getDb, type DB } from "../db/index.js"
 import { wallets, walletTransactions, portfolios } from "../db/schema.js"
 import { totalBalance } from "../services/valuation.js"
 import { preferredBaseCurrency } from "../services/preferences.js"
+import type { components } from "../generated/api-types.js"
+
+type CashWallet = components["schemas"]["CashWallet"]
+type WalletsTotalBalance = components["schemas"]["WalletsTotalBalance"]
 
 export const ISO_CURRENCY = /^[A-Za-z]{3}$/
 
@@ -93,14 +97,14 @@ export function createWalletRoutes(db?: DB) {
         baseCurrency: defaultBase.toUpperCase(),
       })
       .returning()
-    return c.json(serializeWallet(created), 201)
+    return c.json(serializeWallet(created) satisfies CashWallet, 201)
   })
 
   routes.get("/", async (c) => {
     const identity = c.get("userIdentity")
     const database = getDbInstance()
     const rows = await database.select().from(wallets).where(eq(wallets.userId, identity.id))
-    return c.json(rows.map(serializeWallet))
+    return c.json(rows.map(serializeWallet) satisfies CashWallet[])
   })
 
   // NOTE: registered before Hono sees "/:id" — static wins in the router
@@ -108,7 +112,7 @@ export function createWalletRoutes(db?: DB) {
     const identity = c.get("userIdentity")
     const database = getDbInstance()
     const base = (c.req.query("baseCurrency") ?? "USD").toUpperCase()
-    return c.json(await totalBalance(database, identity.id, base))
+    return c.json(await totalBalance(database, identity.id, base) satisfies WalletsTotalBalance)
   })
 
   routes.patch("/:id", async (c) => {
@@ -133,7 +137,7 @@ export function createWalletRoutes(db?: DB) {
     if (!updated) {
       return c.json({ error: "NotFound", message: "Wallet not found" }, 404)
     }
-    return c.json(serializeWallet(updated))
+    return c.json(serializeWallet(updated) satisfies CashWallet)
   })
 
   routes.delete("/:id", async (c) => {

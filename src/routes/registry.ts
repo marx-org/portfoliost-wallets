@@ -5,6 +5,9 @@ import { crossRate } from "@marx2/contracts/fx"
 import { userIdentityMiddleware } from "../auth.js"
 import { getDb, type DB } from "../db/index.js"
 import { fxRates } from "../db/schema.js"
+import type { components } from "../generated/api-types.js"
+
+type CurrenciesResponse = components["schemas"]["CurrenciesResponse"]
 
 /**
  * Available-currencies registry (fees-and-custom-fx D26): availability SoT is
@@ -81,7 +84,7 @@ export function createRegistryRoutes(db?: DB) {
   const getDbInstance = () => db ?? getDb()
 
   routes.get("/currencies", async (c) => {
-    return c.json(await currenciesPayload(getDbInstance()))
+    return c.json(await currenciesPayload(getDbInstance()) satisfies CurrenciesResponse)
   })
 
   // SPA-facing resolved rate (fees-and-custom-fx D28/D30 UI): automatic value
