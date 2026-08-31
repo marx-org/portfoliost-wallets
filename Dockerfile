@@ -8,7 +8,7 @@ ENV APP_VERSION=${APP_VERSION}
 
 COPY package.json package-lock.json .npmrc ./
 ARG NODE_AUTH_TOKEN=""
-RUN NPM_CONFIG_//npm.pkg.github.com/:_authToken="${NODE_AUTH_TOKEN}" npm ci
+RUN sed -i "s|\${NODE_AUTH_TOKEN}|${NODE_AUTH_TOKEN}|g" .npmrc && npm ci && rm .npmrc
 
 COPY tsconfig.json ./
 COPY drizzle.config.ts ./
