@@ -335,3 +335,20 @@ export const valueSnapshots = portfoliosSchema.table(
     index("idx_snapshots_portfolio_date").on(t.portfolioId, t.snapshotDate),
   ],
 )
+
+/**
+ * Tracks the historical backfill status per portfolio (H6). A single row per
+ * portfolio; upserted when backfill starts/completes/fails.
+ */
+export const portfolioBackfillMetadata = portfoliosSchema.table(
+  "portfolio_backfill_metadata",
+  {
+    portfolioId: uuid("portfolio_id")
+      .primaryKey()
+      .references(() => portfolios.id, { onDelete: "cascade" }),
+    status: text("status").notNull().default("pending"), // 'pending'|'complete'|'failed'
+    startedAt: timestamp("started_at", { withTimezone: true }),
+    completedAt: timestamp("completed_at", { withTimezone: true }),
+    errorMessage: text("error_message"),
+  },
+)

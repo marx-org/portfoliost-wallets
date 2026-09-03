@@ -1,5 +1,5 @@
 import { Hono } from "hono"
-import { and, eq, sql, count as drizzleCount } from "drizzle-orm"
+import { and, asc, count as drizzleCount, eq, sql } from "drizzle-orm"
 import { z } from "zod"
 import { userIdentityMiddleware } from "../auth.js"
 import { getDb, type DB } from "../db/index.js"
@@ -8,10 +8,12 @@ import {
   positions,
   portfolioTransactions,
   shares,
+  valueSnapshots,
   wallets,
 } from "../db/schema.js"
 import { preferredBaseCurrency } from "../services/preferences.js"
 import { refreshQuotes } from "../services/quotes.js"
+import { runBackfill, getBackfillStatus } from "../services/backfill.js"
 import { createTransactionRoutes } from "./portfolio-transactions.js"
 import type { components } from "../generated/api-types.js"
 
@@ -121,6 +123,41 @@ async function computeMetrics(db: DB, portfolioId: string) {
     externalCapitalSuppressedReason: null,
     externalCapitalReturnBasisKind: "inception",
   }
+}
+
+// ── Analytics helpers ───────────────────────────────────────────────────
+
+/** Returns the ISO date cutoff for a timeframe query, or null for ALL. */
+function timeframeCutoff(timeframe: string): string | null {
+  const now = new Date()
+  const months: Record<string, number> = { "6M": 6, "1Y": 12, "2Y": 24 }
+  const m = months[timeframe.toUpperCase()]
+  if (!m) return null
+  const d = new Date(now)
+  d.setUTCMonth(d.getUTCMonth() - m)
+  return d.toISOString().slice(0, 10)
+}
+
+/** Group daily values by YYYY-MM; return monthly return % per month. */
+function buildMonthlyReturns(
+  series: Array<{ date: string; value: number }>,
+): Array<{ month: string; returnPercent: number }> {
+  const byMonth = new Map<string, { first: number; last: number }>()
+  for (const { date, value } of series) {
+    const month = date.slice(0, 7)
+    const cur = byMonth.get(month)
+    if (!cur) {
+      byMonth.set(month, { first: value, last: value })
+    } else {
+      cur.last = value
+    }
+  }
+  return [...byMonth.entries()]
+    .sort(([a], [b]) => a.localeCompare(b))
+    .map(([month, { first, last }]) => ({
+      month,
+      returnPercent: first > 0 ? ((last / first - 1) * 100) : 0,
+    }))
 }
 
 // ── Routes ─────────────────────────────────────────────────────────────
@@ -721,10 +758,65 @@ export function createPortfolioRoutes(db?: DB) {
     })
   })
 
-  routes.get("/:id/analytics", (c) => {
+  routes.get("/:id/analytics", async (c) => {
+    const identity = c.get("userIdentity")
+    const id = c.req.param("id")
+    const timeframe = c.req.query("timeframe") || "1Y"
+    const database = getDb()
+
+    // Verify portfolio belongs to user
+    const [pf] = await database
+      .select({ id: portfolios.id })
+      .from(portfolios)
+      .where(and(eq(portfolios.id, id), eq(portfolios.userId, identity.id)))
+      .limit(1)
+    if (!pf) return c.json({ error: "NotFound" }, 404)
+
+    // Check how many snapshot rows exist
+    const [{ n }] = await database
+      .select({ n: drizzleCount() })
+      .from(valueSnapshots)
+      .where(eq(valueSnapshots.portfolioId, id))
+
+    if (n < 2) {
+      const status = await getBackfillStatus(database, id)
+      if (status !== "pending") {
+        // Trigger backfill fire-and-forget
+        void runBackfill(database, id, c.req.header("Authorization") ?? "").catch(() => undefined)
+      }
+      return c.json({
+        timeframe,
+        backfillStatus: "pending",
+        performance: { timeSeries: [], totalValue: 0, totalInvested: 0, totalReturn: 0, totalReturnPercent: 0, monthlyReturns: [] },
+        benchmarks: [],
+      })
+    }
+
+    // Filter by timeframe
+    const cutoff = timeframeCutoff(timeframe)
+    const rows = await database
+      .select({ snapshotDate: valueSnapshots.snapshotDate, value: valueSnapshots.value, invested: valueSnapshots.invested })
+      .from(valueSnapshots)
+      .where(cutoff
+        ? and(eq(valueSnapshots.portfolioId, id), sql`${valueSnapshots.snapshotDate} >= ${cutoff}`)
+        : eq(valueSnapshots.portfolioId, id))
+      .orderBy(asc(valueSnapshots.snapshotDate))
+
+    const timeSeries = rows.map((r) => ({ date: r.snapshotDate, value: Number(r.value) }))
+    const lastRow = rows[rows.length - 1]
+    const firstRow = rows[0]
+    const totalValue = Number(lastRow?.value ?? 0)
+    const totalInvested = Number(lastRow?.invested ?? 0)
+    const totalReturn = totalValue - totalInvested
+    const totalReturnPercent = totalInvested > 0 ? (totalReturn / totalInvested) * 100 : 0
+
+    // Monthly returns: group by YYYY-MM, (last_value / first_value - 1) × 100
+    const monthlyReturns = buildMonthlyReturns(rows.map((r) => ({ date: r.snapshotDate, value: Number(r.value) })))
+
     return c.json({
-      timeframe: c.req.query("timeframe") || "1Y",
-      performance: [],
+      timeframe,
+      backfillStatus: "complete",
+      performance: { timeSeries, totalValue, totalInvested, totalReturn, totalReturnPercent, monthlyReturns },
       benchmarks: [],
     })
   })
