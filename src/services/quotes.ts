@@ -7,9 +7,11 @@
  * stored profile fields kept as-is.
  */
 
-import { and, eq } from "drizzle-orm"
+import { and, eq, sql } from "drizzle-orm"
+import { convert } from "@marx2/contracts/fx"
 import type { DB } from "../db/index.js"
-import { positions } from "../db/schema.js"
+import { positions, portfolios, valueSnapshots } from "../db/schema.js"
+import { latestRates } from "./fee-fx.js"
 
 // ── Types ─────────────────────────────────────────────────────────────────
 
@@ -180,8 +182,10 @@ export async function refreshQuotes(
     ...[...symbolsForProfile].map((sym) => fetchProfile(sym, authToken)),
   ])
 
-  // Persist snapshots for each position
+  // Persist snapshots for each position; accumulate live values for H5 snapshot
   const now = new Date()
+  const liveValues: Array<{ marketValue: string; averageCostBasis: string; quantity: string; instrumentCurrency: string | null }> = []
+
   await Promise.all(
     rows.map(async (p) => {
       const quote = quoteCache.get(p.symbol)
@@ -207,6 +211,13 @@ export async function refreshQuotes(
         if (Object.keys(update).length > 1 || update.priceSource) {
           await db.update(positions).set(update).where(eq(positions.id, p.id))
         }
+        // use stored marketValue as best-effort for snapshot
+        liveValues.push({
+          marketValue: p.marketValue ?? "0",
+          averageCostBasis: p.averageCostBasis,
+          quantity: p.quantity,
+          instrumentCurrency: p.instrumentCurrency,
+        })
         return
       }
 
@@ -217,6 +228,13 @@ export async function refreshQuotes(
       const ugl = (price - avg) * qty
       const dayChange = quote.change * qty
       const dayChangePct = quote.percentChange
+
+      liveValues.push({
+        marketValue: String(mv),
+        averageCostBasis: p.averageCostBasis,
+        quantity: p.quantity,
+        instrumentCurrency: p.instrumentCurrency,
+      })
 
       await db
         .update(positions)
@@ -234,6 +252,76 @@ export async function refreshQuotes(
         .where(eq(positions.id, p.id))
     }),
   )
+
+  // H5 — snapshot-on-read: upsert today's portfolio value into value_snapshots.
+  // Best-effort: errors are swallowed so they never affect the positions response.
+  void snapshotPortfolioValue(db, portfolioId, liveValues, now).catch(() => undefined)
+}
+
+/**
+ * Compute and upsert a single-day value snapshot for a portfolio.
+ *
+ * portfolioValue = Σ pos.marketValue × fx(instrumentCurrency → baseCurrency)
+ * invested       = Σ (pos.averageCostBasis × pos.quantity) × fx(instrumentCurrency → baseCurrency)
+ *
+ * Falls back to rate=1 when FX table is unavailable or a pair is missing.
+ * Exported for unit testing.
+ */
+export async function snapshotPortfolioValue(
+  db: DB,
+  portfolioId: string,
+  positionRows: Array<{
+    marketValue: string | null
+    averageCostBasis: string
+    quantity: string
+    instrumentCurrency: string | null
+  }>,
+  now = new Date(),
+): Promise<void> {
+  const [portfolio] = await db
+    .select({ baseCurrency: portfolios.baseCurrency })
+    .from(portfolios)
+    .where(eq(portfolios.id, portfolioId))
+    .limit(1)
+  if (!portfolio) return
+
+  const base = portfolio.baseCurrency
+  const fxTable = await latestRates(db)
+
+  const fxRate = (ccy: string | null): number => {
+    const from = (ccy ?? "USD").toUpperCase()
+    if (from === base) return 1
+    if (!fxTable) return 1
+    return convert(1, from, base, fxTable) ?? 1
+  }
+
+  let totalValue = 0
+  let totalInvested = 0
+  for (const p of positionRows) {
+    const rate = fxRate(p.instrumentCurrency)
+    const mv = Number(p.marketValue ?? 0)
+    const cost = Number(p.averageCostBasis) * Number(p.quantity)
+    totalValue += mv * rate
+    totalInvested += cost * rate
+  }
+
+  const snapshotDate = now.toISOString().slice(0, 10)
+  await db
+    .insert(valueSnapshots)
+    .values({
+      portfolioId,
+      snapshotDate,
+      value: totalValue.toFixed(8),
+      invested: totalInvested.toFixed(8),
+      netFlow: "0",
+    })
+    .onConflictDoUpdate({
+      target: [valueSnapshots.portfolioId, valueSnapshots.snapshotDate],
+      set: {
+        value: sql`excluded.value`,
+        invested: sql`excluded.invested`,
+      },
+    })
 }
 
 /** Exposed for testing: flush the in-process caches. */

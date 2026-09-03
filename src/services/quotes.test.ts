@@ -1,8 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import { makeHarness } from "../routes/test-utils.js"
-import { portfolios, positions } from "../db/schema.js"
+import { portfolios, positions, valueSnapshots } from "../db/schema.js"
 import { eq } from "drizzle-orm"
-import { refreshQuotes, _clearQuoteCache } from "./quotes.js"
+import { refreshQuotes, snapshotPortfolioValue, _clearQuoteCache } from "./quotes.js"
 
 // ── helpers ──────────────────────────────────────────────────────────────
 
@@ -172,5 +172,91 @@ describe("refreshQuotes (D58)", () => {
 
     await refreshQuotes(db, user.id, pf.id, "Bearer test-token")
     expect(spy).not.toHaveBeenCalled()
+  })
+})
+
+describe("snapshotPortfolioValue (H5)", () => {
+  afterEach(() => vi.unstubAllGlobals())
+
+  it("upserts a value_snapshots row with correct sums", async () => {
+    const { db, user } = await makeHarness("snap-user-1")
+    const [pf] = await db
+      .insert(portfolios)
+      .values({ userId: user.id, name: "Snap PF", currency: "USD", baseCurrency: "USD" })
+      .returning()
+
+    const posRows = [
+      { marketValue: "1800", averageCostBasis: "150", quantity: "10", instrumentCurrency: "USD" },
+      { marketValue: "500", averageCostBasis: "200", quantity: "3", instrumentCurrency: "USD" },
+    ]
+    const now = new Date("2026-09-03T10:00:00Z")
+    await snapshotPortfolioValue(db, pf.id, posRows, now)
+
+    const snaps = await db.select().from(valueSnapshots).where(eq(valueSnapshots.portfolioId, pf.id))
+    expect(snaps).toHaveLength(1)
+    expect(snaps[0].snapshotDate).toBe("2026-09-03")
+    expect(Number(snaps[0].value)).toBeCloseTo(2300)   // 1800 + 500
+    expect(Number(snaps[0].invested)).toBeCloseTo(2100) // 150×10 + 200×3
+  })
+
+  it("is idempotent — second call updates value in place", async () => {
+    const { db, user } = await makeHarness("snap-user-2")
+    const [pf] = await db
+      .insert(portfolios)
+      .values({ userId: user.id, name: "Snap PF 2", currency: "USD", baseCurrency: "USD" })
+      .returning()
+
+    const posRows = [
+      { marketValue: "1000", averageCostBasis: "100", quantity: "10", instrumentCurrency: "USD" },
+    ]
+    const now = new Date("2026-09-03T10:00:00Z")
+    await snapshotPortfolioValue(db, pf.id, posRows, now)
+    // second call with updated value
+    const posRows2 = [
+      { marketValue: "1100", averageCostBasis: "100", quantity: "10", instrumentCurrency: "USD" },
+    ]
+    await snapshotPortfolioValue(db, pf.id, posRows2, now)
+
+    const snaps = await db.select().from(valueSnapshots).where(eq(valueSnapshots.portfolioId, pf.id))
+    expect(snaps).toHaveLength(1)
+    expect(Number(snaps[0].value)).toBeCloseTo(1100)
+  })
+
+  it("refreshQuotes writes a snapshot row after persisting quote fields", async () => {
+    const { db, user } = await makeHarness("snap-user-3")
+    process.env.INSTRUMENTS_URL = "http://instruments:3000"
+    _clearQuoteCache()
+    const [pf] = await db
+      .insert(portfolios)
+      .values({ userId: user.id, name: "Snap PF 3", currency: "USD", baseCurrency: "USD" })
+      .returning()
+    await db.insert(positions).values({
+      userId: user.id,
+      portfolioId: pf.id,
+      symbol: "AAPL",
+      quantity: "5",
+      averageCostBasis: "200",
+      instrumentCurrency: "USD",
+      isOpen: true,
+      currentPrice: null,
+      priceSource: "manual",
+    })
+
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({ symbol: "AAPL", currentPrice: 220, change: 2, percentChange: 1, currency: "USD" }),
+    }))
+
+    await refreshQuotes(db, user.id, pf.id, "Bearer test-token")
+    // give the background void a tick
+    await new Promise((r) => setTimeout(r, 50))
+
+    const snaps = await db.select().from(valueSnapshots).where(eq(valueSnapshots.portfolioId, pf.id))
+    expect(snaps.length).toBeGreaterThanOrEqual(1)
+    // value = 5 × 220 = 1100
+    expect(Number(snaps[0].value)).toBeCloseTo(1100)
+
+    vi.unstubAllGlobals()
+    delete process.env.INSTRUMENTS_URL
   })
 })
