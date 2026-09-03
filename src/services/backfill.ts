@@ -52,7 +52,7 @@ async function fetchPriceBars(
   const base = instrumentsBase()
   if (!base) return null
   try {
-    const url = `${base}/instruments/${encodeURIComponent(symbol)}/price-bars?from=${from}&to=${to}`
+    const url = `${base}/api/instruments/${encodeURIComponent(symbol)}/price-bars?from=${from}&to=${to}`
     const res = await fetch(url, { headers: { Authorization: authToken } })
     if (!res.ok) return null
     return (await res.json()) as PriceBarSeries
