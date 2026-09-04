@@ -61,6 +61,71 @@ async function fetchPriceBars(
   }
 }
 
+/**
+ * Build a contract-grade benchmark series for one ticker, normalized to an
+ * indexed return line starting at 100 (parity with example-service benchmarks overlay).
+ *
+ * - The `closes` series is carried forward across weekends/holidays so every
+ *   portfolio snapshot date has a value.
+ * - `dimension` returns the window for a given timeframe (reused from the
+ *   analytics route to align benchmark dates with portfolio snapshots).
+ * - `returnPercent` = (last/first − 1)×100; `volatility` = annualized std dev
+ *   of daily log returns ×100.
+ *
+ * All return-type modes (moneyWeighted/timeWeighted/simple) collapse to the
+ * same indexed line because an instrument has no cash flows (D46).
+ */
+export interface BenchmarkReturn {
+  symbol: string
+  name: string
+  timeSeries: Array<{ date: string; value: number }>
+  returnPercent: number
+  volatility: number
+}
+
+export async function buildBenchmarkSeries(
+  symbol: string,
+  from: string,
+  to: string,
+  authToken: string,
+  name: string,
+): Promise<BenchmarkReturn | null> {
+  const series = await fetchPriceBars(symbol, from, to, authToken)
+  if (!series || series.dates.length === 0) return null
+
+  // Build a carry-forward close map over every calendar day in [from, to].
+  const days = calendarDays(from, to)
+  const closeMap = buildPriceMap(series.dates, series.closes, days)
+  const points: Array<{ date: string; close: number }> = []
+  for (const day of days) {
+    const close = closeMap.get(day)
+    if (close && close > 0) points.push({ date: day, close })
+  }
+  if (points.length === 0) return null
+
+  const first = points[0].close
+  const timeSeries = points.map((p) => ({ date: p.date, value: Math.round((p.close / first) * 10000) / 100 }))
+
+  const returnPercent = Math.round(((points[points.length - 1].close / first - 1) * 100) * 100) / 100
+
+  let volatility = 0
+  if (points.length >= 2) {
+    const logReturns: number[] = []
+    for (let i = 1; i < points.length; i++) {
+      if (points[i - 1].close > 0) {
+        logReturns.push(Math.log(points[i].close / points[i - 1].close))
+      }
+    }
+    if (logReturns.length >= 2) {
+      const mean = logReturns.reduce((s, v) => s + v, 0) / logReturns.length
+      const variance = logReturns.reduce((s, v) => s + (v - mean) * (v - mean), 0) / (logReturns.length - 1)
+      volatility = Math.round(Math.sqrt(variance) * Math.sqrt(252) * 100 * 100) / 100
+    }
+  }
+
+  return { symbol, name, timeSeries, returnPercent, volatility }
+}
+
 // ── helpers ───────────────────────────────────────────────────────────────
 
 /** Normalise a value that may be a Date, ISO string, or timestamptz string to YYYY-MM-DD. */

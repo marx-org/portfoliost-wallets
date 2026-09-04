@@ -13,7 +13,7 @@ import {
 } from "../db/schema.js"
 import { preferredBaseCurrency } from "../services/preferences.js"
 import { refreshQuotes } from "../services/quotes.js"
-import { runBackfill, getBackfillStatus } from "../services/backfill.js"
+import { runBackfill, getBackfillStatus, buildBenchmarkSeries } from "../services/backfill.js"
 import { createTransactionRoutes } from "./portfolio-transactions.js"
 import type { components } from "../generated/api-types.js"
 
@@ -762,7 +762,12 @@ export function createPortfolioRoutes(db?: DB) {
     const identity = c.get("userIdentity")
     const id = c.req.param("id")
     const timeframe = c.req.query("timeframe") || "1Y"
-    const database = getDb()
+    const benchmarkCalcType = c.req.query("benchmarkCalcType") || "timeWeighted"
+    const benchmarkParam = c.req.query("benchmarks")
+    const benchmarkSymbols = benchmarkParam
+      ? benchmarkParam.split(",").map((s) => s.trim()).filter(Boolean)
+      : []
+    const database = getDbInstance()
 
     // Verify portfolio belongs to user
     const [pf] = await database
@@ -813,11 +818,26 @@ export function createPortfolioRoutes(db?: DB) {
     // Monthly returns: group by YYYY-MM, (last_value / first_value - 1) × 100
     const monthlyReturns = buildMonthlyReturns(rows.map((r) => ({ date: r.snapshotDate, value: Number(r.value) })))
 
+    // Benchmarks: normalize requested tickers to an indexed return line aligned
+    // with the portfolio snapshot window (D46/D48). Unknown tickers are dropped.
+    let benchmarks: Array<NonNullable<components["schemas"]["PortfolioAnalytics"]["benchmarks"]>[number]> = []
+    if (benchmarkSymbols.length > 0) {
+      const from = firstRow?.snapshotDate
+      const to = lastRow?.snapshotDate
+      const authToken = c.req.header("Authorization") ?? ""
+      const series = await Promise.all(
+        benchmarkSymbols.map((sym) => buildBenchmarkSeries(sym, from, to, authToken, sym)),
+      )
+      benchmarks = series
+        .filter((s): s is NonNullable<typeof s> => s !== null)
+        .map((s) => ({ symbol: s.symbol, name: s.name, timeSeries: s.timeSeries, returnPercent: s.returnPercent, volatility: s.volatility }))
+    }
+
     return c.json({
       timeframe,
       backfillStatus: "complete",
       performance: { timeSeries, totalValue, totalInvested, totalReturn, totalReturnPercent, monthlyReturns },
-      benchmarks: [],
+      benchmarks,
     })
   })
 
