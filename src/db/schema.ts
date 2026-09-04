@@ -329,6 +329,9 @@ export const valueSnapshots = portfoliosSchema.table(
     value: numeric("value", { precision: 20, scale: 8 }).notNull(),
     invested: numeric("invested", { precision: 20, scale: 8 }).notNull(),
     netFlow: numeric("net_flow", { precision: 20, scale: 8 }).notNull().default("0"),
+    cumulativeTwr: numeric("cumulative_twr", { precision: 20, scale: 8 }),
+    cumulativeMwr: numeric("cumulative_mwr", { precision: 20, scale: 8 }),
+    cumulativeSimple: numeric("cumulative_simple", { precision: 20, scale: 8 }),
   },
   (t) => [
     primaryKey({ columns: [t.portfolioId, t.snapshotDate] }),

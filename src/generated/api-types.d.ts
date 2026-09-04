@@ -2696,6 +2696,9 @@ export interface components {
                 timeSeries?: {
                     date?: string;
                     value?: number;
+                    cumulativeTwr?: number;
+                    cumulativeMwr?: number;
+                    cumulativeSimple?: number;
                 }[];
             };
             benchmarks?: {

@@ -25,6 +25,7 @@ import {
   valueSnapshots,
 } from "../db/schema.js"
 import { latestRates } from "./fee-fx.js"
+import { recomputeReturnColumns } from "./returnColumns.js"
 
 // ── instruments client ────────────────────────────────────────────────────
 
@@ -449,4 +450,7 @@ async function _runBackfillCore(
         },
       })
   }
+
+  // Recompute stored return-type columns now that all snapshots are written
+  await recomputeReturnColumns(db, portfolioId)
 }

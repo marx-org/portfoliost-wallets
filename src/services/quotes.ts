@@ -12,6 +12,7 @@ import { convert } from "@marx2/contracts/fx"
 import type { DB } from "../db/index.js"
 import { positions, portfolios, valueSnapshots } from "../db/schema.js"
 import { latestRates } from "./fee-fx.js"
+import { recomputeReturnColumns } from "./returnColumns.js"
 
 // ── Types ─────────────────────────────────────────────────────────────────
 
@@ -322,6 +323,9 @@ export async function snapshotPortfolioValue(
         invested: sql`excluded.invested`,
       },
     })
+
+  // Recompute stored return-type columns after the new snapshot is written
+  await recomputeReturnColumns(db, portfolioId)
 }
 
 /** Exposed for testing: flush the in-process caches. */

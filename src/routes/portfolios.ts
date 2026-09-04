@@ -800,14 +800,27 @@ export function createPortfolioRoutes(db?: DB) {
     // Filter by timeframe
     const cutoff = timeframeCutoff(timeframe)
     const rows = await database
-      .select({ snapshotDate: valueSnapshots.snapshotDate, value: valueSnapshots.value, invested: valueSnapshots.invested })
+      .select({
+        snapshotDate: valueSnapshots.snapshotDate,
+        value: valueSnapshots.value,
+        invested: valueSnapshots.invested,
+        cumulativeTwr: valueSnapshots.cumulativeTwr,
+        cumulativeMwr: valueSnapshots.cumulativeMwr,
+        cumulativeSimple: valueSnapshots.cumulativeSimple,
+      })
       .from(valueSnapshots)
       .where(cutoff
         ? and(eq(valueSnapshots.portfolioId, id), sql`${valueSnapshots.snapshotDate} >= ${cutoff}`)
         : eq(valueSnapshots.portfolioId, id))
       .orderBy(asc(valueSnapshots.snapshotDate))
 
-    const timeSeries = rows.map((r) => ({ date: r.snapshotDate, value: Number(r.value) }))
+    const timeSeries = rows.map((r) => ({
+      date: r.snapshotDate,
+      value: Number(r.value),
+      cumulativeTwr: r.cumulativeTwr !== null ? Number(r.cumulativeTwr) : undefined,
+      cumulativeMwr: r.cumulativeMwr !== null ? Number(r.cumulativeMwr) : undefined,
+      cumulativeSimple: r.cumulativeSimple !== null ? Number(r.cumulativeSimple) : undefined,
+    }))
     const lastRow = rows[rows.length - 1]
     const firstRow = rows[0]
     const totalValue = Number(lastRow?.value ?? 0)
@@ -836,7 +849,24 @@ export function createPortfolioRoutes(db?: DB) {
     return c.json({
       timeframe,
       backfillStatus: "complete",
-      performance: { timeSeries, totalValue, totalInvested, totalReturn, totalReturnPercent, monthlyReturns },
+      performance: {
+        timeSeries,
+        totalValue,
+        totalInvested,
+        totalReturn,
+        totalReturnPercent,
+        monthlyReturns,
+        // Scalar return values derived from the last pre-computed cumulative index point
+        timeWeightedReturn: timeSeries.length > 0 && timeSeries[timeSeries.length - 1].cumulativeTwr !== undefined
+          ? Math.round(((timeSeries[timeSeries.length - 1].cumulativeTwr! - 100)) * 100) / 100
+          : null,
+        moneyWeightedReturn: timeSeries.length > 0 && timeSeries[timeSeries.length - 1].cumulativeMwr !== undefined
+          ? Math.round(((timeSeries[timeSeries.length - 1].cumulativeMwr! - 100)) * 100) / 100
+          : null,
+        simpleReturnPercent: timeSeries.length > 0 && timeSeries[timeSeries.length - 1].cumulativeSimple !== undefined
+          ? Math.round(((timeSeries[timeSeries.length - 1].cumulativeSimple! - 100)) * 100) / 100
+          : null,
+      },
       benchmarks,
     })
   })
