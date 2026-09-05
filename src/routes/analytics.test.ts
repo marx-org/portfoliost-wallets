@@ -1,7 +1,7 @@
 /** analytics.test.ts (D48/D50) — benchmark overlay on GET /:id/analytics */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import { Hono } from "hono"
-import { createPortfolioRoutes } from "./portfolios.js"
+import { createPortfolioRoutes, timeframeCutoff } from "./portfolios.js"
 import { makeHarness } from "./test-utils.js"
 import { portfolios, portfolioTransactions, valueSnapshots } from "../db/schema.js"
 import { calendarDays } from "../services/backfill.js"
@@ -214,5 +214,28 @@ describe("GET /:id/analytics — benchmarks (D46/D48)", () => {
       { month: "2026-07", returnPercent: 2 },
       { month: "2026-08", returnPercent: 2 },
     ])
+  })
+})
+
+describe("timeframeCutoff (1W/1M/3M windowing)", () => {
+  const now = new Date("2026-09-05T12:00:00Z")
+
+  it("maps 1W to 7 calendar days back", () => {
+    expect(timeframeCutoff("1W", now)).toBe("2026-08-29")
+  })
+
+  it("maps 1M/3M/6M/1Y/2Y by calendar month", () => {
+    expect(timeframeCutoff("1M", now)).toBe("2026-08-05")
+    expect(timeframeCutoff("3M", now)).toBe("2026-06-05")
+    expect(timeframeCutoff("6M", now)).toBe("2026-03-05")
+    expect(timeframeCutoff("1Y", now)).toBe("2025-09-05")
+    expect(timeframeCutoff("2Y", now)).toBe("2024-09-05")
+  })
+
+  it("accepts lower-case and falls back to ALL for unknown/ALL", () => {
+    expect(timeframeCutoff("1w", now)).toBe("2026-08-29")
+    expect(timeframeCutoff("ALL", now)).toBeNull()
+    expect(timeframeCutoff("YTD", now)).toBeNull()
+    expect(timeframeCutoff("", now)).toBeNull()
   })
 })

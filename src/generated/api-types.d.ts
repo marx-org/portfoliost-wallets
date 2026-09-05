@@ -3231,7 +3231,7 @@ export interface components {
         limit: number;
         page: number;
         perPage: number;
-        timeframe: "1D" | "5D" | "1M" | "3M" | "6M" | "YTD" | "1Y" | "2Y" | "3Y" | "5Y" | "ALL";
+        timeframe: "1D" | "5D" | "1W" | "1M" | "3M" | "6M" | "YTD" | "1Y" | "2Y" | "3Y" | "5Y" | "ALL";
         /** @description Benchmark symbol to overlay (e.g. SPY) */
         benchmark: string;
         /** @description Comma-separated benchmark symbols to overlay (e.g. SPY,QQQ) */

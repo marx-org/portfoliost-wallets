@@ -128,15 +128,24 @@ async function computeMetrics(db: DB, portfolioId: string) {
 
 // ── Analytics helpers ───────────────────────────────────────────────────
 
-/** Returns the ISO date cutoff for a timeframe query, or null for ALL. */
-function timeframeCutoff(timeframe: string): string | null {
-  const now = new Date()
-  const months: Record<string, number> = { "6M": 6, "1Y": 12, "2Y": 24 }
-  const m = months[timeframe.toUpperCase()]
-  if (!m) return null
-  const d = new Date(now)
-  d.setUTCMonth(d.getUTCMonth() - m)
-  return d.toISOString().slice(0, 10)
+/** Returns the ISO date cutoff for a timeframe query, or null for ALL/unknown. */
+export function timeframeCutoff(timeframe: string, now = new Date()): string | null {
+  const months: Record<string, number> = { "1M": 1, "3M": 3, "6M": 6, "1Y": 12, "2Y": 24 }
+  const days: Record<string, number> = { "1W": 7 }
+  const upper = timeframe.toUpperCase()
+  const m = months[upper]
+  if (m) {
+    const d = new Date(now)
+    d.setUTCMonth(d.getUTCMonth() - m)
+    return d.toISOString().slice(0, 10)
+  }
+  const d = days[upper]
+  if (d) {
+    const dt = new Date(now)
+    dt.setUTCDate(dt.getUTCDate() - d)
+    return dt.toISOString().slice(0, 10)
+  }
+  return null
 }
 
 /** Group daily values by YYYY-MM; return monthly return % per month. */
