@@ -14,6 +14,7 @@ import {
 import { preferredBaseCurrency } from "../services/preferences.js"
 import { refreshQuotes } from "../services/quotes.js"
 import { runBackfill, getBackfillStatus, buildBenchmarkSeries } from "../services/backfill.js"
+import { dailyNetCashFlows } from "../services/cashFlows.js"
 import { createTransactionRoutes } from "./portfolio-transactions.js"
 import type { components } from "../generated/api-types.js"
 
@@ -771,7 +772,7 @@ export function createPortfolioRoutes(db?: DB) {
 
     // Verify portfolio belongs to user
     const [pf] = await database
-      .select({ id: portfolios.id })
+      .select({ id: portfolios.id, baseCurrency: portfolios.baseCurrency })
       .from(portfolios)
       .where(and(eq(portfolios.id, id), eq(portfolios.userId, identity.id)))
       .limit(1)
@@ -831,15 +832,33 @@ export function createPortfolioRoutes(db?: DB) {
     // Monthly returns: group by YYYY-MM, (last_value / first_value - 1) × 100
     const monthlyReturns = buildMonthlyReturns(rows.map((r) => ({ date: r.snapshotDate, value: Number(r.value) })))
 
-    // Benchmarks: normalize requested tickers to an indexed return line aligned
-    // with the portfolio snapshot window (D46/D48). Unknown tickers are dropped.
+    // Benchmarks: mirror the portfolio's cash flows into each requested ticker
+    // (D50) — BUYs invest cash in the benchmark, SELLs release it, seed = the
+    // portfolio's invested capital at the window start. Unknown tickers dropped.
     let benchmarks: Array<NonNullable<components["schemas"]["PortfolioAnalytics"]["benchmarks"]>[number]> = []
-    if (benchmarkSymbols.length > 0) {
-      const from = firstRow?.snapshotDate
-      const to = lastRow?.snapshotDate
+    if (benchmarkSymbols.length > 0 && firstRow && lastRow) {
+      const from = firstRow.snapshotDate
+      const to = lastRow.snapshotDate
+      const baseCurrency = pf.baseCurrency ?? "USD"
+      const flows = await dailyNetCashFlows(database, id, from, to, baseCurrency)
+      const seedInvested = Number(firstRow.invested ?? 0)
+      const calcType = (["moneyWeighted", "timeWeighted", "simple"] as const).includes(
+        benchmarkCalcType as "moneyWeighted" | "timeWeighted" | "simple",
+      )
+        ? (benchmarkCalcType as "moneyWeighted" | "timeWeighted" | "simple")
+        : "timeWeighted"
       const authToken = c.req.header("Authorization") ?? ""
       const series = await Promise.all(
-        benchmarkSymbols.map((sym) => buildBenchmarkSeries(sym, from, to, authToken, sym)),
+        benchmarkSymbols.map((sym) =>
+          buildBenchmarkSeries(sym, from, to, authToken, sym, {
+            db: database,
+            portfolioId: id,
+            baseCurrency,
+            flows,
+            seedInvested,
+            calcType,
+          }),
+        ),
       )
       benchmarks = series
         .filter((s): s is NonNullable<typeof s> => s !== null)

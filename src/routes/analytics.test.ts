@@ -1,9 +1,9 @@
-/** analytics.test.ts (D48) — benchmark overlay on GET /:id/analytics */
+/** analytics.test.ts (D48/D50) — benchmark overlay on GET /:id/analytics */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import { Hono } from "hono"
 import { createPortfolioRoutes } from "./portfolios.js"
 import { makeHarness } from "./test-utils.js"
-import { portfolios, valueSnapshots } from "../db/schema.js"
+import { portfolios, portfolioTransactions, valueSnapshots } from "../db/schema.js"
 import { calendarDays } from "../services/backfill.js"
 
 function app(db: Parameters<typeof createPortfolioRoutes>[0]) {
@@ -34,6 +34,29 @@ async function seedSnapshots(
       netFlow: "0",
     })
   }
+}
+
+async function seedBuy(
+  db: Awaited<ReturnType<typeof makeHarness>>["db"],
+  userId: string,
+  portfolioId: string,
+  qty: number,
+  price: number,
+  date: string,
+  totalAmount?: number,
+) {
+  await db.insert(portfolioTransactions).values({
+    userId,
+    portfolioId,
+    type: "BUY",
+    instrumentSymbol: "SPY",
+    quantity: String(qty),
+    price: String(price),
+    currency: "USD",
+    instrumentCurrency: "USD",
+    totalAmount: String(totalAmount ?? qty * price),
+    executedAt: new Date(`${date}T12:00:00Z`),
+  })
 }
 
 function mockPriceBars(series: Record<string, { dates: string[]; closes: number[] }>) {
@@ -119,5 +142,43 @@ describe("GET /:id/analytics — benchmarks (D46/D48)", () => {
     const body = await res.json()
     expect(body.benchmarks).toHaveLength(1)
     expect(body.benchmarks[0].symbol).toBe("QQQ")
+  })
+
+  it("mirrors a mid-window BUY into the benchmark (D50)", async () => {
+    const { db, user, headers } = await makeHarness("abe-mirror")
+    const a = app(db)
+    const pf = await seedPortfolio(db, user.id)
+    const days = calendarDays("2026-07-01", "2026-07-05")
+    await seedSnapshots(db, pf.id, days)
+    // A $1500 BUY on 2026-07-04 (SPY close 130) — seeded with invested=900.
+    await seedBuy(db, user.id, pf.id, 10, 150, "2026-07-04", 1500)
+    mockPriceBars({ SPY: { dates: days, closes: days.map((_, i) => 100 + i * 10) } }) // 100..140
+
+    const res = await a.request(`/api/portfolios/${pf.id}/analytics?timeframe=1Y&benchmarks=SPY`, { headers })
+    expect(res.status).toBe(200)
+    const body = await res.json()
+
+    // Pure price index would be 140; mirroring the $1500 BUY dilutes the
+    // indexed TWR line because capital was deployed at 130, not at 100.
+    const b = body.benchmarks[0]
+    expect(b.timeSeries[0].value).toBe(100)
+    expect(b.timeSeries[b.timeSeries.length - 1].value).toBeCloseTo(133.74, 1)
+    expect(b.returnPercent).toBeCloseTo(33.74, 1)
+  })
+
+  it("returns portfolio series unaffected by benchmark mirroring", async () => {
+    const { db, user, headers } = await makeHarness("abe-mirror2")
+    const a = app(db)
+    const pf = await seedPortfolio(db, user.id)
+    const days = calendarDays("2026-07-01", "2026-07-04")
+    await seedSnapshots(db, pf.id, days)
+    await seedBuy(db, user.id, pf.id, 5, 100, "2026-07-02", 500)
+    mockPriceBars({ GOOGL: { dates: days, closes: days.map((_, i) => 100 + i * 5) } })
+
+    const res = await a.request(`/api/portfolios/${pf.id}/analytics?timeframe=1Y&benchmarks=GOOGL&benchmarkCalcType=simple`, { headers })
+    expect(res.status).toBe(200)
+    const body = await res.json()
+    expect(body.performance.timeSeries).toHaveLength(4)
+    expect(body.benchmarks).toHaveLength(1)
   })
 })

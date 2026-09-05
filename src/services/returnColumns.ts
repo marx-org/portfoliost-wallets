@@ -17,7 +17,7 @@ import { valueSnapshots } from "../db/schema.js"
 // ---------------------------------------------------------------------------
 // Simple return — indexed from first portfolio value
 // ---------------------------------------------------------------------------
-function buildSimple(values: number[]): number[] {
+export function buildSimple(values: number[]): number[] {
   const v0 = values[0] ?? 0
   if (v0 === 0) return values.map(() => 100)
   return values.map((v) => Math.round((v / v0) * 10000) / 100)
@@ -27,7 +27,7 @@ function buildSimple(values: number[]): number[] {
 // TWR — daily chain-linked sub-period returns
 // HPR_t = V_t / (V_{t-1} + netFlow_t) - 1
 // ---------------------------------------------------------------------------
-function buildTwr(values: number[], flows: number[]): number[] {
+export function buildTwr(values: number[], flows: number[]): number[] {
   if (values.length === 0) return []
   const result: number[] = [100]
   let cum = 1
@@ -71,7 +71,7 @@ function xirr(cfs: number[], dates: string[]): number | null {
   return null
 }
 
-function buildMwr(values: number[], flows: number[], dates: string[]): number[] {
+export function buildMwr(values: number[], flows: number[], dates: string[]): number[] {
   if (values.length === 0) return []
   // Build XIRR cash flows: -V[0] at start, -flow[i] for deposits, +V[last] at end
   const xCF: number[] = [-values[0]]

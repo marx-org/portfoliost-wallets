@@ -12,6 +12,7 @@ import { convert } from "@marx2/contracts/fx"
 import type { DB } from "../db/index.js"
 import { positions, portfolios, valueSnapshots } from "../db/schema.js"
 import { latestRates } from "./fee-fx.js"
+import { dailyNetCashFlows } from "./cashFlows.js"
 import { recomputeReturnColumns } from "./returnColumns.js"
 
 // ── Types ─────────────────────────────────────────────────────────────────
@@ -307,6 +308,7 @@ export async function snapshotPortfolioValue(
   }
 
   const snapshotDate = now.toISOString().slice(0, 10)
+  const todayFlows = await dailyNetCashFlows(db, portfolioId, snapshotDate, snapshotDate, base)
   await db
     .insert(valueSnapshots)
     .values({
@@ -314,13 +316,14 @@ export async function snapshotPortfolioValue(
       snapshotDate,
       value: totalValue.toFixed(8),
       invested: totalInvested.toFixed(8),
-      netFlow: "0",
+      netFlow: (todayFlows.get(snapshotDate) ?? 0).toFixed(8),
     })
     .onConflictDoUpdate({
       target: [valueSnapshots.portfolioId, valueSnapshots.snapshotDate],
       set: {
         value: sql`excluded.value`,
         invested: sql`excluded.invested`,
+        netFlow: sql`excluded.net_flow`,
       },
     })
 

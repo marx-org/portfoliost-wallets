@@ -25,7 +25,13 @@ import {
   valueSnapshots,
 } from "../db/schema.js"
 import { latestRates } from "./fee-fx.js"
-import { recomputeReturnColumns } from "./returnColumns.js"
+import { dailyNetCashFlows } from "./cashFlows.js"
+import {
+  recomputeReturnColumns,
+  buildSimple,
+  buildTwr,
+  buildMwr,
+} from "./returnColumns.js"
 
 // ── instruments client ────────────────────────────────────────────────────
 
@@ -42,6 +48,7 @@ interface PriceBarSeries {
   dates: string[]
   closes: number[]
   stale: boolean
+  currency?: string | null
 }
 
 async function fetchPriceBars(
@@ -63,19 +70,24 @@ async function fetchPriceBars(
 }
 
 /**
- * Build a contract-grade benchmark series for one ticker, normalized to an
- * indexed return line starting at 100 (parity with example-service benchmarks overlay).
+ * Context for cash-flow-mirrored benchmark overlay (D50).
  *
- * - The `closes` series is carried forward across weekends/holidays so every
- *   portfolio snapshot date has a value.
- * - `dimension` returns the window for a given timeframe (reused from the
- *   analytics route to align benchmark dates with portfolio snapshots).
- * - `returnPercent` = (last/first − 1)×100; `volatility` = annualized std dev
- *   of daily log returns ×100.
- *
- * All return-type modes (moneyWeighted/timeWeighted/simple) collapse to the
- * same indexed line because an instrument has no cash flows (D46).
+ * The benchmark no longer projects a pure price index: instead it mirrors the
+ * portfolio's actual deployment schedule into the benchmark instrument, so a
+ * BUY of $X in the portfolio "buys" $X of the benchmark at that day's close and
+ * a SELL of $Y "sells" $Y (fractional shares allowed, clamped ≥ 0).
  */
+export interface BenchmarkBuildContext {
+  db: DB
+  portfolioId: string
+  baseCurrency: string
+  /** daily net cash flow (BUY − SELL) in base currency, keyed by YYYY-MM-DD */
+  flows: Map<string, number>
+  /** portfolio invested capital at the window start (seeds the mirror) */
+  seedInvested: number
+  calcType: "moneyWeighted" | "timeWeighted" | "simple"
+}
+
 export interface BenchmarkReturn {
   symbol: string
   name: string
@@ -90,32 +102,65 @@ export async function buildBenchmarkSeries(
   to: string,
   authToken: string,
   name: string,
+  ctx: BenchmarkBuildContext,
 ): Promise<BenchmarkReturn | null> {
   const series = await fetchPriceBars(symbol, from, to, authToken)
   if (!series || series.dates.length === 0) return null
 
-  // Build a carry-forward close map over every calendar day in [from, to].
+  const base = ctx.baseCurrency.toUpperCase()
+  const isBaseCcy = !series.currency || series.currency.toUpperCase() === base
+  const fxTable = await latestRates(ctx.db)
+  const toBase = (v: number): number => {
+    if (isBaseCcy) return v
+    if (!fxTable) return v
+    return v * (convert(1, series.currency!.toUpperCase(), base, fxTable) ?? 1)
+  }
+
+  // Carry-forward closes (converted to base currency) over every calendar day.
   const days = calendarDays(from, to)
   const closeMap = buildPriceMap(series.dates, series.closes, days)
   const points: Array<{ date: string; close: number }> = []
   for (const day of days) {
-    const close = closeMap.get(day)
-    if (close && close > 0) points.push({ date: day, close })
+    const raw = closeMap.get(day)
+    const close = raw != null && raw > 0 ? toBase(raw) : 0
+    if (close > 0) points.push({ date: day, close })
   }
   if (points.length === 0) return null
 
-  const first = points[0].close
-  const timeSeries = points.map((p) => ({ date: p.date, value: Math.round((p.close / first) * 10000) / 100 }))
+  // Build the mirrored value series as units × close, where units (fractional)
+  // grow/shrink by the day's net cash flow valued at that day's close.
+  const firstClose = points[0].close
+  let units = ctx.seedInvested > 0 ? ctx.seedInvested / firstClose : 0
+  const mirrorValues: number[] = []
+  const flows: number[] = []
+  for (let i = 0; i < points.length; i++) {
+    const p = points[i]
+    const flow = ctx.flows.get(p.date) ?? 0
+    if (i > 0) {
+      units = Math.max(0, units + flow / p.close)
+    }
+    mirrorValues.push(Math.round(units * p.close * 10000) / 10000)
+    flows.push(flow)
+  }
 
-  const returnPercent = Math.round(((points[points.length - 1].close / first - 1) * 100) * 100) / 100
+  // Render the requested return-type column using the same builders as the
+  // portfolio's own snapshots — apples-to-apples mirror semantics.
+  const dates = points.map((p) => p.date)
+  let columns: number[]
+  if (ctx.calcType === "moneyWeighted") columns = buildMwr(mirrorValues, flows, dates)
+  else if (ctx.calcType === "simple") columns = buildSimple(mirrorValues)
+  else columns = buildTwr(mirrorValues, flows)
 
+  const timeSeries = points.map((p, i) => ({ date: p.date, value: columns[i] }))
+  const returnPercent = Math.round((columns[columns.length - 1] - 100) * 100) / 100
+
+  // Volatility stays a property of the raw price series (unchanged from D46).
   let volatility = 0
-  if (points.length >= 2) {
+  const prices = points.map((p) => p.close)
+  if (prices.length >= 2) {
     const logReturns: number[] = []
-    for (let i = 1; i < points.length; i++) {
-      if (points[i - 1].close > 0) {
-        logReturns.push(Math.log(points[i].close / points[i - 1].close))
-      }
+    for (let i = 1; i < prices.length; i++) {
+      if (prices[i - 1] > 0) logReturns.push(Math.log(prices[i] / prices[i - 1]))
     }
     if (logReturns.length >= 2) {
       const mean = logReturns.reduce((s, v) => s + v, 0) / logReturns.length
@@ -347,6 +392,10 @@ async function _runBackfillCore(
   // 6. Build daily value series
   const days = calendarDays(from, to)
 
+  // Daily net cash flows (BUY − SELL) in base currency populate netFlow so the
+  // portfolio's own TWR/MWR/simple columns are flow-aware (D49/D50).
+  const dailyFlows = await dailyNetCashFlows(db, portfolioId, from, to, base)
+
   // Pre-build carry-forward price maps per symbol
   const priceMaps = new Map<string, Map<string, number>>()
   for (const sym of symbols) {
@@ -428,7 +477,7 @@ async function _runBackfillCore(
         snapshotDate: day,
         value: totalValue.toFixed(8),
         invested: totalInvested.toFixed(8),
-        netFlow: "0",
+        netFlow: (dailyFlows.get(day) ?? 0).toFixed(8),
       })
     }
   }
@@ -447,6 +496,7 @@ async function _runBackfillCore(
         set: {
           value: sql`excluded.value`,
           invested: sql`excluded.invested`,
+          netFlow: sql`excluded.net_flow`,
         },
       })
   }

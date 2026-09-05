@@ -163,6 +163,11 @@ describe("runBackfill (H6)", () => {
     expect(byDate.get("2026-07-01")).toBeCloseTo(1500) // 10 × 150
     expect(byDate.get("2026-07-02")).toBeCloseTo(1550) // 10 × 155
     expect(byDate.get("2026-07-03")).toBeCloseTo(1600) // 10 × 160
+
+    // Mark #1 (D50): BUY day carries the deployed cash as netFlow
+    const netFlowByDate = new Map(snaps.map((s) => [s.snapshotDate, Number(s.netFlow)]))
+    expect(netFlowByDate.get("2026-07-01")).toBeCloseTo(1500)
+    expect(netFlowByDate.get("2026-07-02")).toBe(0)
   })
 
   it("carries forward price on weekend gaps", async () => {
