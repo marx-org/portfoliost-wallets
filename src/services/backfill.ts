@@ -56,12 +56,13 @@ async function fetchPriceBars(
   from: string,
   to: string,
   authToken: string,
+  signal?: AbortSignal,
 ): Promise<PriceBarSeries | null> {
   const base = instrumentsBase()
   if (!base) return null
   try {
     const url = `${base}/api/instruments/${encodeURIComponent(symbol)}/price-bars?from=${from}&to=${to}`
-    const res = await fetch(url, { headers: { Authorization: authToken } })
+    const res = await fetch(url, { headers: { Authorization: authToken }, signal })
     if (!res.ok) return null
     return (await res.json()) as PriceBarSeries
   } catch {
@@ -299,12 +300,43 @@ export async function runBackfill(
   }
 }
 
-async function _runBackfillCore(
+/** Marker error: the recalc pass was aborted mid-run (new mutation arrived). */
+export class RecalcAbortedError extends Error {
+  constructor() {
+    super("recalc aborted by newer transaction change")
+    this.name = "RecalcAbortedError"
+  }
+}
+
+function throwIfAborted(signal?: AbortSignal): void {
+  if (signal?.aborted) throw new RecalcAbortedError()
+}
+
+export interface SnapshotRow {
+  portfolioId: string
+  snapshotDate: string
+  value: string
+  invested: string
+  netFlow: string
+}
+
+/**
+ * Recompute the full daily value/invested/netFlow series for one portfolio
+ * from its BUY/SELL transactions + instrument price bars (steps 1–7 of the old
+ * `_runBackfillCore`). Returns [] when there is no history to backfill (no
+ * BUY/SELL transactions, or nothing valued). Honors an optional AbortSignal and
+ * throws RecalcAbortedError on abort so the caller never commits a partial
+ * series.
+ */
+export async function computeSnapshotBatch(
   db: DB,
   portfolioId: string,
   authToken: string,
-  now: Date,
-): Promise<void> {
+  now = new Date(),
+  signal?: AbortSignal,
+): Promise<SnapshotRow[]> {
+  throwIfAborted(signal)
+
   // 1. Find firstTxDate
   const minRows = await db
     .select({ minDate: sql<string>`min(${portfolioTransactions.executedAt})` })
@@ -316,12 +348,12 @@ async function _runBackfillCore(
       ),
     )
   const firstTxDate = minRows[0]?.minDate
-  if (!firstTxDate) return // no transactions yet
+  if (!firstTxDate) return [] // no transactions yet
 
   const from = toDateStr(firstTxDate)
-  if (!from) return
+  if (!from) return []
   const to = daysAgo(1, now) // yesterday
-  if (from > to) return // only one day of history, nothing to backfill
+  if (from > to) return [] // only one day of history, nothing to backfill
 
   // 2. Fetch all BUY/SELL transactions ordered by date
   const txRows = await db
@@ -342,7 +374,7 @@ async function _runBackfillCore(
     )
     .orderBy(portfolioTransactions.executedAt)
 
-  if (txRows.length === 0) return
+  if (txRows.length === 0) return []
 
   // Collect unique symbols + their instrument currencies
   const symbolCcy = new Map<string, string>()
@@ -370,10 +402,11 @@ async function _runBackfillCore(
   const priceSeries = new Map<string, PriceBarSeries>()
   await Promise.all(
     symbols.map(async (sym) => {
-      const series = await fetchPriceBars(sym, from, to, authToken)
+      const series = await fetchPriceBars(sym, from, to, authToken, signal)
       if (series && series.dates.length > 0) priceSeries.set(sym, series)
     }),
   )
+  throwIfAborted(signal)
 
   // 5. Get portfolio baseCurrency + FX rates
   const [portfolio] = await db
@@ -395,6 +428,7 @@ async function _runBackfillCore(
   // Daily net cash flows (BUY − SELL) in base currency populate netFlow so the
   // portfolio's own TWR/MWR/simple columns are flow-aware (D49/D50).
   const dailyFlows = await dailyNetCashFlows(db, portfolioId, from, to, base)
+  throwIfAborted(signal)
 
   // Pre-build carry-forward price maps per symbol
   const priceMaps = new Map<string, Map<string, number>>()
@@ -446,14 +480,8 @@ async function _runBackfillCore(
     })
   }
 
-  // 7. Build upsert batch
-  const snapBatch: Array<{
-    portfolioId: string
-    snapshotDate: string
-    value: string
-    invested: string
-    netFlow: string
-  }> = []
+  // 7. Build the snapshot batch
+  const snapBatch: SnapshotRow[] = []
 
   for (const day of days) {
     let totalValue = 0
@@ -482,12 +510,22 @@ async function _runBackfillCore(
     }
   }
 
-  if (snapBatch.length === 0) return
+  return snapBatch
+}
 
-  // 8. Bulk upsert in chunks to avoid huge parameter lists
+async function _runBackfillCore(
+  db: DB,
+  portfolioId: string,
+  authToken: string,
+  now: Date,
+): Promise<void> {
+  const batch = await computeSnapshotBatch(db, portfolioId, authToken, now)
+  if (batch.length === 0) return
+
+  // Bulk upsert in chunks to avoid huge parameter lists
   const CHUNK = 100
-  for (let i = 0; i < snapBatch.length; i += CHUNK) {
-    const chunk = snapBatch.slice(i, i + CHUNK)
+  for (let i = 0; i < batch.length; i += CHUNK) {
+    const chunk = batch.slice(i, i + CHUNK)
     await db
       .insert(valueSnapshots)
       .values(chunk)
@@ -503,4 +541,45 @@ async function _runBackfillCore(
 
   // Recompute stored return-type columns now that all snapshots are written
   await recomputeReturnColumns(db, portfolioId)
+}
+
+/**
+ * Replace (not upsert) the portfolio's entire value_snapshots history with a
+ * fresh series computed from current transactions. Used by the recalc queue
+ * after transaction mutations. Unlike `runBackfill`, stale rows are DELETEd
+ * (even days that no longer carry value), and an empty history (all BUY/SELL
+ * removed) clears the chart entirely. Honors `signal`: an aborted pass throws
+ * RecalcAbortedError and never writes a partial series; the queue restarts.
+ */
+export async function recalcPortfolioHistory(
+  db: DB,
+  portfolioId: string,
+  authToken: string,
+  now = new Date(),
+  signal?: AbortSignal,
+): Promise<void> {
+  await setBackfillStatus(db, portfolioId, "pending")
+  try {
+    const batch = await computeSnapshotBatch(db, portfolioId, authToken, now, signal)
+    throwIfAborted(signal)
+
+    await db.transaction(async (tx) => {
+      await tx.delete(valueSnapshots).where(eq(valueSnapshots.portfolioId, portfolioId))
+      if (batch.length > 0) {
+        const CHUNK = 100
+        for (let i = 0; i < batch.length; i += CHUNK) {
+          await tx.insert(valueSnapshots).values(batch.slice(i, i + CHUNK))
+        }
+      }
+    })
+
+    throwIfAborted(signal)
+    await recomputeReturnColumns(db, portfolioId)
+    await setBackfillStatus(db, portfolioId, "complete", { completedAt: new Date() })
+  } catch (err) {
+    // An aborted pass must stay silent: the queue restarts with the latest data.
+    if (err instanceof RecalcAbortedError) return
+    const msg = err instanceof Error ? err.message : String(err)
+    await setBackfillStatus(db, portfolioId, "failed", { errorMessage: msg }).catch(() => undefined)
+  }
 }

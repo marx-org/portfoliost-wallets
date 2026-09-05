@@ -7,6 +7,7 @@ import {
   calendarDays,
   getBackfillStatus,
   runBackfill,
+  recalcPortfolioHistory,
 } from "./backfill.js"
 
 // ── mock fetch for instruments price-bars ──────────────────────────────
@@ -252,5 +253,90 @@ describe("runBackfill (H6)", () => {
     await runBackfill(db, pf.id, "Bearer test", now)
     // No prices returned → no snapshots → completes without rows (not a failure)
     expect(await getBackfillStatus(db, pf.id)).toBe("complete")
+  })
+})
+
+describe("recalcPortfolioHistory (background recalc on transaction changes)", () => {
+  beforeEach(() => {
+    process.env.INSTRUMENTS_URL = "http://instruments:3000"
+  })
+  afterEach(() => {
+    vi.unstubAllGlobals()
+    delete process.env.INSTRUMENTS_URL
+  })
+
+  it("replaces stale history (including superseded days) with a fresh series", async () => {
+    const { db, user } = await makeHarness("recalc-user-1")
+    const pf = await seedPortfolio(db, user.id)
+    await seedBuy(db, user.id, pf.id, "AAPL", 10, 150, "2026-07-01")
+    await seedPosition(db, user.id, pf.id, "AAPL", 10, 150)
+
+    // Stale rows: an outdated day (before the first tx) and an outdated value on 07-01.
+    await db.insert(valueSnapshots).values([
+      { portfolioId: pf.id, snapshotDate: "2026-06-20", value: "555", invested: "555" },
+      { portfolioId: pf.id, snapshotDate: "2026-07-01", value: "1", invested: "1" },
+    ])
+
+    mockPriceBars({
+      AAPL: {
+        dates: ["2026-07-01", "2026-07-02", "2026-07-03"],
+        closes: [150, 155, 160],
+      },
+    })
+
+    const now = new Date("2026-07-04T00:00:00Z")
+    await recalcPortfolioHistory(db, pf.id, "Bearer test", now)
+
+    const snaps = await db
+      .select()
+      .from(valueSnapshots)
+      .where(eq(valueSnapshots.portfolioId, pf.id))
+      .orderBy(valueSnapshots.snapshotDate)
+
+    const dates = snaps.map((s) => s.snapshotDate)
+    expect(dates).not.toContain("2026-06-20") // superseded day removed
+    const byDate = new Map(snaps.map((s) => [s.snapshotDate, Number(s.value)]))
+    expect(byDate.get("2026-07-01")).toBeCloseTo(1500) // not the stale 1
+    expect(byDate.get("2026-07-03")).toBeCloseTo(1600)
+    expect(await getBackfillStatus(db, pf.id)).toBe("complete")
+  })
+
+  it("clears the history entirely when all BUY/SELL transactions are deleted", async () => {
+    const { db, user } = await makeHarness("recalc-user-2")
+    const pf = await seedPortfolio(db, user.id)
+    await seedBuy(db, user.id, pf.id, "AAPL", 10, 150, "2026-07-01")
+    await seedPosition(db, user.id, pf.id, "AAPL", 10, 150)
+
+    mockPriceBars({ AAPL: { dates: ["2026-07-01", "2026-07-02"], closes: [150, 155] } })
+
+    const now = new Date("2026-07-03T00:00:00Z")
+    await runBackfill(db, pf.id, "Bearer test", now)
+    expect((await db.select().from(valueSnapshots).where(eq(valueSnapshots.portfolioId, pf.id))).length).toBeGreaterThan(0)
+
+    // The user deleted every transaction → the old series must disappear.
+    await db.delete(portfolioTransactions).where(eq(portfolioTransactions.portfolioId, pf.id))
+    await recalcPortfolioHistory(db, pf.id, "Bearer test", now)
+
+    const snaps = await db.select().from(valueSnapshots).where(eq(valueSnapshots.portfolioId, pf.id))
+    expect(snaps.length).toBe(0)
+    expect(await getBackfillStatus(db, pf.id)).toBe("complete")
+  })
+
+  it("aborted pass never writes a partial series (swap-in is all-or-nothing)", async () => {
+    const { db, user } = await makeHarness("recalc-user-3")
+    const pf = await seedPortfolio(db, user.id)
+    await seedBuy(db, user.id, pf.id, "AAPL", 10, 150, "2026-07-01")
+    await seedPosition(db, user.id, pf.id, "AAPL", 10, 150)
+
+    mockPriceBars({ AAPL: { dates: ["2026-07-01", "2026-07-02"], closes: [150, 155] } })
+
+    const controller = new AbortController()
+    controller.abort() // killed before any work (new mutation arrived earlier)
+    await expect(
+      recalcPortfolioHistory(db, pf.id, "Bearer test", new Date("2026-07-03T00:00:00Z"), controller.signal),
+    ).resolves.toBeUndefined() // swallowed, no error surfaced
+
+    const snaps = await db.select().from(valueSnapshots).where(eq(valueSnapshots.portfolioId, pf.id))
+    expect(snaps.length).toBe(0) // nothing written
   })
 })

@@ -13,6 +13,7 @@ import {
 import { resolveFeeFx, latestRates } from "../services/fee-fx.js"
 import { convert } from "@marx2/contracts/fx"
 import { refreshQuotes } from "../services/quotes.js"
+import { notifyTransactionsChanged } from "../services/recalc-queue.js"
 
 const scale8 = (n: number) => n.toFixed(8)
 const round2 = (n: number) => Math.round(n * 100) / 100
@@ -616,6 +617,7 @@ export function createTransactionRoutes(db?: DB) {
       return c.json({ error: "ValidationError", message: result.error }, 422)
     }
 
+    notifyTransactionsChanged(database, portfolioId, c.req.header("Authorization") ?? "")
     return c.json({ ...result.transaction, position: result.position ?? null }, 201)
   })
 
@@ -700,6 +702,7 @@ export function createTransactionRoutes(db?: DB) {
       }
     })
 
+    notifyTransactionsChanged(database, portfolioId, c.req.header("Authorization") ?? "")
     return c.json(result)
   })
 
@@ -823,6 +826,7 @@ export function createTransactionRoutes(db?: DB) {
       await recomputePortfolioTotals(tx, identity.id, portfolioId)
     })
 
+    notifyTransactionsChanged(database, portfolioId, c.req.header("Authorization") ?? "")
     return c.body(null, 204)
   })
 
@@ -996,6 +1000,7 @@ export function createTransactionRoutes(db?: DB) {
       await recomputePortfolioTotals(tx, identity.id, portfolioId)
     })
 
+    notifyTransactionsChanged(database, portfolioId, c.req.header("Authorization") ?? "")
     return c.json(positionWire(closed, portfolio, 0, await latestRates(database)))
   })
 
@@ -1291,6 +1296,7 @@ export function createTransactionRoutes(db?: DB) {
     const totalValue = await openPositionsValue(database, identity.id, portfolioId)
     const fxTable = await latestRates(database)
 
+    notifyTransactionsChanged(database, portfolioId, c.req.header("Authorization") ?? "")
     return c.json(positionWire(fresh, portfolio, totalValue, fxTable), 201)
   })
 
