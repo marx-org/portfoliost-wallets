@@ -141,24 +141,24 @@ function timeframeCutoff(timeframe: string): string | null {
 
 /** Group daily values by YYYY-MM; return monthly return % per month. */
 function buildMonthlyReturns(
-  series: Array<{ date: string; value: number }>,
+  series: Array<{ date: string; cumulativeTwr: number | null }>,
 ): Array<{ month: string; returnPercent: number }> {
-  const byMonth = new Map<string, { first: number; last: number }>()
-  for (const { date, value } of series) {
+  // Month-over-month growth of the already flow-adjusted TWR index, so a
+  // deposit inflating the raw value does not inflate the monthly return.
+  const byMonth = new Map<string, number>()
+  for (const { date, cumulativeTwr } of series) {
     const month = date.slice(0, 7)
-    const cur = byMonth.get(month)
-    if (!cur) {
-      byMonth.set(month, { first: value, last: value })
-    } else {
-      cur.last = value
-    }
+    if (cumulativeTwr == null) continue
+    byMonth.set(month, cumulativeTwr)
   }
+  let prevTwr = 100
   return [...byMonth.entries()]
     .sort(([a], [b]) => a.localeCompare(b))
-    .map(([month, { first, last }]) => ({
-      month,
-      returnPercent: first > 0 ? ((last / first - 1) * 100) : 0,
-    }))
+    .map(([month, lastTwr]) => {
+      const returnPercent = prevTwr > 0 ? Math.round(((lastTwr / prevTwr - 1) * 100) * 100) / 100 : 0
+      prevTwr = lastTwr
+      return { month, returnPercent }
+    })
 }
 
 // ── Routes ─────────────────────────────────────────────────────────────
@@ -829,8 +829,8 @@ export function createPortfolioRoutes(db?: DB) {
     const totalReturn = totalValue - totalInvested
     const totalReturnPercent = totalInvested > 0 ? (totalReturn / totalInvested) * 100 : 0
 
-    // Monthly returns: group by YYYY-MM, (last_value / first_value - 1) × 100
-    const monthlyReturns = buildMonthlyReturns(rows.map((r) => ({ date: r.snapshotDate, value: Number(r.value) })))
+    // Monthly returns: month-over-month growth of the flow-adjusted TWR index
+    const monthlyReturns = buildMonthlyReturns(rows.map((r) => ({ date: r.snapshotDate, cumulativeTwr: r.cumulativeTwr })))
 
     // Benchmarks: mirror the portfolio's cash flows into each requested ticker
     // (D50) — BUYs invest cash in the benchmark, SELLs release it, seed = the

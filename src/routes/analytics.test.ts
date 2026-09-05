@@ -181,4 +181,38 @@ describe("GET /:id/analytics — benchmarks (D46/D48)", () => {
     expect(body.performance.timeSeries).toHaveLength(4)
     expect(body.benchmarks).toHaveLength(1)
   })
+
+  it("computes monthly returns as flow-adjusted TWR month-over-month (D50)", async () => {
+    const { db, user, headers } = await makeHarness("abe-monthly-twrs")
+    const a = app(db)
+    const pf = await seedPortfolio(db, user.id)
+    // July: 100 -> 102 (+2%). August starts flat (twr 102) while a $50k
+    // deposit balloons the raw value to 52000; the twr stays flat (102) and
+    // only the final move (+2%) shows in August.
+    const rows = [
+      { d: "2026-07-01", value: 1000, twr: "100" },
+      { d: "2026-07-31", value: 1020, twr: "102" },
+      { d: "2026-08-15", value: 52000, twr: "102" },
+      { d: "2026-08-31", value: 53040, twr: "104.04" },
+    ]
+    for (const r of rows) {
+      await db.insert(valueSnapshots).values({
+        portfolioId: pf.id,
+        snapshotDate: r.d,
+        value: r.value,
+        invested: "1000",
+        netFlow: "0",
+        cumulativeTwr: r.twr,
+      })
+    }
+    await seedBuy(db, user.id, pf.id, 1, 50000, "2026-08-02", 50000)
+
+    const res = await a.request(`/api/portfolios/${pf.id}/analytics?timeframe=1Y`, { headers })
+    expect(res.status).toBe(200)
+    const body = await res.json()
+    expect(body.performance.monthlyReturns).toEqual([
+      { month: "2026-07", returnPercent: 2 },
+      { month: "2026-08", returnPercent: 2 },
+    ])
+  })
 })
