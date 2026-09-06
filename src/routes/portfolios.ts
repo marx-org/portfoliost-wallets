@@ -15,6 +15,7 @@ import { preferredBaseCurrency } from "../services/preferences.js"
 import { refreshQuotes } from "../services/quotes.js"
 import { runBackfill, getBackfillStatus, buildBenchmarkSeries } from "../services/backfill.js"
 import { dailyNetCashFlows } from "../services/cashFlows.js"
+import { computeRiskMetrics } from "../services/riskMetrics.js"
 import { createTransactionRoutes } from "./portfolio-transactions.js"
 import type { components } from "../generated/api-types.js"
 
@@ -915,15 +916,59 @@ export function createPortfolioRoutes(db?: DB) {
     return c.json({ portfolios: [], timeframe: "1Y" })
   })
 
-  routes.get("/:id/risk-metrics", (c) => {
+  routes.get("/:id/risk-metrics", async (c) => {
+    const identity = c.get("userIdentity")
+    const id = c.req.param("id")
+    const timeframe = c.req.query("timeframe") || "1Y"
+    const database = getDbInstance()
+
+    // Verify ownership
+    const [pf] = await database
+      .select({ id: portfolios.id })
+      .from(portfolios)
+      .where(and(eq(portfolios.id, id), eq(portfolios.userId, identity.id)))
+      .limit(1)
+    if (!pf) return c.json({ error: "NotFound" }, 404)
+
+    // Fetch snapshot series filtered by timeframe
+    const cutoff = timeframeCutoff(timeframe)
+    const rows = await database
+      .select({
+        snapshotDate: valueSnapshots.snapshotDate,
+        value: valueSnapshots.value,
+        cumulativeTwr: valueSnapshots.cumulativeTwr,
+        cumulativeMwr: valueSnapshots.cumulativeMwr,
+      })
+      .from(valueSnapshots)
+      .where(
+        cutoff
+          ? and(eq(valueSnapshots.portfolioId, id), sql`${valueSnapshots.snapshotDate} >= ${cutoff}`)
+          : eq(valueSnapshots.portfolioId, id),
+      )
+      .orderBy(asc(valueSnapshots.snapshotDate))
+
+    const values = rows.map((r) => Number(r.value))
+    const dates = rows.map((r) => r.snapshotDate)
+
+    // Use pre-computed MWR index as the money-weighted return scalar (last point − 100)
+    const lastMwr = rows.length > 0 ? rows[rows.length - 1].cumulativeMwr : null
+    const mwrPercent = lastMwr !== null ? Math.round((Number(lastMwr) - 100) * 100) / 100 : null
+
+    const metrics = computeRiskMetrics(values, dates)
+
     return c.json({
-      volatility: 0,
-      sharpeRatio: 0,
-      maxDrawdown: 0,
-      beta: 0,
-      alpha: 0,
-      correlation: {},
-    })
+      sharpeRatio: metrics.sharpeRatio,
+      sortinoRatio: metrics.sortinoRatio,
+      calmarRatio: metrics.calmarRatio,
+      volatility: metrics.volatility,
+      maxDrawdown: metrics.maxDrawdown,
+      winRate: metrics.winRate,
+      periodReturnPercent: metrics.periodReturnPercent,
+      annualizedReturn: metrics.annualizedReturn,
+      annualizedReturnWithheldReason: metrics.annualizedReturnWithheldReason,
+      moneyWeightedReturn: mwrPercent,
+      moneyWeightedReturnWithheldReason: null,
+    } satisfies components["schemas"]["PortfolioRiskMetrics"])
   })
 
   return routes
