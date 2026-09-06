@@ -1258,9 +1258,9 @@ describe("Aggregates & metrics (§15 Phase G)", () => {
     expect(res.status).toBe(200)
     const body = await res.json()
     expect(body.totalValue).toBe(1500)
-    expect(body.totalCostBasis).toBe(1500)
+    expect(body.costBasis).toBe(1500)
     expect(body.positionCount).toBe(1)
-    expect(body.realizedPnl).toBe(0)
+    expect(body.realizedGain).toBe(0)
   })
 
   it("GET /:id/summary-metrics — with realized PnL after SELL", async () => {
@@ -1290,8 +1290,8 @@ describe("Aggregates & metrics (§15 Phase G)", () => {
     expect(res.status).toBe(200)
     const body = await res.json()
     expect(body.positionCount).toBe(1)
-    // realizedPnl should be > 0 (sell proceeds minus cost basis minus fees)
-    expect(body.realizedPnl).toBeGreaterThan(0)
+    // realizedGain should be > 0 (sell proceeds minus cost basis minus fees)
+    expect(body.realizedGain).toBeGreaterThan(0)
   })
 })
 

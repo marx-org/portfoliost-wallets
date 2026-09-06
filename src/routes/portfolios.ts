@@ -756,17 +756,43 @@ export function createPortfolioRoutes(db?: DB) {
       0,
     )
 
+    // Dividend income
+    const [divRow] = await database
+      .select({
+        income: sql<string>`coalesce(sum(${portfolioTransactions.totalAmount}) filter (where ${portfolioTransactions.type} = 'DIVIDEND'), 0)`,
+      })
+      .from(portfolioTransactions)
+      .where(
+        and(
+          eq(portfolioTransactions.userId, identity.id),
+          eq(portfolioTransactions.portfolioId, portfolioId),
+        ),
+      )
+    const cumulativeDividends = Number(divRow?.income ?? 0)
+
+    const totalInvested = Number(portfolio.totalInvested ?? 0)
+    const simpleReturnPercent = totalInvested > 0
+      ? Math.round(((totalValue - totalInvested) / totalInvested * 100) * 100) / 100
+      : 0
+
     return c.json({
       totalValue: Math.round(totalValue * 100) / 100,
-      totalCostBasis: Math.round(totalCostBasis * 100) / 100,
-      unrealizedPnl: Math.round(unrealizedPnl * 100) / 100,
-      unrealizedPnlPercent: Math.round(unrealizedPnlPercent * 100) / 100,
-      realizedPnl: Math.round(realizedPnl * 100) / 100,
-      dayChange: Math.round(dayChange * 100) / 100,
+      totalInvested: Math.round(totalInvested * 100) / 100,
+      costBasis: Math.round(totalCostBasis * 100) / 100,
+      positionValue: Math.round(totalValue * 100) / 100,
+      simpleReturnPercent,
+      investmentReturnPercent: simpleReturnPercent,
+      currencyImpactPercent: 0,
+      unrealizedGainLoss: Math.round(unrealizedPnl * 100) / 100,
+      realizedGain: Math.round(realizedPnl * 100) / 100,
+      cumulativeDividends: Math.round(cumulativeDividends * 100) / 100,
+      totalDividends: Math.round(cumulativeDividends * 100) / 100,
+      dayChangeAmount: Math.round(dayChange * 100) / 100,
       dayChangePercent: Math.round(dayChangePercent * 100) / 100,
+      dayChangeDate: new Date().toISOString(),
       weight: 0,
       positionCount: posRows.length,
-    })
+    } satisfies components["schemas"]["PortfolioSummaryMetrics"] & { weight: number; positionCount: number })
   })
 
   routes.get("/:id/analytics", async (c) => {
