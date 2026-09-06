@@ -11,6 +11,10 @@ import { createAdminRoutes } from "./routes/admin.js"
 import { createPortfolioRoutes } from "./routes/portfolios.js"
 import { createPublicShareRoutes } from "./routes/portfolios.js"
 import { createCrossPortfolioTransactionsRoute } from "./routes/portfolio-transactions.js"
+import { createLabelRoutes } from "./routes/labels.js"
+import { createPositionLabelRoutes } from "./routes/position-labels.js"
+import { createTransactionLabelRoutes } from "./routes/transaction-labels.js"
+import { createWalletTransactionLabelRoutes } from "./routes/wallet-transaction-labels.js"
 import { moduleMeta } from "./meta.js"
 
 const app = new Hono()
@@ -42,6 +46,12 @@ api.route("/portfolios/transactions", createCrossPortfolioTransactionsRoute())
 api.route("/portfolios", createPortfolioRoutes())
 // G3: public share view (auth-exempt) — mounted at /portfolios/public to avoid auth middleware
 api.route("/portfolios/public", createPublicShareRoutes())
+
+// D65–D68 — labels
+api.route("/labels", createLabelRoutes())
+api.route("/positions", createPositionLabelRoutes())
+api.route("/portfolios", createTransactionLabelRoutes())
+api.route("/wallets", createWalletTransactionLabelRoutes())
 
 app.route("/api", api)
 

@@ -1,8 +1,16 @@
 import { Hono, type Context } from "hono"
-import { and, desc, eq, gte, inArray } from "drizzle-orm"
+import { and, desc, eq, gte, inArray, type SQL } from "drizzle-orm"
 import { userIdentityMiddleware } from "../auth.js"
 import { getDb, type DB } from "../db/index.js"
-import { wallets, walletTransactions } from "../db/schema.js"
+import { wallets, walletTransactions, walletTransactionLabels } from "../db/schema.js"
+import {
+  labelsForWalletTransactions,
+  labelFilterIds,
+  attachLabelCondition,
+} from "../services/labels.js"
+import type { components } from "../generated/api-types.js"
+
+type Label = components["schemas"]["Label"]
 
 const LABELS: Record<string, string> = {
   DEPOSIT: "Deposit",
@@ -22,6 +30,24 @@ function paginate(c: Context) {
   const page = Math.max(1, Number(String(c.req.query("page") ?? "1")))
   const limit = Math.min(100, Math.max(1, Number(String(c.req.query("limit") ?? "10"))))
   return { page, limit }
+}
+
+/** AND filter on wallet transactions by `?labels=` (D67) → conditions. */
+function walletLabelsCondition(database: DB, raw: string | undefined): SQL[] {
+  const conditions: SQL[] = []
+  const ids = labelFilterIds(raw)
+  if (ids.length > 0) {
+    attachLabelCondition(
+      conditions,
+      walletTransactions.id,
+      walletTransactionLabels.walletTransactionId,
+      walletTransactionLabels.labelId,
+      walletTransactionLabels,
+      database,
+      ids,
+    )
+  }
+  return conditions
 }
 
 function pageResponse<T>(items: T[], total: number, page: number, limit: number) {
@@ -73,10 +99,20 @@ export function createHistoryRoutes(db?: DB) {
     const all = await database
       .select()
       .from(walletTransactions)
-      .where(eq(walletTransactions.walletId, walletId))
+      .where(
+        and(
+          eq(walletTransactions.walletId, walletId),
+          ...walletLabelsCondition(database, c.req.query("labels")),
+        ),
+      )
       .orderBy(desc(walletTransactions.executedAt))
     const start = (page - 1) * limit
-    const items = all.slice(start, start + limit).map(serialize)
+    const slice = all.slice(start, start + limit)
+    const labelMap = await labelsForWalletTransactions(
+      database,
+      slice.map((t) => t.id),
+    )
+    const items = slice.map((t) => serialize(t, labelMap.get(t.id) ?? []))
     return c.json(pageResponse(items, all.length, page, limit))
   })
 
@@ -92,13 +128,19 @@ export function createHistoryRoutes(db?: DB) {
       const types = typeFilter.split(",")
       conditions.push(inArray(walletTransactions.type, types as never))
     }
+    conditions.push(...walletLabelsCondition(database, c.req.query("labels")))
     const all = await database
       .select()
       .from(walletTransactions)
       .where(and(...conditions))
       .orderBy(desc(walletTransactions.executedAt))
     const start = (page - 1) * limit
-    const items = all.slice(start, start + limit).map(serialize)
+    const slice = all.slice(start, start + limit)
+    const labelMap = await labelsForWalletTransactions(
+      database,
+      slice.map((t) => t.id),
+    )
+    const items = slice.map((t) => serialize(t, labelMap.get(t.id) ?? []))
     return c.json(pageResponse(items, all.length, page, limit))
   })
 
@@ -111,7 +153,12 @@ export function createHistoryRoutes(db?: DB) {
     const all = await database
       .select()
       .from(walletTransactions)
-      .where(eq(walletTransactions.userId, identity.id))
+      .where(
+        and(
+          eq(walletTransactions.userId, identity.id),
+          ...walletLabelsCondition(database, c.req.query("labels")),
+        ),
+      )
       .orderBy(desc(walletTransactions.executedAt))
 
     const walletNames = new Map(
@@ -119,6 +166,11 @@ export function createHistoryRoutes(db?: DB) {
         w.id,
         w.name,
       ]),
+    )
+
+    const labelMap = await labelsForWalletTransactions(
+      database,
+      all.map((t) => t.id),
     )
 
     const mapped = all.map((t) => {
@@ -130,6 +182,7 @@ export function createHistoryRoutes(db?: DB) {
         walletName: walletNames.get(t.walletId) ?? null,
         type: t.type,
         displayLabel: LABELS[t.type] ?? t.type,
+        labels: labelMap.get(t.id) ?? [],
         amount: signed.toFixed(8),
         currency: t.currency,
         exchangeRate: t.exchangeRate != null ? Number(t.exchangeRate) : null,
@@ -246,11 +299,12 @@ export function createHistoryRoutes(db?: DB) {
   return routes
 }
 
-function serialize(t: typeof walletTransactions.$inferSelect) {
+function serialize(t: typeof walletTransactions.$inferSelect, labels: Label[] = []) {
   return {
     id: t.id,
     walletId: t.walletId,
     type: t.type,
+    labels,
     amount: Number(t.amount),
     currency: t.currency,
     status: t.status,

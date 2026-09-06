@@ -1,5 +1,5 @@
 import { Hono, type Context } from "hono"
-import { and, eq, sql, asc, desc } from "drizzle-orm"
+import { and, eq, sql, asc, desc, inArray, type SQL } from "drizzle-orm"
 import { z } from "zod"
 import { userIdentityMiddleware } from "../auth.js"
 import { getDb as resolveDb, type DB } from "../db/index.js"
@@ -9,11 +9,22 @@ import {
   portfolioTransactions,
   walletTransactions,
   wallets,
+  positionLabels,
+  transactionLabels,
 } from "../db/schema.js"
 import { resolveFeeFx, latestRates } from "../services/fee-fx.js"
+import {
+  labelsForPositions,
+  labelsForTransactions,
+  labelFilterIds,
+  attachLabelCondition,
+} from "../services/labels.js"
 import { convert } from "@marx2/contracts/fx"
 import { refreshQuotes } from "../services/quotes.js"
 import { notifyTransactionsChanged } from "../services/recalc-queue.js"
+import type { components } from "../generated/api-types.js"
+
+type Label = components["schemas"]["Label"]
 
 const scale8 = (n: number) => n.toFixed(8)
 const round2 = (n: number) => Math.round(n * 100) / 100
@@ -381,6 +392,7 @@ function positionWire(
   portfolio: { id: string; baseCurrency: string },
   totalValue: number,
   fxTable?: Record<string, number> | null,
+  labels: Label[] = [],
 ) {
   const avg   = Number(p.averageCostBasis)
   const qty   = Number(p.quantity)
@@ -446,6 +458,7 @@ function positionWire(
     afterHoursChangePercent: null,
     metrics: null,
     displayCurrency: portfolio.baseCurrency,
+    labels,
   }
 }
 
@@ -1042,13 +1055,23 @@ export function createTransactionRoutes(db?: DB) {
     const sortOrder = (c.req.query("sortOrder") ?? "desc").toLowerCase() === "asc" ? "asc" : "desc"
     const typeFilter = c.req.query("type")
     const positionId = c.req.query("positionId")
+    const labelsFilter = labelFilterIds(c.req.query("labels"))
 
-    const conditions = [
+    const conditions: SQL[] = [
       eq(portfolioTransactions.userId, identity.id),
       eq(portfolioTransactions.portfolioId, portfolioId),
     ]
     if (typeFilter) conditions.push(eq(portfolioTransactions.type, typeFilter.toUpperCase()))
     if (positionId) conditions.push(eq(portfolioTransactions.positionId, positionId))
+    attachLabelCondition(
+      conditions,
+      portfolioTransactions.id,
+      transactionLabels.transactionId,
+      transactionLabels.labelId,
+      transactionLabels,
+      database,
+      labelsFilter,
+    )
 
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const sortColExpr = (TX_SORT_COLS[sortBy] ?? portfolioTransactions.executedAt) as any
@@ -1074,8 +1097,12 @@ export function createTransactionRoutes(db?: DB) {
       .limit(limit)
       .offset(offset)
 
+    const labelMap = await labelsForTransactions(
+      database,
+      rows.map(({ tx }) => tx.id),
+    )
     const items = rows.map(({ tx, pos }) => ({
-      ...serializeTx(tx),
+      ...serializeTx(tx, labelMap.get(tx.id) ?? []),
       sector:  tx.sector  ?? pos?.sector  ?? null,
       country: tx.country ?? pos?.country ?? null,
     }))
@@ -1312,20 +1339,38 @@ export function createTransactionRoutes(db?: DB) {
 
     await refreshQuotes(database, identity.id, portfolioId, c.req.header("Authorization") ?? "")
 
+    const labelsFilter = labelFilterIds(c.req.query("labels"))
+    const conditions: SQL[] = [
+      eq(positions.userId, identity.id),
+      eq(positions.portfolioId, portfolioId),
+    ]
+    attachLabelCondition(
+      conditions,
+      positions.id,
+      positionLabels.positionId,
+      positionLabels.labelId,
+      positionLabels,
+      database,
+      labelsFilter,
+    )
+
     const posRows = await database
       .select()
       .from(positions)
-      .where(
-        and(
-          eq(positions.userId, identity.id),
-          eq(positions.portfolioId, portfolioId),
-        ),
-      )
+      .where(and(...conditions))
 
     const totalValue = await openPositionsValue(database, identity.id, portfolioId)
     const fxTable = await latestRates(database)
+    const labelMap = await labelsForPositions(
+      database,
+      posRows.map((p) => p.id),
+    )
 
-    return c.json(posRows.map((p) => positionWire(p, portfolio, totalValue, fxTable)))
+    return c.json(
+      posRows.map((p) =>
+        positionWire(p, portfolio, totalValue, fxTable, labelMap.get(p.id) ?? []),
+      ),
+    )
   })
 
   // ── E3: GET /:id/allocation — sector/asset/currency breakdown ────────
@@ -1469,7 +1514,7 @@ const PORTFOLIO_TX_SORT: Record<string, string> = {
   amount: "total_amount",
 }
 
-function serializeTx(r: typeof portfolioTransactions.$inferSelect) {
+function serializeTx(r: typeof portfolioTransactions.$inferSelect, labels: Label[] = []) {
   return {
     id: r.id,
     portfolioId: r.portfolioId,
@@ -1480,6 +1525,7 @@ function serializeTx(r: typeof portfolioTransactions.$inferSelect) {
     instrumentName: r.instrumentName,
     sector: r.sector,
     country: r.country,
+    labels,
     quantity: Number(r.quantity),
     price: Number(r.price),
     fees: r.fees != null ? Number(r.fees) : 0,
@@ -1522,11 +1568,23 @@ export function createCrossPortfolioTransactionsRoute(db?: DB) {
     const offset = (page - 1) * limit
     const sortBy = c.req.query("sortBy") ?? "date"
     const sortOrder = (c.req.query("sortOrder") ?? "desc").toLowerCase() === "asc" ? "asc" : "desc"
+    const labelsFilter = labelFilterIds(c.req.query("labels"))
+
+    const conditions: SQL[] = [sql`${portfolioTransactions.userId} = ${identity.id}`]
+    attachLabelCondition(
+      conditions,
+      portfolioTransactions.id,
+      transactionLabels.transactionId,
+      transactionLabels.labelId,
+      transactionLabels,
+      database,
+      labelsFilter,
+    )
 
     const [countRow] = await database
       .select({ count: sql<number>`count(*)::int` })
       .from(portfolioTransactions)
-      .where(sql`${portfolioTransactions.userId} = ${identity.id}`)
+      .where(and(...conditions))
 
     const total = countRow?.count ?? 0
 
@@ -1552,15 +1610,20 @@ export function createCrossPortfolioTransactionsRoute(db?: DB) {
       .from(portfolioTransactions)
       .leftJoin(portfolios, eq(portfolioTransactions.portfolioId, portfolios.id))
       .leftJoin(positions, eq(portfolioTransactions.positionId, positions.id))
-      .where(sql`${portfolioTransactions.userId} = ${identity.id}`)
+      .where(and(...conditions))
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       .orderBy(sortFn(sortColumn as any))
       .limit(limit)
       .offset(offset)
 
+    const labelMap = await labelsForTransactions(
+      database,
+      rows.map((r) => r.tx.id),
+    )
+
     return c.json({
       items: rows.map((r) => ({
-        ...serializeTx(r.tx),
+        ...serializeTx(r.tx, labelMap.get(r.tx.id) ?? []),
         portfolioName: r.portfolioName ?? "",
         sector:  r.tx.sector  ?? r.positionRow?.sector  ?? null,
         country: r.tx.country ?? r.positionRow?.country ?? null,

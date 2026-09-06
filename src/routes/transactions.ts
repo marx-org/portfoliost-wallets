@@ -245,5 +245,6 @@ function serializeTx(row: typeof walletTransactions.$inferSelect) {
     rateSource: row.rateSource,
     exchangeRate: row.exchangeRate != null ? Number(row.exchangeRate) : null,
     to_wallet_id: row.toWalletId,
+    labels: [],
   }
 }
