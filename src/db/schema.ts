@@ -355,3 +355,75 @@ export const portfolioBackfillMetadata = portfoliosSchema.table(
     errorMessage: text("error_message"),
   },
 )
+
+/**
+ * User-created labels (D65). `color` is a hex "#rrggbb" from the shared
+ * 10-colour palette; auto-assigned via palette cycling when omitted at
+ * creation. Name is unique per user.
+ */
+export const labels = portfoliosSchema.table(
+  "labels",
+  {
+    id: uuid("id").primaryKey().default(sql`gen_random_uuid()`),
+    userId: text("user_id").notNull(),
+    name: text("name").notNull(),
+    color: text("color").notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex("uq_labels_user_name").on(t.userId, t.name),
+    index("idx_labels_user").on(t.userId),
+  ],
+)
+
+/** Many-to-many: label -> position (D65). */
+export const positionLabels = portfoliosSchema.table(
+  "position_labels",
+  {
+    positionId: uuid("position_id")
+      .notNull()
+      .references(() => positions.id, { onDelete: "cascade" }),
+    labelId: uuid("label_id")
+      .notNull()
+      .references(() => labels.id, { onDelete: "cascade" }),
+  },
+  (t) => [
+    primaryKey({ columns: [t.positionId, t.labelId] }),
+    index("idx_position_labels_label").on(t.labelId),
+  ],
+)
+
+/** Many-to-many: label -> portfolio transaction (D65). */
+export const transactionLabels = portfoliosSchema.table(
+  "transaction_labels",
+  {
+    transactionId: uuid("transaction_id")
+      .notNull()
+      .references(() => portfolioTransactions.id, { onDelete: "cascade" }),
+    labelId: uuid("label_id")
+      .notNull()
+      .references(() => labels.id, { onDelete: "cascade" }),
+  },
+  (t) => [
+    primaryKey({ columns: [t.transactionId, t.labelId] }),
+    index("idx_transaction_labels_label").on(t.labelId),
+  ],
+)
+
+/** Many-to-many: label -> wallet transaction (D65). */
+export const walletTransactionLabels = portfoliosSchema.table(
+  "wallet_transaction_labels",
+  {
+    walletTransactionId: uuid("wallet_transaction_id")
+      .notNull()
+      .references(() => walletTransactions.id, { onDelete: "cascade" }),
+    labelId: uuid("label_id")
+      .notNull()
+      .references(() => labels.id, { onDelete: "cascade" }),
+  },
+  (t) => [
+    primaryKey({ columns: [t.walletTransactionId, t.labelId] }),
+    index("idx_wallet_transaction_labels_label").on(t.labelId),
+  ],
+)
