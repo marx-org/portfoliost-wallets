@@ -40,6 +40,17 @@ export const UpdateLabelSchema = z.object({
   color: z.string().regex(HEX_COLOR, "color must be a hex value like #rrggbb").optional(),
 })
 
+/**
+ * Detect the unique(user_id, name) constraint violation across drivers: the
+ * Postgres error sits on `cause` (PGlite) with code 23505, or in the message
+ * (node-postgres) with `duplicate key value violates unique constraint`.
+ */
+function isUniqueViolation(err: unknown): boolean {
+  const e = err as { message?: string; cause?: { code?: string; message?: string } }
+  if (e?.cause?.code === "23505") return true
+  return /duplicate key/i.test(`${e?.message ?? ""} ${e?.cause?.message ?? ""}`)
+}
+
 /** D66: next palette index not used by any of the user's existing labels (modulo 10). */
 export async function nextPaletteColor(db: DB, userId: string): Promise<string> {
   const rows = await db
@@ -86,7 +97,7 @@ export function createLabelRoutes(db?: DB) {
       return c.json(serializeLabel(created) satisfies Label, 201)
     } catch (err) {
       // unique(user_id, name) conflict → same label name already exists
-      if (err instanceof Error && /duplicate key/i.test(err.message)) {
+      if (isUniqueViolation(err)) {
         return c.json({ error: "Conflict", message: "A label with that name already exists" }, 409)
       }
       throw err
@@ -115,7 +126,7 @@ export function createLabelRoutes(db?: DB) {
       }
       return c.json(serializeLabel(updated) satisfies Label)
     } catch (err) {
-      if (err instanceof Error && /duplicate key/i.test(err.message)) {
+      if (isUniqueViolation(err)) {
         return c.json({ error: "Conflict", message: "A label with that name already exists" }, 409)
       }
       throw err
