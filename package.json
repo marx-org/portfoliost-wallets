@@ -10,7 +10,6 @@
     "test:watch": "vitest",
     "db:generate": "drizzle-kit generate",
     "db:migrate": "drizzle-kit migrate",
-    "db:seed": "node seed/run.mjs",
     "gen:openapi": "tsx src/gen-openapi.ts",
     "gen:types": "openapi-typescript node_modules/@marx2/contracts/openapi.yaml -o src/generated/api-types.d.ts",
     "fx:sync": "tsx src/scripts/fx-sync.ts"

@@ -14,7 +14,6 @@ COPY tsconfig.json ./
 COPY drizzle.config.ts ./
 COPY drizzle/ drizzle/
 COPY src/ src/
-COPY seed/ seed/
 
 RUN npm run build
 
@@ -25,4 +24,4 @@ EXPOSE 3000
 HEALTHCHECK --interval=15s --timeout=3s --start-period=5s --retries=3 \
   CMD node -e "fetch('http://localhost:3000/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
 
-CMD ["sh", "-c", "npm run db:migrate && SEED_PORTFOLIOS=${SEED_PORTFOLIOS:-false} npm run db:seed && node dist/server.js"]
+CMD ["sh", "-c", "npm run db:migrate && node dist/server.js"]
