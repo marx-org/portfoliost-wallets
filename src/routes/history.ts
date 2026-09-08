@@ -12,7 +12,7 @@ import type { components } from "../generated/api-types.js"
 
 type Label = components["schemas"]["Label"]
 
-const LABELS: Record<string, string> = {
+export const LABELS: Record<string, string> = {
   DEPOSIT: "Deposit",
   WITHDRAWAL: "Withdrawal",
   TRANSFER: "Transfer",

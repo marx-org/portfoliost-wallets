@@ -5,14 +5,18 @@ import { userIdentityMiddleware } from "../auth.js"
 import { getDb, type DB } from "../db/index.js"
 import { wallets, walletTransactions } from "../db/schema.js"
 import { settleFee } from "@marx2/contracts/fx"
+import { LABELS } from "./history.js"
 import type { components } from "../generated/api-types.js"
 
-type CashTransaction = components["schemas"]["CashTransaction"]
+type RecentCashTransaction = components["schemas"]["RecentCashTransaction"]
 
 const EDITABLE_TYPES = ["DEPOSIT", "WITHDRAWAL", "ADJUSTMENT"] as const
 
 const EditSchema = z.object({
   description: z.string().optional(),
+  /** contract wire field for updateCashTransaction */
+  date: z.string().optional(),
+  /** legacy sibling of CashTransaction.transaction_date */
   transaction_date: z.string().optional(),
   payment_method: z.string().optional(),
   type: z.enum(EDITABLE_TYPES).optional(),
@@ -137,7 +141,7 @@ export function createTransactionRoutes(db?: DB) {
         .set({
           description: patchBody.description ?? row.description,
           transactionDate:
-            patchBody.transaction_date ?? (row.transactionDate as string | null),
+            patchBody.date ?? patchBody.transaction_date ?? (row.transactionDate as string | null),
           paymentMethod: patchBody.payment_method ?? row.paymentMethod,
           type: newType,
           amount: signedNew.toFixed(8),
@@ -165,7 +169,7 @@ export function createTransactionRoutes(db?: DB) {
       return updatedRow
     })
 
-    return c.json({ ...serializeTx(updated) } satisfies CashTransaction)
+    return c.json({ ...serializeTx(updated) } satisfies RecentCashTransaction)
   })
 
   routes.delete("/:txId", async (c: Context) => {
@@ -227,24 +231,28 @@ function sqlAdd(column: unknown, delta: number) {
   return sql`coalesce(${column}, 0) + ${delta.toFixed(8)}`
 }
 
-function serializeTx(row: typeof walletTransactions.$inferSelect) {
+function serializeTx(row: typeof walletTransactions.$inferSelect): RecentCashTransaction {
   return {
     id: row.id,
     walletId: row.walletId,
+    walletName: null,
     type: row.type,
-    amount: Number(row.amount),
+    displayLabel: LABELS[row.type] ?? row.type,
+    amount: row.amount,
     currency: row.currency,
-    status: row.status,
-    description: row.description,
-    transaction_date: row.transactionDate,
-    executedAt: row.executedAt.toISOString(),
-    createdAt: row.createdAt.toISOString(),
-    fees: row.fees != null ? Number(row.fees) : null,
-    fees_type: row.feesType,
-    feeCurrency: row.feeCurrency,
-    rateSource: row.rateSource,
     exchangeRate: row.exchangeRate != null ? Number(row.exchangeRate) : null,
-    to_wallet_id: row.toWalletId,
+    reference: row.reference ?? null,
+    date: (row.transactionDate as string | null) ?? row.executedAt.toISOString(),
+    description: row.description ?? null,
+    createdAt: row.createdAt.toISOString(),
+    portfolioId: row.portfolioId ?? null,
+    fees: row.fees != null ? Number(row.fees) : null,
+    taxes: row.taxes != null ? Number(row.taxes) : null,
+    isInternalTransfer: false,
+    feeCurrency: row.feeCurrency ?? null,
+    rateSource: row.rateSource,
+    feeRateSource: row.feeRateSource,
+    feeExchangeRate: row.feeExchangeRate != null ? Number(row.feeExchangeRate) : null,
     labels: [],
   }
 }

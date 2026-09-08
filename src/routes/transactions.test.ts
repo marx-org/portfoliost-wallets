@@ -164,4 +164,26 @@ describe("PATCH /wallets/transactions/:id — fee FX edit parity (plan §13 foll
     // 10 PLN settles at the manual 0.25 → $2.50 netted off the $50 credit
     expect(await h.walletOf(w)).toBeCloseTo(47.5, 6)
   })
+
+  it("date edit persists via the contract field and shows in history", async () => {
+    const h = await boot()
+    const w = await h.mk()
+    const dep = await (await h.json(`/api/wallets/${w}/deposits`, {
+      amount: 100,
+      transaction_date: "2026-01-01",
+    })).json()
+
+    const res = await h.json(`/api/wallets/transactions/${dep.id}`, {
+      date: new Date("2019-06-05T00:00:00.000Z").toISOString(),
+    }, "PATCH")
+    expect(res.status).toBe(200)
+    const body = await res.json()
+    expect(body.date.startsWith("2019-06-05")).toBe(true)
+
+    const [row] = await h.db
+      .select()
+      .from(walletTransactions)
+      .where(eq(walletTransactions.id, dep.id))
+    expect(row.transactionDate).toBe("2019-06-05")
+  })
 })
