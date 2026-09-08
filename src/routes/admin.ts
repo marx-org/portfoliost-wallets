@@ -2,7 +2,10 @@ import { Hono } from "hono"
 import { userIdentityMiddleware, requireGroup } from "../auth.js"
 import { getDb, type DB } from "../db/index.js"
 import { fxRates } from "../db/schema.js"
+import type { components } from "../generated/api-types.js"
 import { sql, asc, desc, and, gte, lte, eq } from "drizzle-orm"
+
+type AdminFxRatesResponse = components["schemas"]["AdminFxRatesResponse"]
 
 export function createAdminRoutes(db?: DB) {
   const admin = new Hono()
@@ -20,13 +23,16 @@ export function createAdminRoutes(db?: DB) {
     const dateTo = c.req.query("date_to")
 
     const conditions = []
-    if (baseCurrency) conditions.push(eq(fxRates.currency, baseCurrency.toUpperCase()))
+    // All rows are EUR-based (D21/D25): quote is the stored currency column,
+    // base decoding happens on read. Non-EUR base matches nothing.
+    if (baseCurrency && baseCurrency.toUpperCase() !== "EUR") conditions.push(sql`false`)
+    if (quoteCurrency) conditions.push(eq(fxRates.currency, quoteCurrency.toUpperCase()))
     if (dateFrom) conditions.push(gte(fxRates.rateDate, dateFrom))
     if (dateTo) conditions.push(lte(fxRates.rateDate, dateTo))
 
     const where = conditions.length > 0 ? and(...conditions) : undefined
 
-    // Count total
+    // Count total (filters applied before pagination)
     const countResult = await d.execute(
       sql`SELECT COUNT(*) as count FROM wallets.fx_rates ${where ? sql`WHERE ${where}` : sql``}`
     )
@@ -54,15 +60,11 @@ export function createAdminRoutes(db?: DB) {
       rate: parseFloat(String(r.rate)),
     }))
 
-    // Filter quote_currency in-memory (it's EUR-based, quote = currency code)
-    const filtered = quoteCurrency
-      ? items.filter((i) => i.quoteCurrency === quoteCurrency.toUpperCase())
-      : items
-
-    return c.json({
-      items: filtered,
+    const body: AdminFxRatesResponse = {
+      items,
       pagination: { total, page, per_page: perPage, total_pages: totalPages },
-    })
+    }
+    return c.json(body)
   })
 
   return admin

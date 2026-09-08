@@ -1937,6 +1937,27 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/admin/currencies/rates": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Page through EUR-based FX reference rates with filters
+         * @description Admin-facing list of ECB reference rates (base is always EUR).
+         *     Sorting, filtering and pagination are all server-side.
+         */
+        get: operations["listAdminFxRates"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
 }
 export type webhooks = Record<string, never>;
 export interface components {
@@ -2550,6 +2571,8 @@ export interface components {
             quarter?: number | null;
             symbol?: string;
             audioUrl?: string | null;
+            reportUrl?: string | null;
+            formType?: string | null;
         };
         IRTranscript: {
             id?: string;
@@ -2558,9 +2581,17 @@ export interface components {
             quarter?: number | null;
             title?: string;
             time?: string | null;
-            participant?: Record<string, never>[];
+            participant?: components["schemas"]["IRTranscriptParticipant"][];
             audio?: string | null;
-            transcript?: Record<string, never>[];
+            transcript?: components["schemas"]["IRTranscriptBlock"][];
+            body?: string | null;
+        };
+        IRTranscriptParticipant: {
+            name?: string;
+        };
+        IRTranscriptBlock: {
+            name?: string;
+            speech?: string[];
         };
         ResearchCompare: {
             symbol?: string;
@@ -3303,6 +3334,12 @@ export interface components {
                 rowCount: number;
             }[];
         };
+        AdminPagination: {
+            total: number;
+            page: number;
+            per_page: number;
+            total_pages: number;
+        };
         AdminUser: {
             /**
              * Format: uuid
@@ -3325,12 +3362,21 @@ export interface components {
         };
         AdminUserListResponse: {
             items: components["schemas"]["AdminUser"][];
-            pagination: {
-                total: number;
-                page: number;
-                per_page: number;
-                total_pages: number;
-            };
+            pagination: components["schemas"]["AdminPagination"];
+        };
+        AdminFxRate: {
+            /**
+             * Format: date
+             * @description ECB reference rate date (EUR-based)
+             */
+            date: string;
+            baseCurrency: string;
+            quoteCurrency: string;
+            rate: number;
+        };
+        AdminFxRatesResponse: {
+            items: components["schemas"]["AdminFxRate"][];
+            pagination: components["schemas"]["AdminPagination"];
         };
     };
     responses: never;
@@ -6200,6 +6246,53 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["AdminUserListResponse"];
+                };
+            };
+            /** @description Missing or invalid token */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Not a portfoliost_admin */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+        };
+    };
+    listAdminFxRates: {
+        parameters: {
+            query?: {
+                page?: number;
+                per_page?: number;
+                sort_by?: "date" | "base_currency" | "quote_currency" | "rate";
+                sort_dir?: "asc" | "desc";
+                base_currency?: string;
+                quote_currency?: string;
+                date_from?: string;
+                date_to?: string;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Paginated FX rate list */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AdminFxRatesResponse"];
                 };
             };
             /** @description Missing or invalid token */
