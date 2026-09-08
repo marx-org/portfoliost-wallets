@@ -12,7 +12,8 @@
     "db:migrate": "drizzle-kit migrate",
     "gen:openapi": "tsx src/gen-openapi.ts",
     "gen:types": "openapi-typescript node_modules/@marx2/contracts/openapi.yaml -o src/generated/api-types.d.ts",
-    "fx:sync": "tsx src/scripts/fx-sync.ts"
+    "fx:sync": "tsx src/scripts/fx-sync.ts",
+    "fx:backfill": "tsx src/scripts/fx-backfill.ts"
   },
   "dependencies": {
     "@hono/node-server": "^2.1.1",
