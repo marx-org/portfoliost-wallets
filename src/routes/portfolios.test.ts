@@ -290,3 +290,31 @@ describe("Portfolio CRUD (§15 Phase B)", () => {
     expect(body.length).toBe(0)
   })
 })
+
+describe("GET /api/portfolios/:id/news (N6)", () => {
+  it("returns the fan-out NewsArticleList shape with empty holdings", async () => {
+    const hh = await makeHarness()
+    const a = app(hh.db)
+    const create = await a.request("/api/portfolios", {
+      method: "POST",
+      headers: hh.headers,
+      body: JSON.stringify({ name: "Growth", currency: "USD" }),
+    })
+    const portfolio = await create.json()
+
+    const res = await a.request(`/api/portfolios/${portfolio.id}/news`, { headers: hh.headers })
+    expect(res.status).toBe(200)
+    const body = await res.json()
+    expect(body).toEqual({
+      data: [],
+      pagination: {
+        count: 0,
+        total_count: 0,
+        has_next_page: false,
+        has_previous_page: false,
+        next_cursor: null,
+        previous_cursor: null,
+      },
+    })
+  })
+})

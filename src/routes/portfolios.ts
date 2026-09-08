@@ -13,6 +13,7 @@ import {
 } from "../db/schema.js"
 import { preferredBaseCurrency } from "../services/preferences.js"
 import { refreshQuotes } from "../services/quotes.js"
+import { getPortfolioNews } from "../services/portfolioNews.js"
 import { runBackfill, getBackfillStatus, buildBenchmarkSeries } from "../services/backfill.js"
 import { dailyNetCashFlows } from "../services/cashFlows.js"
 import { computeRiskMetrics } from "../services/riskMetrics.js"
@@ -934,8 +935,19 @@ export function createPortfolioRoutes(db?: DB) {
     return c.json({ events: [] })
   })
 
-  routes.get("/:id/news", (c) => {
-    return c.json({ articles: [], total: 0 })
+  routes.get("/:id/news", async (c) => {
+    const identity = c.get("userIdentity")
+    const id = c.req.param("id")
+    const limitParam = Number(c.req.query("limit"))
+    const limit = Number.isFinite(limitParam) && limitParam > 0 ? Math.min(Math.floor(limitParam), 100) : 50
+    const out = await getPortfolioNews(
+      getDbInstance(),
+      id,
+      identity.id,
+      c.req.header("Authorization") ?? "",
+      limit,
+    )
+    return c.json(out satisfies components["schemas"]["NewsArticleList"])
   })
 
   routes.get("/:id/compare", (c) => {
