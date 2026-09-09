@@ -2376,6 +2376,7 @@ export interface components {
             name?: string;
             type?: string;
             exchange?: string;
+            countryCode?: string | null;
             source?: string;
         };
         InstrumentSearchResponse: {
@@ -4737,6 +4738,8 @@ export interface operations {
                 sortOrder?: "asc" | "desc";
                 /** @description Comma-separated label ids; AND filter (entity must have all) */
                 labels?: string;
+                /** @description Filter by instrument symbol. Must be in canonical form: bare ticker for US listings (AAPL, SAP), Yahoo venue suffix for others (SAP.DE, SNT.WA). Case-insensitive exact match. */
+                instrumentSymbol?: string;
             };
             header?: never;
             path?: never;
@@ -5035,6 +5038,8 @@ export interface operations {
                 positionId?: string;
                 /** @description Comma-separated label ids; AND filter (entity must have all) */
                 labels?: string;
+                /** @description Filter by instrument symbol. Must be in canonical form: bare ticker for US listings (AAPL, SAP), Yahoo venue suffix for others (SAP.DE, SNT.WA). Case-insensitive exact match. */
+                instrumentSymbol?: string;
             };
             header?: never;
             path: {
