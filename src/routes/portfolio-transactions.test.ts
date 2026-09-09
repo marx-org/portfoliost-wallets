@@ -692,6 +692,38 @@ describe("Portfolio transaction history (§15 Phase D)", () => {
     expect(body.items[0].instrumentSymbol).toBe("AAPL")
   })
 
+  it("GET /:id/transactions — filter by instrumentSymbol (case-insensitive)", async () => {
+    const h = await makeHarness()
+    const a = app(h.db)
+
+    const createRes = await a.request("/api/portfolios", {
+      method: "POST",
+      headers: h.headers,
+      body: JSON.stringify({ name: "P", currency: "USD" }),
+    })
+    const portfolio = await createRes.json()
+
+    await a.request(`/api/portfolios/${portfolio.id}/transactions`, {
+      method: "POST",
+      headers: h.headers,
+      body: JSON.stringify(BUY_BODY),
+    })
+    await a.request(`/api/portfolios/${portfolio.id}/transactions`, {
+      method: "POST",
+      headers: h.headers,
+      body: JSON.stringify({ ...BUY_BODY, symbol: "MSFT", instrumentName: "Microsoft" }),
+    })
+
+    const res = await a.request(
+      `/api/portfolios/${portfolio.id}/transactions?instrumentSymbol=aapl`,
+      { headers: h.headers },
+    )
+    expect(res.status).toBe(200)
+    const body = await res.json()
+    expect(body.items.length).toBe(1)
+    expect(body.items[0].instrumentSymbol).toBe("AAPL")
+  })
+
   it("GET /:id/transactions — sort by symbol ascending", async () => {
     const h = await makeHarness()
     const a = app(h.db)
@@ -761,6 +793,45 @@ describe("Portfolio transaction history (§15 Phase D)", () => {
     // Both portfolios' transactions appear
     const symbols = body.items.map((t: any) => t.instrumentSymbol).sort()
     expect(symbols).toEqual(["AAPL", "MSFT"])
+  })
+
+  it("GET /transactions — filter by instrumentSymbol (case-insensitive)", async () => {
+    const h = await makeHarness()
+    const a = app(h.db)
+
+    const p1Res = await a.request("/api/portfolios", {
+      method: "POST",
+      headers: h.headers,
+      body: JSON.stringify({ name: "P1", currency: "USD" }),
+    })
+    const p1 = await p1Res.json()
+
+    const p2Res = await a.request("/api/portfolios", {
+      method: "POST",
+      headers: h.headers,
+      body: JSON.stringify({ name: "P2", currency: "EUR" }),
+    })
+    const p2 = await p2Res.json()
+
+    await a.request(`/api/portfolios/${p1.id}/transactions`, {
+      method: "POST",
+      headers: h.headers,
+      body: JSON.stringify(BUY_BODY),
+    })
+    await a.request(`/api/portfolios/${p2.id}/transactions`, {
+      method: "POST",
+      headers: h.headers,
+      body: JSON.stringify({ ...BUY_BODY, symbol: "MSFT" }),
+    })
+
+    const res = await a.request("/api/portfolios/transactions?instrumentSymbol=msft", {
+      headers: h.headers,
+    })
+    expect(res.status).toBe(200)
+    const body = await res.json()
+    expect(body.items.length).toBe(1)
+    expect(body.items[0].instrumentSymbol).toBe("MSFT")
+    expect(body.total).toBe(1)
   })
 
   it("GET /:id/transactions/export — returns all txs", async () => {

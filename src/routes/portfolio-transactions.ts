@@ -1055,6 +1055,7 @@ export function createTransactionRoutes(db?: DB) {
     const sortOrder = (c.req.query("sortOrder") ?? "desc").toLowerCase() === "asc" ? "asc" : "desc"
     const typeFilter = c.req.query("type")
     const positionId = c.req.query("positionId")
+    const instrumentSymbol = c.req.query("instrumentSymbol")
     const labelsFilter = labelFilterIds(c.req.query("labels"))
 
     const conditions: SQL[] = [
@@ -1063,6 +1064,11 @@ export function createTransactionRoutes(db?: DB) {
     ]
     if (typeFilter) conditions.push(eq(portfolioTransactions.type, typeFilter.toUpperCase()))
     if (positionId) conditions.push(eq(portfolioTransactions.positionId, positionId))
+    if (instrumentSymbol) {
+      conditions.push(
+        sql`upper(${portfolioTransactions.instrumentSymbol}) = upper(${instrumentSymbol})`,
+      )
+    }
     attachLabelCondition(
       conditions,
       portfolioTransactions.id,
@@ -1569,8 +1575,14 @@ export function createCrossPortfolioTransactionsRoute(db?: DB) {
     const sortBy = c.req.query("sortBy") ?? "date"
     const sortOrder = (c.req.query("sortOrder") ?? "desc").toLowerCase() === "asc" ? "asc" : "desc"
     const labelsFilter = labelFilterIds(c.req.query("labels"))
+    const instrumentSymbol = c.req.query("instrumentSymbol")
 
     const conditions: SQL[] = [sql`${portfolioTransactions.userId} = ${identity.id}`]
+    if (instrumentSymbol) {
+      conditions.push(
+        sql`upper(${portfolioTransactions.instrumentSymbol}) = upper(${instrumentSymbol})`,
+      )
+    }
     attachLabelCondition(
       conditions,
       portfolioTransactions.id,
