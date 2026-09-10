@@ -1,4 +1,5 @@
 import { serve } from "@hono/node-server"
+import "./instrumentation.js"
 import app from "./index.js"
 
 const port = parseInt(process.env.PORT ?? "3000", 10)

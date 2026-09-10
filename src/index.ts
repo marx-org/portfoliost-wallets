@@ -1,5 +1,5 @@
 import { Hono } from "hono"
-import { logger } from "hono/logger"
+import { pino } from "pino"
 
 import { validateJwt } from "./auth.js"
 import { createWalletRoutes } from "./routes/wallets.js"
@@ -16,10 +16,24 @@ import { createPositionLabelRoutes } from "./routes/position-labels.js"
 import { createTransactionLabelRoutes } from "./routes/transaction-labels.js"
 import { createWalletTransactionLabelRoutes } from "./routes/wallet-transaction-labels.js"
 import { moduleMeta } from "./meta.js"
+import { metricsRouteHandler } from "./instrumentation.js"
 
 const app = new Hono()
 
-app.use("*", logger())
+const log = pino({ base: { service: "portfoliost-wallets" } })
+app.use("*", async (c, next) => {
+  const start = Date.now()
+  await next()
+  log.info({
+    method: c.req.method,
+    path: c.req.path,
+    status: c.res.status,
+    duration_ms: Date.now() - start,
+    request_id: c.req.header("x-request-id") ?? undefined,
+  })
+})
+
+app.get("/metrics", metricsRouteHandler)
 
 app.get("/health", (c) => c.json({ status: "ok" }))
 
