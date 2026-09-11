@@ -1,10 +1,15 @@
 /**
  * D58 — Valuation via the provider tier.
  *
- * Fetches live quotes AND instrument profiles (name/sector/country) from the
+ * Fetches live quotes AND instrument profiles (name/sector) from the
  * instruments module for open positions in a portfolio, persists the snapshot
  * columns, and never throws — instruments unreachable → priceSource 'fallback',
  * stored profile fields kept as-is.
+ *
+ * Country is treated as canonical metadata recorded at buy time (2-letter ISO
+ * code from the instrument search result). The live profile only fills it in
+ * for positions that lack one, and prefers the profile's countryCode (ISO
+ * alpha-2) over its display name so the position never regresses to a guess.
  */
 
 import { and, eq, sql } from "drizzle-orm"
@@ -101,7 +106,11 @@ async function fetchProfile(symbol: string, authToken: string): Promise<CachedPr
         : typeof data.gicsSector === "string" && data.gicsSector
           ? data.gicsSector
           : null,
-      country: typeof data.country === "string" && data.country ? data.country : null,
+      country: typeof data.countryCode === "string" && data.countryCode
+        ? data.countryCode
+        : typeof data.country === "string" && data.country
+          ? data.country
+          : null,
       instrumentCurrency: typeof data.currency === "string" && data.currency ? data.currency.toUpperCase() : null,
       fetchedAt: Date.now(),
     }
@@ -142,9 +151,11 @@ function needsProfileRefresh(pos: { companyName: string | null; updatedAt: Date 
  * Quote side: fetches currentPrice, change, percentChange → persists marketValue,
  *   unrealizedGainLoss, dayChange, dayChangePercent, priceSource ('quote'|'fallback'), priceAsOf.
  *
- * Profile side: fetches companyName, sector, country from /:symbol/profile.
- *   These are persisted as live-but-cached values; stored values act as fallback
- *   when the instruments service is unavailable.
+ * Profile side: fetches companyName, sector from /:symbol/profile. Country
+ * (preferring the ISO countryCode) is filled only when the position has none —
+ * an existing country is canonical data recorded at buy time and must never be
+ * overwritten by a live guess. These are persisted as live-but-cached values;
+ * stored values act as fallback when the instruments service is unavailable.
  *
  * Never throws. Instruments errors → keep stored values, mark priceSource 'fallback'.
  */
@@ -201,7 +212,7 @@ export async function refreshQuotes(
           profileUpdate.sector = profile.sector
           profileUpdate.industry = profile.sector
         }
-        if (profile.country !== null) profileUpdate.country = profile.country
+        if (profile.country !== null && p.country == null) profileUpdate.country = profile.country
         if (profile.instrumentCurrency !== null) profileUpdate.instrumentCurrency = profile.instrumentCurrency
       }
 

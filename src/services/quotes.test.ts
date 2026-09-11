@@ -124,6 +124,44 @@ describe("refreshQuotes (D58)", () => {
     expect(updated.country).toBe("US")
   })
 
+  it("keeps the canonical buy-time country instead of overwriting it with the profile country", async () => {
+    const { db, user } = await makeHarness("q-user-6")
+    const { pf, pos } = await seedPortfolioAndPosition(db, user.id, { qty: 5, avg: 200 })
+    await db.update(positions).set({ country: "US" }).where(eq(positions.id, pos.id))
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockImplementation((url: string) => {
+        const u = String(url)
+        if (u.includes("/profile")) {
+          // the live instruments module resolves META to the provider display
+          // name + a colliding listing's countryCode — neither may clobber the
+          // 2-letter code the position was recorded with at buy time
+          return Promise.resolve({
+            ok: true,
+            json: async () => ({
+              ticker: "META",
+              name: "Meta Platforms, Inc.",
+              country: "United States",
+              countryCode: "IE",
+              finnhubIndustry: "Internet Content & Information",
+              currency: "USD",
+            }),
+          })
+        }
+        return Promise.resolve({
+          ok: true,
+          json: async () => ({ symbol: "AAPL", currentPrice: 211, change: 1, percentChange: 0.5, currency: "USD" }),
+        })
+      }),
+    )
+
+    await refreshQuotes(db, user.id, pf.id, "Bearer test-token")
+
+    const [updated] = await db.select().from(positions).where(eq(positions.id, pos.id))
+    expect(updated.country).toBe("US")
+    expect(updated.companyName).toBe("Meta Platforms, Inc.")
+  })
+
   it("marks priceSource fallback when instruments is unreachable", async () => {
     const { db, user } = await makeHarness("q-user-2")
     const { pf, pos } = await seedPortfolioAndPosition(db, user.id, {
