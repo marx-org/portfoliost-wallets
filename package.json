@@ -26,6 +26,7 @@
     "drizzle-orm": "^0.45.2",
     "hono": "^4.13.7",
     "hono-zod-openapi": "^1.1.1",
+    "import-in-the-middle": "^3.5.0",
     "jose": "^6.2.9",
     "pino": "^9.14.0",
     "postgres": "^3.4.7",
