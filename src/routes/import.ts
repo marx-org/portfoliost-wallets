@@ -763,6 +763,7 @@ async function insertImportPortfolioTx(
     if ("error" in res) {
       throw new ImportRowError(res.error, row.externalId, res.message ?? "Cannot sell")
     }
+    positionId = res.position.id
     realizedGainLoss = res.realizedGainLoss
   }
 
@@ -778,8 +779,10 @@ async function insertImportPortfolioTx(
       instrumentName: ptx.instrumentName ?? null,
       quantity: scale8(ptx.quantity),
       price: scale8(ptx.price),
-      originalQuantity: ptx.originalQuantity != null ? scale8(ptx.originalQuantity) : null,
-      originalPrice: ptx.originalPrice != null ? scale8(ptx.originalPrice) : null,
+      // Default originals to the restated values (mirrors the interactive route
+      // invariant), so §23.6 apply-split can restate rows from frozen originals.
+      originalQuantity: scale8(ptx.originalQuantity ?? ptx.quantity),
+      originalPrice: scale8(ptx.originalPrice ?? ptx.price),
       currency: txCcy,
       instrumentCurrency: txCcy,
       assetType: ptx.assetType,

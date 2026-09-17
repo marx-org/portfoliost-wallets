@@ -340,6 +340,27 @@ export const portfolioTransactions = portfoliosSchema.table(
 )
 
 /**
+ * Durable split event ledger (§23.6). `factor` is the QUANTITY multiplier
+ * (2 for a 2:1 split); the instruments split_adjustments table holds price
+ * multipliers and is wiped by stooq imports, so it cannot serve as this
+ * history. Restatement of pre-split transactions derives from the frozen
+ * original_quantity/original_price × product of applicable events, which
+ * keeps apply-split idempotent.
+ */
+export const splitEvents = portfoliosSchema.table(
+  "split_events",
+  {
+    id: serial("id").primaryKey(),
+    symbol: text("symbol").notNull(),
+    factor: numeric("factor", { precision: 20, scale: 8 }).notNull(),
+    effectiveDate: date("effective_date").notNull(),
+    source: text("source").notNull().default("admin"),
+    appliedAt: timestamp("applied_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [uniqueIndex("uq_split_events").on(t.symbol, t.effectiveDate)],
+)
+
+/**
  * Public share links (D54). 10-active limit enforced at write time (D59);
  * delete is unconditional. privacy_settings jsonb controls position projection
  * for the auth-exempt public route.

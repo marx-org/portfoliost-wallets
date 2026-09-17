@@ -16,6 +16,7 @@ import { createPositionLabelRoutes } from "./routes/position-labels.js"
 import { createTransactionLabelRoutes } from "./routes/transaction-labels.js"
 import { createWalletTransactionLabelRoutes } from "./routes/wallet-transaction-labels.js"
 import { createImportRoutes } from "./routes/import.js"
+import { createInternalRoutes } from "./routes/internal.js"
 import { moduleMeta } from "./meta.js"
 import { metricsRouteHandler } from "./instrumentation.js"
 
@@ -43,6 +44,8 @@ app.get("/__meta", (c) => c.json(moduleMeta()))
 
 // D9 — edge auth preflight: 204 when the bearer token validates, 401 otherwise
 app.get("/internal/verify", validateJwt, (c) => c.body(null, 204))
+// §23.6 — internal split application (no JWT, never exposed through the gateway)
+app.route("/internal", createInternalRoutes())
 
 const api = new Hono()
 const walletsApi = createWalletRoutes()
