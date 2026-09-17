@@ -123,6 +123,11 @@ const ImportPortfolioTxSchema = z
     feeCurrency: z.string().regex(ISO_CURRENCY, "currency must be an ISO 4217 code").nullable().optional(),
     feeRateSource: z.enum(["automatic", "manual"]).nullable().optional(),
     feeExchangeRate: z.number().positive().nullable().optional(),
+    // Options (plan §24.7): `direction: "SHORT"` marks a short-option OPEN
+    // (e.g. a written covered call) — position-creating, regardless of type.
+    direction: z.enum(["LONG", "SHORT"]).nullable().optional(),
+    optionType: z.enum(["CALL", "PUT"]).nullable().optional(),
+    contractSize: z.number().nullable().optional(),
   })
   .strict()
 
@@ -154,9 +159,11 @@ function validationError(c: Context, parsed: { error?: { issues?: { message?: st
 }
 
 /**
- * Restate the position ledger for an imported BUY (§23.4): weighted-avg cost
- * basis against the open lot with the same symbol, mirroring the interactive
- * route's `upsertPositionOnBuy`.
+ * Restate the position ledger for an imported position-creating row
+ * (§23.4, §24.7): weighted-avg cost basis against the open lot with the same
+ * symbol, mirroring the interactive route's `upsertPositionOnBuy`. A `SHORT`
+ * lot (short option) is a distinct position from the same-symbol underlying
+ * equity lot (direction NULL/LONG).
  */
 async function upsertImportPositionOnBuy(
   tx: DB,
@@ -170,6 +177,9 @@ async function upsertImportPositionOnBuy(
     currency: string
     assetType: string
     feesSettled: number
+    direction?: "LONG" | "SHORT" | null
+    optionType?: "CALL" | "PUT" | null
+    contractSize?: number | null
   },
 ) {
   const symbol = body.symbol.toUpperCase()
@@ -182,6 +192,9 @@ async function upsertImportPositionOnBuy(
         eq(positions.portfolioId, portfolioId),
         eq(positions.symbol, symbol),
         eq(positions.isOpen, true),
+        body.direction
+          ? eq(positions.direction, body.direction)
+          : sql`${positions.direction} is null or ${positions.direction} = 'LONG'`,
       ),
     )
 
@@ -218,6 +231,9 @@ async function upsertImportPositionOnBuy(
       averageCostBasis: String(body.price),
       instrumentCurrency: body.currency,
       assetType: body.assetType,
+      contractSize: body.contractSize != null ? String(body.contractSize) : null,
+      direction: body.direction ?? null,
+      optionType: body.optionType ?? null,
       sector: "Other",
       country: "Other",
       fees: String(body.feesSettled),
@@ -742,7 +758,11 @@ async function insertImportPortfolioTx(
   let positionId: string | null = null
   let realizedGainLoss: number | null = ptx.realizedGainLoss ?? null
 
-  if (ptx.type === "BUY") {
+  // A SHORT row opens (or adds to) a short option position — position-
+  // creating, no realized P/L — whether it arrives as type BUY or SELL
+  // (written covered calls come in as SELL + direction SHORT, plan §24.7).
+  const isShortOpen = ptx.direction === "SHORT"
+  if (ptx.type === "BUY" || isShortOpen) {
     const position = await upsertImportPositionOnBuy(tx, userId, ptx.portfolioId, {
       symbol,
       instrumentName: ptx.instrumentName ?? null,
@@ -751,6 +771,9 @@ async function insertImportPortfolioTx(
       currency: txCcy,
       assetType: ptx.assetType,
       feesSettled,
+      direction: ptx.direction ?? null,
+      optionType: ptx.optionType ?? null,
+      contractSize: ptx.contractSize ?? null,
     })
     positionId = position.id
   } else if (ptx.type === "SELL") {

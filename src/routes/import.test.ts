@@ -374,6 +374,59 @@ describe("POST /api/import/transactions (§23.4)", () => {
     expect(Number(portfolio.totalInvested)).toBe(1000)
   })
 
+  it("SELL + direction=SHORT opens a short option lot distinct from the same-symbol equity lot", async () => {
+    const h = await boot()
+    const { portfolioId } = await seedWalletAndPortfolio(h)
+
+    const optRow = (id: string, price: number): Record<string, unknown> => ({
+      externalId: id,
+      walletName: "IBKR",
+      executedAt: "2024-03-15T10:00:00.000Z",
+      walletTx: { type: "SELL", amount: 50, currency: "USD" },
+      portfolioTx: {
+        portfolioId,
+        type: "SELL",
+        instrumentSymbol: "SAP",
+        assetType: "OPTION",
+        direction: "SHORT",
+        optionType: "CALL",
+        contractSize: 100,
+        quantity: 100,
+        price,
+        currency: "USD",
+      },
+    })
+
+    const res = await postTransactions(h, [buyRow(portfolioId, { instrumentSymbol: "SAP" }), optRow("e-opt-1", 0.5)])
+    expect((await res.json()).errors).toEqual([])
+
+    const lots = await h.db.select().from(positions).where(eq(positions.portfolioId, portfolioId))
+    const equity = lots.find((p) => p.direction == null)
+    const option = lots.find((p) => p.direction === "SHORT")
+    expect(Number(equity?.quantity)).toBe(10) // equity lot untouched by the option sell
+    expect(Number(option?.quantity)).toBe(100)
+    expect(option?.optionType).toBe("CALL")
+    expect(Number(option?.contractSize)).toBe(100)
+    expect(Number(option?.averageCostBasis)).toBe(0.5)
+
+    // second written call adds to the SHORT lot (weighted-avg premium)
+    const res2 = await postTransactions(h, [optRow("e-opt-2", 0.7)])
+    expect((await res2.json()).errors).toEqual([])
+    const after = await h.db.select().from(positions).where(eq(positions.portfolioId, portfolioId))
+    const short2 = after.find((p) => p.direction === "SHORT")
+    expect(Number(short2?.quantity)).toBe(200)
+    expect(Number(short2?.averageCostBasis)).toBe(0.6)
+    expect(after.filter((p) => p.direction == null)).toHaveLength(1)
+
+    // the option rows are stored as SELL with no realized P/L
+    const optTx = await h.db
+      .select()
+      .from(portfolioTransactions)
+      .where(and(eq(portfolioTransactions.type, "SELL"), eq(portfolioTransactions.portfolioId, portfolioId)))
+    expect(optTx).toHaveLength(2)
+    expect(optTx.every((t) => t.realizedGainLoss == null)).toBe(true)
+  })
+
   it("stores pre-restatement originalQuantity/originalPrice independently from restated values", async () => {
     const h = await boot()
     const { portfolioId } = await seedWalletAndPortfolio(h)
