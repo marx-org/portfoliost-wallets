@@ -1,5 +1,5 @@
 import { Hono, type Context } from "hono"
-import { and, eq, sql } from "drizzle-orm"
+import { and, desc, eq, sql } from "drizzle-orm"
 import { z } from "zod"
 import { userIdentityMiddleware } from "../auth.js"
 import { getDb, type DB } from "../db/index.js"
@@ -19,6 +19,8 @@ type ImportWalletBootstrapResponse = components["schemas"]["ImportWalletBootstra
 type ImportPortfolioBootstrapResponse = components["schemas"]["ImportPortfolioBootstrapResponse"]
 type ImportTransactionsResponse = components["schemas"]["ImportTransactionsResponse"]
 type SyncRun = components["schemas"]["SyncRun"]
+type SyncRunsResponse = components["schemas"]["SyncRunsResponse"]
+type SourceWipeResponse = components["schemas"]["SourceWipeResponse"]
 
 const round2 = (n: number) => Math.round(n * 100) / 100
 const round8 = (n: number) => Math.round(n * 1e8) / 1e8
@@ -560,6 +562,100 @@ export function createImportRoutes(db?: DB) {
       syncRun: syncRunToContract(syncRunRow),
     } satisfies ImportTransactionsResponse)
   })
+
+
+  // §23.5 — import source management
+  // -------------------------------------------------------------------------
+  // GET /import/sync-runs — list sync runs (filter by externalSource,
+  // paginate with limit/offset), most recent first.
+  routes.get("/sync-runs", async (c) => {
+    const identity = c.get("userIdentity")
+    if (!identity) return c.json({ message: "Unauthorized" }, 401)
+    const database = getDbInstance()
+    const query = c.req.query()
+    const externalSource = query.externalSource || undefined
+    const limit = Math.min(Math.max(Number(query.limit ?? 25), 1), 100)
+    const offset = Math.max(Number(query.offset ?? 0), 0)
+    const where = and(
+      eq(syncRuns.userId, identity.id),
+      externalSource ? eq(syncRuns.externalSource, externalSource) : undefined,
+    )
+    const [rows, [{ total }]] = await Promise.all([
+      database
+        .select()
+        .from(syncRuns)
+        .where(where)
+        .orderBy(desc(syncRuns.id))
+        .limit(limit)
+        .offset(offset),
+      database
+        .select({ total: sql<number>`count(*)::int` })
+        .from(syncRuns)
+        .where(where),
+    ])
+    return c.json({
+      items: rows.map(syncRunToContract),
+      total,
+    } satisfies SyncRunsResponse)
+  })
+
+  // DELETE /import/sync-runs/{id} — delete a single run (404 if not owned).
+  routes.delete("/sync-runs/:id", async (c) => {
+    const identity = c.get("userIdentity")
+    if (!identity) return c.json({ message: "Unauthorized" }, 401)
+    const database = getDbInstance()
+    const id = Number(c.req.param("id"))
+    const deleted = await database
+      .delete(syncRuns)
+      .where(and(eq(syncRuns.id, id), eq(syncRuns.userId, identity.id)))
+      .returning({ id: syncRuns.id })
+    if (deleted.length === 0) return c.json({ message: "Not found" }, 404)
+    return c.body(null, 204)
+  })
+
+  // DELETE /import/source/{externalSource} — wipe all data tagged with this
+  // external source for the authenticated user, in one transaction.
+  routes.delete("/source/:externalSource", async (c) => {
+    const identity = c.get("userIdentity")
+    if (!identity) return c.json({ message: "Unauthorized" }, 401)
+    const database = getDbInstance()
+    const externalSource = c.req.param("externalSource")
+    const deleted = await database.transaction(async (tx) => {
+      const walletTransactionsRows = await tx
+        .delete(walletTransactions)
+        .where(
+          and(
+            eq(walletTransactions.externalSource, externalSource),
+            eq(walletTransactions.userId, identity.id),
+          ),
+        )
+        .returning({ id: walletTransactions.id })
+
+      const portfoliosRows = await tx
+        .delete(portfolios)
+        .where(and(eq(portfolios.externalSource, externalSource), eq(portfolios.userId, identity.id)))
+        .returning({ id: portfolios.id })
+
+      const walletsRows = await tx
+        .delete(wallets)
+        .where(and(eq(wallets.externalSource, externalSource), eq(wallets.userId, identity.id)))
+        .returning({ id: wallets.id })
+
+      const syncRunsRows = await tx
+        .delete(syncRuns)
+        .where(and(eq(syncRuns.externalSource, externalSource), eq(syncRuns.userId, identity.id)))
+        .returning({ id: syncRuns.id })
+
+      return {
+        walletTransactions: walletTransactionsRows.length,
+        portfolios: portfoliosRows.length,
+        wallets: walletsRows.length,
+        syncRuns: syncRunsRows.length,
+      }
+    })
+    return c.json({ deleted } satisfies SourceWipeResponse)
+  })
+
 
   return routes
 }

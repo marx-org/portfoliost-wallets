@@ -211,6 +211,127 @@ describe("POST /api/import/portfolios/bootstrap (§23.3)", () => {
   })
 })
 
+describe("GET /api/import/sync-runs (§23.5)", () => {
+  it("lists runs for the user, most recent first, with total", async () => {
+    const h = await boot()
+    const { portfolioId } = await seedWalletAndPortfolio(h)
+    await postTransactions(h, [buyRow(portfolioId)])
+
+    const res = await h.app.request("/api/import/sync-runs", { headers: h.headers })
+    expect(res.status).toBe(200)
+    const body = await res.json()
+    expect(body.total).toBe(1)
+    expect(body.items).toHaveLength(1)
+    expect(body.items[0]).toMatchObject({
+      externalSource: "google-sheets:transakcje",
+      spreadsheetId: "spr-1",
+      status: "done",
+    })
+  })
+
+  it("filters by externalSource and paginates with limit/offset", async () => {
+    const h = await boot()
+    const { portfolioId } = await seedWalletAndPortfolio(h)
+    await postTransactions(h, [buyRow(portfolioId)])
+    await h.db.insert(syncRuns).values({
+      userId: "user-1",
+      externalSource: "other:source",
+      spreadsheetId: "spr-2",
+      sheet: "s",
+      status: "done",
+    })
+
+    const filtered = await (await h.app.request("/api/import/sync-runs?externalSource=other%3Asource", { headers: h.headers })).json()
+    expect(filtered.total).toBe(1)
+    expect(filtered.items[0].externalSource).toBe("other:source")
+
+    const paged = await (await h.app.request("/api/import/sync-runs?limit=1&offset=1", { headers: h.headers })).json()
+    expect(paged.total).toBe(2)
+    expect(paged.items).toHaveLength(1)
+  })
+})
+
+describe("DELETE /api/import/sync-runs/:id (§23.5)", () => {
+  it("deletes the run and returns 204; keeps imported data", async () => {
+    const h = await boot()
+    const { portfolioId } = await seedWalletAndPortfolio(h)
+    await postTransactions(h, [buyRow(portfolioId)])
+    const [run] = await h.db.select().from(syncRuns)
+
+    const res = await h.app.request(`/api/import/sync-runs/${run.id}`, { method: "DELETE", headers: h.headers })
+    expect(res.status).toBe(204)
+    expect(await h.db.select().from(syncRuns)).toHaveLength(0)
+    expect(await h.db.select().from(walletTransactions)).toHaveLength(1)
+  })
+
+  it("returns 404 for a run owned by another user", async () => {
+    const h = await boot()
+    const [run] = await h.db
+      .insert(syncRuns)
+      .values({ userId: "user-2", externalSource: "s", spreadsheetId: "x", sheet: "y", status: "done" })
+      .returning()
+
+    const res = await h.app.request(`/api/import/sync-runs/${run.id}`, { method: "DELETE", headers: h.headers })
+    expect(res.status).toBe(404)
+  })
+})
+
+describe("DELETE /api/import/source/:externalSource (§23.5)", () => {
+  it("wipes only rows tagged with the source; manual wallet/portfolio survive", async () => {
+    const h = await boot()
+    const { walletId, portfolioId } = await seedWalletAndPortfolio(h)
+    await postTransactions(h, [buyRow(portfolioId)])
+
+    const res = await h.app.request("/api/import/source/google-sheets%3Atransakcje", {
+      method: "DELETE",
+      headers: h.headers,
+    })
+    expect(res.status).toBe(200)
+    expect(await res.json()).toEqual({
+      deleted: { walletTransactions: 1, portfolios: 0, wallets: 0, syncRuns: 1 },
+    })
+
+    expect(await h.db.select().from(walletTransactions)).toHaveLength(0)
+    expect(await h.db.select().from(syncRuns)).toHaveLength(0)
+    const [wallet] = await h.db.select().from(wallets).where(eq(wallets.id, walletId))
+    const [portfolio] = await h.db.select().from(portfolios).where(eq(portfolios.id, portfolioId))
+    expect(wallet).toBeDefined()
+    expect(portfolio).toBeDefined()
+  })
+
+  it("cascades positions with the tagged portfolio; other-source rows survive; empty source → zero counts", async () => {
+    const h = await boot()
+    const { walletId, portfolioId } = await seedWalletAndPortfolio(h)
+    await h.db.update(portfolios).set({ externalSource: "imp:src" }).where(eq(portfolios.id, portfolioId))
+    await postTransactions(h, [buyRow(portfolioId)])
+    await h.db.insert(walletTransactions).values({
+      userId: "user-1",
+      walletId,
+      externalSource: "imp:src",
+      externalId: "w-imp-1",
+      type: "DEPOSIT",
+      amount: "50",
+      currency: "USD",
+      executedAt: new Date("2024-01-01T00:00:00.000Z"),
+    })
+
+    const res = await h.app.request("/api/import/source/imp%3Asrc", { method: "DELETE", headers: h.headers })
+    expect(res.status).toBe(200)
+    expect(await res.json()).toEqual({
+      deleted: { walletTransactions: 1, portfolios: 1, wallets: 0, syncRuns: 0 },
+    })
+    expect(await h.db.select().from(positions)).toHaveLength(0)
+    expect(await h.db.select().from(portfolioTransactions)).toHaveLength(0)
+    const wtxs = await h.db.select().from(walletTransactions)
+    expect(wtxs).toHaveLength(1)
+    expect(wtxs[0].externalSource).toBe("google-sheets:transakcje")
+    expect(await h.db.select().from(syncRuns)).toHaveLength(1)
+
+    const empty = await (await h.app.request("/api/import/source/nobody", { method: "DELETE", headers: h.headers })).json()
+    expect(empty.deleted).toEqual({ walletTransactions: 0, portfolios: 0, wallets: 0, syncRuns: 0 })
+  })
+})
+
 describe("POST /api/import/transactions (§23.4)", () => {
   it("BUY then SELL restates the position (avg cost, qty, realizedGainLoss)", async () => {
     const h = await boot()
