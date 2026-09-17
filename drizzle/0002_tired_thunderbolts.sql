@@ -1,0 +1,2 @@
+CREATE UNIQUE INDEX "uq_portfolios_user_name" ON "portfolios"."portfolios" USING btree ("user_id","name");--> statement-breakpoint
+CREATE UNIQUE INDEX "uq_wallets_user_name" ON "wallets"."wallets" USING btree ("user_id","name");

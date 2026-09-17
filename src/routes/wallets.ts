@@ -88,16 +88,27 @@ export function createWalletRoutes(db?: DB) {
     }
     const defaultBase =
       parsed.data.baseCurrency ?? (await preferredBaseCurrency(forwardedHeaders))
-    const [created] = await database
-      .insert(wallets)
-      .values({
-        userId: identity.id,
-        name: parsed.data.name,
-        currency: parsed.data.currency.toUpperCase(),
-        baseCurrency: defaultBase.toUpperCase(),
-      })
-      .returning()
-    return c.json(serializeWallet(created) satisfies CashWallet, 201)
+    try {
+      const [created] = await database
+        .insert(wallets)
+        .values({
+          userId: identity.id,
+          name: parsed.data.name,
+          currency: parsed.data.currency.toUpperCase(),
+          baseCurrency: defaultBase.toUpperCase(),
+        })
+        .returning()
+      return c.json(serializeWallet(created) satisfies CashWallet, 201)
+    } catch (err) {
+      // uq_wallets_user_name (import bootstrap natural key) — duplicate name
+      if ((err as { cause?: { code?: string } }).cause?.code === "23505") {
+        return c.json(
+          { error: "Conflict", message: `A wallet named "${parsed.data.name}" already exists` },
+          409,
+        )
+      }
+      throw err
+    }
   })
 
   routes.get("/", async (c) => {

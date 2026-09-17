@@ -44,7 +44,11 @@ export const wallets = walletsSchema.table(
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },
-  (t) => [index("idx_wallets_user").on(t.userId)],
+  (t) => [
+    index("idx_wallets_user").on(t.userId),
+    // natural key for import bootstrap idempotency (import API §23.3)
+    uniqueIndex("uq_wallets_user_name").on(t.userId, t.name),
+  ],
 )
 
 const TX_TYPES = [
@@ -210,7 +214,11 @@ export const portfolios = portfoliosSchema.table(
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },
-  (t) => [index("idx_portfolios_user").on(t.userId)],
+  (t) => [
+    index("idx_portfolios_user").on(t.userId),
+    // natural key for import bootstrap idempotency (import API §23.3)
+    uniqueIndex("uq_portfolios_user_name").on(t.userId, t.name),
+  ],
 )
 
 /**

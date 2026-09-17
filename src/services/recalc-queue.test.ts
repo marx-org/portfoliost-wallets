@@ -13,10 +13,10 @@ vi.mock("./backfill.js", async (importOriginal) => {
 
 const mockedRecalc = vi.mocked(recalcPortfolioHistory)
 
-async function seedPortfolio(db: Awaited<ReturnType<typeof makeHarness>>["db"], userId: string) {
+async function seedPortfolio(db: Awaited<ReturnType<typeof makeHarness>>["db"], userId: string, name = "Queue PF") {
   const [pf] = await db
     .insert(portfolios)
-    .values({ userId, name: "Queue PF", currency: "USD", baseCurrency: "USD" })
+    .values({ userId, name, currency: "USD", baseCurrency: "USD" })
     .returning()
   return pf
 }
@@ -89,8 +89,8 @@ describe("recalc-queue (background recalc on transaction changes)", () => {
 
   it("runs at most one pass concurrently per portfolio, but different portfolios are independent", async () => {
     const { db, user } = await makeHarness("queue-user-3")
-    const pfA = await seedPortfolio(db, user.id)
-    const pfB = await seedPortfolio(db, user.id)
+    const pfA = await seedPortfolio(db, user.id, "Queue PF A")
+    const pfB = await seedPortfolio(db, user.id, "Queue PF B")
     mockedRecalc.mockResolvedValue(undefined)
 
     notifyTransactionsChanged(db, pfA.id, "Bearer test")

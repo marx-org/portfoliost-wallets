@@ -15,6 +15,7 @@ import { createLabelRoutes } from "./routes/labels.js"
 import { createPositionLabelRoutes } from "./routes/position-labels.js"
 import { createTransactionLabelRoutes } from "./routes/transaction-labels.js"
 import { createWalletTransactionLabelRoutes } from "./routes/wallet-transaction-labels.js"
+import { createImportRoutes } from "./routes/import.js"
 import { moduleMeta } from "./meta.js"
 import { metricsRouteHandler } from "./instrumentation.js"
 
@@ -66,6 +67,9 @@ api.route("/labels", createLabelRoutes())
 api.route("/positions", createPositionLabelRoutes())
 api.route("/portfolios", createTransactionLabelRoutes())
 api.route("/wallets", createWalletTransactionLabelRoutes())
+
+// §23 — import API (wallets/portfolios bootstrap, later: transactions, sync-runs, wipe)
+api.route("/import", createImportRoutes())
 
 app.route("/api", api)
 

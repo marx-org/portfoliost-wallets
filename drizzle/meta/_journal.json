@@ -15,6 +15,13 @@
       "when": 1789650772542,
       "tag": "0001_grey_crusher_hogan",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1789655023687,
+      "tag": "0002_tired_thunderbolts",
+      "breakpoints": true
     }
   ]
 }

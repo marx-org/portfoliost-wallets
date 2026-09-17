@@ -517,26 +517,36 @@ export function createPortfolioRoutes(db?: DB) {
       }
     }
 
-    const [created] = await database
-      .insert(portfolios)
-      .values({
-        userId: identity.id,
-        name: parsed.data.name,
-        description: parsed.data.description ?? null,
-        strategy: parsed.data.strategy ?? "GROWTH",
-        type: parsed.data.type ?? "regular",
-        currency: parsed.data.currency.toUpperCase(),
-        baseCurrency: defaultBase.toUpperCase(),
-        walletId: parsed.data.walletId ?? null,
-        isPublic: parsed.data.isPublic ?? false,
-        isMarginEnabled: parsed.data.isMarginEnabled ?? false,
-        marginRate: parsed.data.marginRate != null ? String(parsed.data.marginRate) : null,
-        maintenanceMarginRate:
-          parsed.data.maintenanceMarginRate != null ? String(parsed.data.maintenanceMarginRate) : null,
-      })
-      .returning()
-
-    return c.json(serializePortfolio(created) satisfies Portfolio, 201)
+    try {
+      const [created] = await database
+        .insert(portfolios)
+        .values({
+          userId: identity.id,
+          name: parsed.data.name,
+          description: parsed.data.description ?? null,
+          strategy: parsed.data.strategy ?? "GROWTH",
+          type: parsed.data.type ?? "regular",
+          currency: parsed.data.currency.toUpperCase(),
+          baseCurrency: defaultBase.toUpperCase(),
+          walletId: parsed.data.walletId ?? null,
+          isPublic: parsed.data.isPublic ?? false,
+          isMarginEnabled: parsed.data.isMarginEnabled ?? false,
+          marginRate: parsed.data.marginRate != null ? String(parsed.data.marginRate) : null,
+          maintenanceMarginRate:
+            parsed.data.maintenanceMarginRate != null ? String(parsed.data.maintenanceMarginRate) : null,
+        })
+        .returning()
+      return c.json(serializePortfolio(created) satisfies Portfolio, 201)
+    } catch (err) {
+      // uq_portfolios_user_name (import bootstrap natural key) — duplicate name
+      if ((err as { cause?: { code?: string } }).cause?.code === "23505") {
+        return c.json(
+          { error: "Conflict", message: `A portfolio named "${parsed.data.name}" already exists` },
+          409,
+        )
+      }
+      throw err
+    }
   })
 
   // GET /api/portfolios/:id — detail with metrics

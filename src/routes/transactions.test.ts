@@ -20,8 +20,8 @@ async function boot() {
       headers: { ...h.headers, "content-type": "application/json" },
       body: JSON.stringify(body),
     })
-  const mk = async (currency = "USD") => {
-    const res = await json("/api/wallets", { name: currency, currency })
+  const mk = async (currency = "USD", name = currency) => {
+    const res = await json("/api/wallets", { name, currency })
     return (await res.json()).id as string
   }
   const walletOf = async (id: string) => {
@@ -125,8 +125,8 @@ describe("transaction delete reverses effects (§11.5)", () => {
 
   it("deleting one transfer leg removes the pair and restores BOTH wallets", async () => {
     const h = await boot()
-    const a = await h.mk()
-    const b = await h.mk()
+    const a = await h.mk("USD", "USD A")
+    const b = await h.mk("USD", "USD B")
     await h.json(`/api/wallets/${a}/deposits`, { amount: 60 })
     const xfer = await (await h.json(`/api/wallets/${a}/transfers`, { amount: 25, to_wallet_id: b })).json()
 

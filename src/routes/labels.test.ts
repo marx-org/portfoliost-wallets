@@ -72,11 +72,11 @@ async function buy(h: Boot, portfolioId: string, symbol = "AAPL") {
   return { txId: body.id, positionId: body.positionId! }
 }
 
-async function wallet(h: Boot, currency = "USD") {
+async function wallet(h: Boot, currency = "USD", name = currency) {
   const res = await h.app.request("/api/wallets", {
     method: "POST",
     headers: { ...h.headers, "content-type": "application/json" },
-    body: JSON.stringify({ name: currency, currency }),
+    body: JSON.stringify({ name, currency }),
   })
   expect(res.status).toBe(201)
   return (await res.json()) as { id: string }
@@ -395,8 +395,8 @@ describe("?labels= AND filter (D67)", () => {
     const h = await boot()
     const a = await label(h, "Biz")
     const b = await label(h, "Home")
-    const w1 = await wallet(h)
-    const w2 = await wallet(h)
+    const w1 = await wallet(h, "USD", "USD W1")
+    const w2 = await wallet(h, "USD", "USD W2")
     const d1 = await deposit(h, w1.id, 100)
     const d2 = await deposit(h, w2.id, 50)
     await setLabels(`/api/wallets/${w1.id}/transactions/${d1}/labels`, [a.id, b.id])(h)
