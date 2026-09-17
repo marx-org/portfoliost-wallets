@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest"
 import { sql } from "drizzle-orm"
 import { createTestDb } from "./test-db.js"
 import {
-  walletsSchema, wallets, walletTransactions, fxRates, fxSyncState,
+  walletsSchema, wallets, walletTransactions, fxRates, fxSyncState, syncRuns,
   portfoliosSchema, portfolios, positions, portfolioTransactions, shares, valueSnapshots,
 } from "./schema.js"
 
@@ -341,5 +341,145 @@ describe("portfolios schema (§15, D54)", () => {
       .from(positions)
       .where(sql`${positions.userId} = 'user-b'`)
     expect(empty.length).toBe(0)
+  })
+})
+
+describe("import API migration (provenance + split columns)", () => {
+  it("creates all provenance objects — sync_runs + external_source/external_id/original columns", async () => {
+    const { db } = await createTestDb()
+
+    const names = await db.execute(
+      sql`select table_name from information_schema.tables where table_schema = 'wallets' and table_name = 'sync_runs'`,
+    )
+    expect(names.rows.length).toBe(1)
+
+    const cols = (table: string, schema: string) =>
+      db.execute(
+        sql`select column_name from information_schema.columns where table_schema = ${schema} and table_name = ${table}`,
+      ).then((r) => r.rows.map((row: any) => row.column_name))
+
+    expect(await cols("wallets", "wallets")).toContain("external_source")
+    expect(await cols("portfolios", "portfolios")).toContain("external_source")
+    expect(await cols("wallet_transactions", "wallets")).toContain("external_source")
+    expect(await cols("wallet_transactions", "wallets")).toContain("external_id")
+    expect(await cols("transactions", "portfolios")).toContain("external_source")
+    expect(await cols("transactions", "portfolios")).toContain("external_id")
+    expect(await cols("transactions", "portfolios")).toContain("original_quantity")
+    expect(await cols("transactions", "portfolios")).toContain("original_price")
+  })
+
+  it("partial unique index rejects duplicate external_id but allows NULL duplicates", async () => {
+    const { db } = await createTestDb()
+    const [w] = await db
+      .insert(wallets)
+      .values({ userId: "u", name: "W", currency: "USD", externalSource: "src" })
+      .returning()
+
+    const base = {
+      userId: "u",
+      walletId: w.id,
+      type: "INVEST" as const,
+      amount: "-100",
+      currency: "USD",
+      externalSource: "google-sheets:transakcje",
+      externalId: "sha-1",
+    }
+    await db.insert(walletTransactions).values(base)
+
+    // duplicate (external_source, external_id) is rejected
+    await expect(db.insert(walletTransactions).values(base)).rejects.toThrow(/duplicate key|Failed query/u)
+
+    // same source, different external_id is fine, and NULL external_id duplicates are allowed
+    await db.insert(walletTransactions).values({ ...base, externalId: "sha-2" })
+    await db.insert(walletTransactions).values({ ...base, externalId: null })
+    await db.insert(walletTransactions).values({ ...base, externalId: null })
+  })
+
+  it("original_quantity and original_price are independent of quantity/price (no constraint)", async () => {
+    const { db } = await createTestDb()
+    const [p] = await db
+      .insert(portfolios)
+      .values({ userId: "u", name: "P", currency: "USD", externalSource: "src" })
+      .returning()
+
+    const [tx] = await db
+      .insert(portfolioTransactions)
+      .values({
+        userId: "u",
+        portfolioId: p.id,
+        type: "BUY",
+        instrumentSymbol: "AMZN",
+        quantity: "0.42000000",
+        price: "160.00000000",
+        originalQuantity: "0.02100000",
+        originalPrice: "3200.00000000",
+        currency: "USD",
+        totalAmount: "67.20000000",
+        externalSource: "google-sheets:transakcje",
+        externalId: "px-1",
+      })
+      .returning()
+    expect(Number(tx.originalQuantity)).toBe(0.021)
+    expect(Number(tx.originalPrice)).toBe(3200)
+
+    await expect(
+      db.insert(portfolioTransactions).values({
+        userId: "u",
+        portfolioId: p.id,
+        type: "BUY",
+        instrumentSymbol: "AMZN",
+        quantity: "1",
+        price: "1",
+        originalQuantity: "2",
+        originalPrice: "3",
+        currency: "USD",
+        totalAmount: "1",
+        externalSource: "google-sheets:transakcje",
+        externalId: "px-2",
+      }),
+    ).resolves.toBeDefined()
+  })
+
+  it("sync_runs enforces the (user, source, spreadsheetId, sheet) unique key", async () => {
+    const { db } = await createTestDb()
+    const run = {
+      userId: "u",
+      externalSource: "google-sheets:transakcje",
+      spreadsheetId: "1id",
+      sheet: "Transakcje",
+    }
+    await db.insert(syncRuns).values(run)
+    await expect(db.insert(syncRuns).values(run)).rejects.toThrow(/duplicate key|Failed query/u)
+  })
+
+  it("relaxed amount check allows split markers (ADJUSTMENT with amount 0)", async () => {
+    const { db } = await createTestDb()
+    const [w] = await db
+      .insert(wallets)
+      .values({ userId: "u", name: "W", currency: "PLN" })
+      .returning()
+
+    const [split] = await db
+      .insert(walletTransactions)
+      .values({
+        userId: "u",
+        walletId: w.id,
+        type: "ADJUSTMENT",
+        amount: "0",
+        currency: "PLN",
+      })
+      .returning()
+    expect(split.type).toBe("ADJUSTMENT")
+
+    // non-ADJUSTMENT rows still require a non-zero amount
+    await expect(
+      db.insert(walletTransactions).values({
+        userId: "u",
+        walletId: w.id,
+        type: "DEPOSIT",
+        amount: "0",
+        currency: "PLN",
+      }),
+    ).rejects.toThrow()
   })
 })

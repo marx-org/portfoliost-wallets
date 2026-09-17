@@ -8,6 +8,7 @@ import {
   numeric,
   pgSchema,
   primaryKey,
+  serial,
   text,
   timestamp,
   uniqueIndex,
@@ -23,6 +24,7 @@ export const walletsSchema = pgSchema("wallets")
  * Cash wallet (D17). `currency` is the settlement denomination and mandatory;
  * `baseCurrency` is the display/valuation currency defaulted from user prefs
  * at creation time (D21b). Balances are denormalized ledger-maintained values.
+ * `externalSource` tags wallets created by an import source (NULL = manual).
  */
 export const wallets = walletsSchema.table(
   "wallets",
@@ -32,6 +34,7 @@ export const wallets = walletsSchema.table(
     name: text("name").notNull(),
     currency: char("currency", { length: 3 }).notNull(),
     baseCurrency: char("base_currency", { length: 3 }).notNull().default("USD"),
+    externalSource: text("external_source"),
     balance: numeric("balance", { precision: 20, scale: 8 }).notNull().default("0"),
     availableBalance: numeric("available_balance", { precision: 20, scale: 8 })
       .notNull()
@@ -98,6 +101,8 @@ export const walletTransactions = walletsSchema.table(
     feeExchangeRate: numeric("fee_exchange_rate", { precision: 20, scale: 10 }),
     transferFxRate: numeric("transfer_fx_rate", { precision: 20, scale: 10 }),
     targetAmount: numeric("target_amount", { precision: 20, scale: 8 }),
+    externalSource: text("external_source"),
+    externalId: text("external_id"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },
@@ -105,6 +110,7 @@ export const walletTransactions = walletsSchema.table(
     index("idx_wtx_wallet").on(t.walletId, t.executedAt.desc()),
     index("idx_wtx_user_recent").on(t.userId, t.executedAt.desc()),
     uniqueIndex("uq_wtx_reference").on(t.reference).where(sql`reference is not null`),
+    uniqueIndex("uq_wtx_external").on(t.externalSource, t.externalId).where(sql`${t.externalId} is not null`),
     // DB-level guards (D17): extensible via new migrations, not enum churn
     check(
       "ck_wtx_type",
@@ -113,7 +119,7 @@ export const walletTransactions = walletsSchema.table(
     check("ck_wtx_fees_type", sql`${t.feesType} in ('fixed','pct')`),
     check("ck_wtx_rate_source", sql`${t.rateSource} in ('automatic','manual')`),
     check("ck_wtx_fee_rate_source", sql`${t.feeRateSource} in ('automatic','manual')`),
-    check("ck_wtx_amount_nonzero", sql`${t.amount} <> 0`),
+    check("ck_wtx_amount_nonzero", sql`${t.amount} <> 0 or ${t.type} = 'ADJUSTMENT'`),
   ],
 )
 
@@ -142,6 +148,33 @@ export const fxSyncState = walletsSchema.table("fx_sync_state", {
   lastStatus: text("last_status"),
 })
 
+/**
+ * Import sync-run tracking (import API). One row per (user, externalSource,
+ * spreadsheetId, sheet) — the importer cursor + batch counters over the
+ * /api/import surface.
+ */
+export const syncRuns = walletsSchema.table(
+  "sync_runs",
+  {
+    id: serial("id").primaryKey(),
+    userId: text("user_id").notNull(),
+    externalSource: text("external_source").notNull(),
+    spreadsheetId: text("spreadsheet_id").notNull(),
+    sheet: text("sheet").notNull(),
+    lastRow: integer("last_row"),
+    status: text("status").notNull().default("pending"), // pending|running|done|failed
+    startedAt: timestamp("started_at", { withTimezone: true }),
+    completedAt: timestamp("completed_at", { withTimezone: true }),
+    error: text("error"),
+    insertedWtx: integer("inserted_wtx").notNull().default(0),
+    insertedPtx: integer("inserted_ptx").notNull().default(0),
+    skipped: integer("skipped").notNull().default(0),
+  },
+  (t) => [
+    uniqueIndex("uq_sync_runs").on(t.userId, t.externalSource, t.spreadsheetId, t.sheet),
+  ],
+)
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Portfolios schema (§15, D53–D54)
 // ─────────────────────────────────────────────────────────────────────────────
@@ -152,7 +185,8 @@ export const portfoliosSchema = pgSchema("portfolios")
  * Portfolio container (D54). Currency is mandatory (422 when missing, D17
  * wallets precedent). base_currency is the display/valuation currency,
  * defaulted from user prefs at creation time (D21b). wallet_id links to the
- * wallets module for cash-movement integration (D57).
+ * wallets module for cash-movement integration (D57). `externalSource` tags
+ * portfolios created by an import source (NULL = manual).
  */
 export const portfolios = portfoliosSchema.table(
   "portfolios",
@@ -165,6 +199,7 @@ export const portfolios = portfoliosSchema.table(
     type: text("type").notNull().default("regular"),
     currency: char("currency", { length: 3 }).notNull(),
     baseCurrency: char("base_currency", { length: 3 }).notNull().default("USD"),
+    externalSource: text("external_source"),
     walletId: uuid("wallet_id").references(() => wallets.id),
     totalInvested: numeric("total_invested", { precision: 20, scale: 8 }).notNull().default("0"),
     currentValue: numeric("current_value", { precision: 20, scale: 8 }).notNull().default("0"),
@@ -255,6 +290,8 @@ export const portfolioTransactions = portfoliosSchema.table(
     country: text("country"),
     quantity: numeric("quantity", { precision: 20, scale: 8 }).notNull().default("0"),
     price: numeric("price", { precision: 20, scale: 8 }).notNull().default("0"),
+    originalQuantity: numeric("original_quantity", { precision: 20, scale: 8 }),
+    originalPrice: numeric("original_price", { precision: 20, scale: 8 }),
     currency: char("currency", { length: 3 }).notNull(),
     instrumentCurrency: char("instrument_currency", { length: 3 }),
     assetType: text("asset_type").notNull().default("STOCK"),
@@ -276,6 +313,8 @@ export const portfolioTransactions = portfoliosSchema.table(
     displayCurrency: char("display_currency", { length: 3 }),
     isGift: boolean("is_gift").notNull().default(false),
     synthesizedOpeningLot: boolean("synthesized_opening_lot").notNull().default(false),
+    externalSource: text("external_source"),
+    externalId: text("external_id"),
     executedAt: timestamp("executed_at", { withTimezone: true }).notNull().defaultNow(),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
@@ -284,6 +323,7 @@ export const portfolioTransactions = portfoliosSchema.table(
     index("idx_ptx_portfolio").on(t.portfolioId, t.executedAt.desc()),
     index("idx_ptx_user").on(t.userId, t.executedAt.desc()),
     index("idx_ptx_position").on(t.positionId),
+    uniqueIndex("uq_ptx_external").on(t.externalSource, t.externalId).where(sql`${t.externalId} is not null`),
     check("ck_ptx_type", sql`${t.type} in ('BUY','SELL','DIVIDEND')`),
     check("ck_ptx_rate_source", sql`${t.rateSource} in ('automatic','manual')`),
     check("ck_ptx_fee_rate_source", sql`${t.feeRateSource} in ('automatic','manual')`),
