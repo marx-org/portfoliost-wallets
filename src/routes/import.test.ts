@@ -374,6 +374,71 @@ describe("POST /api/import/transactions (§23.4)", () => {
     expect(Number(portfolio.totalInvested)).toBe(1000)
   })
 
+  it("BUY with price=0 imports a zero-cost position (free allotment, plan §24.8)", async () => {
+    const h = await boot()
+    const { portfolioId } = await seedWalletAndPortfolio(h)
+
+    const res = await postTransactions(h, [
+      {
+        externalId: "e-free-1",
+        walletName: "IBKR",
+        executedAt: "2024-01-15T10:00:00.000Z",
+        walletTx: { type: "ADJUSTMENT", amount: 0, currency: "PLN" },
+        portfolioTx: { portfolioId, type: "BUY", instrumentSymbol: "SYN2BIO", quantity: 21, price: 0, currency: "PLN" },
+      },
+    ])
+    expect(res.status).toBe(200)
+    const body = await res.json()
+    expect(body.inserted).toBe(1)
+    expect(body.errors).toEqual([])
+
+    const [pos] = await h.db.select().from(positions).where(eq(positions.portfolioId, portfolioId))
+    expect(pos.isOpen).toBe(true)
+    expect(Number(pos.quantity)).toBe(21)
+    expect(Number(pos.averageCostBasis)).toBe(0)
+  })
+
+  it("clamps a full-position sell within display-precision drift (plan §24.8)", async () => {
+    const h = await boot()
+    const { portfolioId } = await seedWalletAndPortfolio(h)
+
+    const res = await postTransactions(h, [
+      {
+        externalId: "e-drift-buy",
+        walletName: "IBKR",
+        executedAt: "2021-08-12T10:00:00.000Z",
+        walletTx: { type: "INVEST", amount: -591.39, currency: "PLN" },
+        portfolioTx: { portfolioId, type: "BUY", instrumentSymbol: "GSEM60", quantity: 995.290673, price: 0.594, currency: "PLN" },
+      },
+      {
+        externalId: "e-drift-sell",
+        walletName: "IBKR",
+        executedAt: "2021-09-01T10:00:00.000Z",
+        walletTx: { type: "SELL", amount: 13187.6, currency: "PLN" },
+        portfolioTx: { portfolioId, type: "SELL", instrumentSymbol: "GSEM60", quantity: 995.290675, price: 13.25, currency: "PLN" },
+      },
+    ])
+    const body = await res.json()
+    expect(body.errors).toEqual([])
+    expect(body.inserted).toBe(2)
+
+    const [pos] = await h.db.select().from(positions).where(eq(positions.portfolioId, portfolioId))
+    expect(pos.isOpen).toBe(false)
+    expect(Number(pos.quantity)).toBeCloseTo(0, 9)
+  })
+
+  it("still rejects a sell exceeding the position beyond drift tolerance", async () => {
+    const h = await boot()
+    const { portfolioId } = await seedWalletAndPortfolio(h)
+
+    const res = await postTransactions(h, [
+      buyRow(portfolioId, { quantity: 1, price: 10 }),
+      buyRow(portfolioId, { type: "SELL", quantity: 1.001, price: 12 }, { type: "SELL", amount: 12.01 }),
+    ])
+    const body = await res.json()
+    expect(body.errors.map((e: { error: string }) => e.error)).toEqual(["insufficient_quantity"])
+  })
+
   it("SELL + direction=SHORT opens a short option lot distinct from the same-symbol equity lot", async () => {
     const h = await boot()
     const { portfolioId } = await seedWalletAndPortfolio(h)

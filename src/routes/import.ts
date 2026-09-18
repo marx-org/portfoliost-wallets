@@ -109,7 +109,7 @@ const ImportPortfolioTxSchema = z
     instrumentName: z.string().nullable().optional(),
     assetType: z.string().default("STOCK"),
     quantity: z.number().positive(),
-    price: z.number().positive(),
+    price: z.number().nonnegative(),
     originalQuantity: z.number().positive().nullable().optional(),
     originalPrice: z.number().positive().nullable().optional(),
     currency: z.string().regex(ISO_CURRENCY, "currency must be an ISO 4217 code"),
@@ -278,16 +278,22 @@ async function processImportSell(
   if (!pos) return { error: "no_open_position", message: `No open position for ${symbol}` }
 
   const oldQty = Number(pos.quantity)
-  if (body.quantity > oldQty + 1e-9) {
+  // Display-precision drift: sheet quantities are rounded to 6 decimals per
+  // row, so the sum of rounded buys can differ from the rounded sell by ~1e-6
+  // relative. Within that band, clamp the sell to the held amount (the row is
+  // the user's own full-position exit); beyond it, the row is inconsistent.
+  const driftTol = Math.max(1e-9, oldQty * 1e-6)
+  if (body.quantity > oldQty + driftTol) {
     return {
       error: "insufficient_quantity",
       message: `Insufficient quantity for ${symbol}: have ${oldQty}, selling ${body.quantity}`,
     }
   }
+  const sellQty = Math.min(body.quantity, oldQty)
 
   const avgCost = Number(pos.averageCostBasis)
-  const realizedGainLoss = round2((body.price - avgCost) * body.quantity - body.feesSettled)
-  const newQty = Math.round((oldQty - body.quantity) * 1e8) / 1e8
+  const realizedGainLoss = round2((body.price - avgCost) * sellQty - body.feesSettled)
+  const newQty = Math.round((oldQty - sellQty) * 1e8) / 1e8
 
   const updateData: Record<string, unknown> = {
     quantity: String(newQty),
