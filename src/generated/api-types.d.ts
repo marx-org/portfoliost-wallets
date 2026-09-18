@@ -3450,6 +3450,14 @@ export interface components {
             realizedGainLoss?: number | null;
             /** Format: date-time */
             executedAt?: string | null;
+            /**
+             * @description SHORT marks a short-option open (position-creating, regardless of type)
+             * @enum {string|null}
+             */
+            direction?: "LONG" | "SHORT" | null;
+            /** @enum {string|null} */
+            optionType?: "CALL" | "PUT" | null;
+            contractSize?: number | null;
         };
         ImportTransactionsResponse: {
             inserted: number;
@@ -3489,6 +3497,12 @@ export interface components {
                 portfolios?: number;
                 wallets?: number;
                 syncRuns?: number;
+                positions?: number;
+                portfolioTransactions?: number;
+                valueSnapshots?: number;
+                shares?: number;
+                portfolioBackfillMetadata?: number;
+                nulledWalletRefs?: number;
             };
         };
         ApplySplitRequest: {

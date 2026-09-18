@@ -11,6 +11,9 @@ import {
   portfolioTransactions,
   positions,
   syncRuns,
+  valueSnapshots,
+  shares,
+  portfolioBackfillMetadata,
 } from "../db/schema.js"
 
 async function boot() {
@@ -288,7 +291,18 @@ describe("DELETE /api/import/source/:externalSource (§23.5)", () => {
     })
     expect(res.status).toBe(200)
     expect(await res.json()).toEqual({
-      deleted: { walletTransactions: 1, portfolios: 0, wallets: 0, syncRuns: 1 },
+      deleted: {
+        walletTransactions: 1,
+        portfolios: 0,
+        wallets: 0,
+        syncRuns: 1,
+        positions: 0,
+        portfolioTransactions: 0,
+        valueSnapshots: 0,
+        shares: 0,
+        portfolioBackfillMetadata: 0,
+        nulledWalletRefs: 0,
+      },
     })
 
     expect(await h.db.select().from(walletTransactions)).toHaveLength(0)
@@ -318,7 +332,18 @@ describe("DELETE /api/import/source/:externalSource (§23.5)", () => {
     const res = await h.app.request("/api/import/source/imp%3Asrc", { method: "DELETE", headers: h.headers })
     expect(res.status).toBe(200)
     expect(await res.json()).toEqual({
-      deleted: { walletTransactions: 1, portfolios: 1, wallets: 0, syncRuns: 0 },
+      deleted: {
+        walletTransactions: 1,
+        portfolios: 1,
+        wallets: 0,
+        syncRuns: 0,
+        positions: 1,
+        portfolioTransactions: 1,
+        valueSnapshots: 0,
+        shares: 0,
+        portfolioBackfillMetadata: 0,
+        nulledWalletRefs: 0,
+      },
     })
     expect(await h.db.select().from(positions)).toHaveLength(0)
     expect(await h.db.select().from(portfolioTransactions)).toHaveLength(0)
@@ -328,7 +353,109 @@ describe("DELETE /api/import/source/:externalSource (§23.5)", () => {
     expect(await h.db.select().from(syncRuns)).toHaveLength(1)
 
     const empty = await (await h.app.request("/api/import/source/nobody", { method: "DELETE", headers: h.headers })).json()
-    expect(empty.deleted).toEqual({ walletTransactions: 0, portfolios: 0, wallets: 0, syncRuns: 0 })
+    expect(empty.deleted).toEqual({
+      walletTransactions: 0,
+      portfolios: 0,
+      wallets: 0,
+      syncRuns: 0,
+      positions: 0,
+      portfolioTransactions: 0,
+      valueSnapshots: 0,
+      shares: 0,
+      portfolioBackfillMetadata: 0,
+      nulledWalletRefs: 0,
+    })
+  })
+
+  it("wipes derived data of the source portfolio and nulls non-source wallet refs", async () => {
+    const h = await boot()
+    const sourceWalletId = crypto.randomUUID()
+    const sourcePortfolioId = crypto.randomUUID()
+    await h.db.insert(wallets).values({
+      userId: "user-1",
+      id: sourceWalletId,
+      name: "IBKR",
+      currency: "USD",
+      baseCurrency: "USD",
+      balance: "0",
+      availableBalance: "0",
+      externalSource: "imp:src",
+    })
+    await h.db.insert(portfolios).values({
+      userId: "user-1",
+      id: sourcePortfolioId,
+      name: "Transakcje",
+      currency: "PLN",
+      baseCurrency: "PLN",
+      externalSource: "imp:src",
+      walletId: sourceWalletId,
+    })
+    await h.db.insert(positions).values({
+      userId: "user-1",
+      portfolioId: sourcePortfolioId,
+      symbol: "AAPL",
+      walletId: sourceWalletId,
+    })
+    await h.db.insert(valueSnapshots).values({
+      portfolioId: sourcePortfolioId,
+      snapshotDate: "2024-01-15",
+      value: "1000",
+      invested: "1000",
+    })
+    await h.db.insert(shares).values({
+      userId: "user-1",
+      portfolioId: sourcePortfolioId,
+      privacySettings: {},
+    })
+    await h.db.insert(portfolioBackfillMetadata).values({
+      portfolioId: sourcePortfolioId,
+      status: "complete",
+    })
+
+    // Non-source portfolio whose position uses the source wallet as cash leg.
+    const otherPortfolioId = crypto.randomUUID()
+    await h.db.insert(portfolios).values({
+      userId: "user-1",
+      id: otherPortfolioId,
+      name: "Manual",
+      currency: "USD",
+      baseCurrency: "USD",
+      walletId: sourceWalletId,
+    })
+    await h.db.insert(positions).values({
+      userId: "user-1",
+      portfolioId: otherPortfolioId,
+      symbol: "MSFT",
+      walletId: sourceWalletId,
+    })
+
+    const res = await h.app.request("/api/import/source/imp%3Asrc", { method: "DELETE", headers: h.headers })
+    expect(res.status).toBe(200)
+    expect(await res.json()).toEqual({
+      deleted: {
+        walletTransactions: 0,
+        portfolios: 1,
+        wallets: 1,
+        syncRuns: 0,
+        positions: 1,
+        portfolioTransactions: 0,
+        valueSnapshots: 1,
+        shares: 1,
+        portfolioBackfillMetadata: 1,
+        nulledWalletRefs: 2,
+      },
+    })
+
+    expect(await h.db.select().from(valueSnapshots)).toHaveLength(0)
+    expect(await h.db.select().from(shares)).toHaveLength(0)
+    expect(await h.db.select().from(portfolioBackfillMetadata)).toHaveLength(0)
+    expect(await h.db.select().from(wallets)).toHaveLength(0)
+    expect(await h.db.select().from(portfolios)).toHaveLength(1)
+    const [survivor] = await h.db.select().from(positions)
+    expect(survivor.portfolioId).toBe(otherPortfolioId)
+    expect(survivor.walletId).toBeNull()
+    const [otherPortfolio] = await h.db.select().from(portfolios).where(eq(portfolios.id, otherPortfolioId))
+    expect(otherPortfolio.walletId).toBeNull()
   })
 })
 

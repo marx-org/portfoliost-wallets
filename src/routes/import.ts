@@ -1,5 +1,5 @@
 import { Hono, type Context } from "hono"
-import { and, desc, eq, sql } from "drizzle-orm"
+import { and, desc, eq, inArray, notInArray, sql } from "drizzle-orm"
 import { z } from "zod"
 import { userIdentityMiddleware } from "../auth.js"
 import { getDb, type DB } from "../db/index.js"
@@ -10,6 +10,9 @@ import {
   portfolioTransactions,
   positions,
   syncRuns,
+  valueSnapshots,
+  shares,
+  portfolioBackfillMetadata,
 } from "../db/schema.js"
 import { preferredBaseCurrency } from "../services/preferences.js"
 import { ISO_CURRENCY } from "./wallets.js"
@@ -636,22 +639,111 @@ export function createImportRoutes(db?: DB) {
   })
 
   // DELETE /import/source/{externalSource} — wipe all data tagged with this
-  // external source for the authenticated user, in one transaction.
+  // external source for the authenticated user, in one transaction. Derived
+  // data (positions, ledger, value snapshots, shares, backfill metadata) is
+  // deleted explicitly so the wipe leaves the DB clean, and lingering wallet
+  // refs from NON-source rows are nulled so the source wallets can be deleted.
+  // split_events is global and never touched.
   routes.delete("/source/:externalSource", async (c) => {
     const identity = c.get("userIdentity")
     if (!identity) return c.json({ message: "Unauthorized" }, 401)
     const database = getDbInstance()
     const externalSource = c.req.param("externalSource")
     const deleted = await database.transaction(async (tx) => {
+      const [sourcePortfolios, sourceWallets] = await Promise.all([
+        tx
+          .select({ id: portfolios.id })
+          .from(portfolios)
+          .where(and(eq(portfolios.externalSource, externalSource), eq(portfolios.userId, identity.id))),
+        tx
+          .select({ id: wallets.id })
+          .from(wallets)
+          .where(and(eq(wallets.externalSource, externalSource), eq(wallets.userId, identity.id))),
+      ])
+      const sourcePortfolioIds = sourcePortfolios.map((row) => row.id)
+      const sourceWalletIds = sourceWallets.map((row) => row.id)
+
+      // Derived data scoped to source portfolios. ptx before positions (the
+      // ptx→position FK is NO ACTION). Empty id lists → inArray renders false.
+      const portfolioTransactionsRows = await tx
+        .delete(portfolioTransactions)
+        .where(
+          and(
+            inArray(portfolioTransactions.portfolioId, sourcePortfolioIds),
+            eq(portfolioTransactions.userId, identity.id),
+          ),
+        )
+        .returning({ id: portfolioTransactions.id })
+      const positionsRows = await tx
+        .delete(positions)
+        .where(and(inArray(positions.portfolioId, sourcePortfolioIds), eq(positions.userId, identity.id)))
+        .returning({ id: positions.id })
+      const valueSnapshotsRows = await tx
+        .delete(valueSnapshots)
+        .where(inArray(valueSnapshots.portfolioId, sourcePortfolioIds))
+        .returning({ portfolioId: valueSnapshots.portfolioId })
+      const sharesRows = await tx
+        .delete(shares)
+        .where(and(inArray(shares.portfolioId, sourcePortfolioIds), eq(shares.userId, identity.id)))
+        .returning({ id: shares.id })
+      const portfolioBackfillMetadataRows = await tx
+        .delete(portfolioBackfillMetadata)
+        .where(inArray(portfolioBackfillMetadata.portfolioId, sourcePortfolioIds))
+        .returning({ portfolioId: portfolioBackfillMetadata.portfolioId })
+
       const walletTransactionsRows = await tx
         .delete(walletTransactions)
         .where(
-          and(
-            eq(walletTransactions.externalSource, externalSource),
-            eq(walletTransactions.userId, identity.id),
-          ),
+          and(eq(walletTransactions.externalSource, externalSource), eq(walletTransactions.userId, identity.id)),
         )
         .returning({ id: walletTransactions.id })
+
+      // Null lingering refs to source wallets from NON-source rows (source rows
+      // are already gone) — the wallet_id/to_wallet_id FKs are NO ACTION, so
+      // the source wallets cannot be deleted while these point at them.
+      let nulledWalletRefs = 0
+      if (sourceWalletIds.length > 0) {
+        nulledWalletRefs += (
+          await tx
+            .update(positions)
+            .set({ walletId: null })
+            .where(
+              and(
+                inArray(positions.walletId, sourceWalletIds),
+                notInArray(positions.portfolioId, sourcePortfolioIds),
+              ),
+            )
+            .returning({ id: positions.id })
+        ).length
+        nulledWalletRefs += (
+          await tx
+            .update(portfolioTransactions)
+            .set({ walletId: null })
+            .where(
+              and(
+                inArray(portfolioTransactions.walletId, sourceWalletIds),
+                notInArray(portfolioTransactions.portfolioId, sourcePortfolioIds),
+              ),
+            )
+            .returning({ id: portfolioTransactions.id })
+        ).length
+        nulledWalletRefs += (
+          await tx
+            .update(walletTransactions)
+            .set({ toWalletId: null })
+            .where(inArray(walletTransactions.toWalletId, sourceWalletIds))
+            .returning({ id: walletTransactions.id })
+        ).length
+        nulledWalletRefs += (
+          await tx
+            .update(portfolios)
+            .set({ walletId: null })
+            .where(
+              and(inArray(portfolios.walletId, sourceWalletIds), notInArray(portfolios.id, sourcePortfolioIds)),
+            )
+            .returning({ id: portfolios.id })
+        ).length
+      }
 
       const portfoliosRows = await tx
         .delete(portfolios)
@@ -673,6 +765,12 @@ export function createImportRoutes(db?: DB) {
         portfolios: portfoliosRows.length,
         wallets: walletsRows.length,
         syncRuns: syncRunsRows.length,
+        positions: positionsRows.length,
+        portfolioTransactions: portfolioTransactionsRows.length,
+        valueSnapshots: valueSnapshotsRows.length,
+        shares: sharesRows.length,
+        portfolioBackfillMetadata: portfolioBackfillMetadataRows.length,
+        nulledWalletRefs,
       }
     })
     return c.json({ deleted } satisfies SourceWipeResponse)
