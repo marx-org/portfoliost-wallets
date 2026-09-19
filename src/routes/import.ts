@@ -131,6 +131,13 @@ const ImportPortfolioTxSchema = z
     direction: z.enum(["LONG", "SHORT"]).nullable().optional(),
     optionType: z.enum(["CALL", "PUT"]).nullable().optional(),
     contractSize: z.number().nullable().optional(),
+    // Position-enrichment fields (plan §28.5): from the Podsumowanie catalog or
+    // the venue's exchange_reference. `country` is the ISO-2 code; see
+    // positions.sector/industry/country.
+    sector: z.string().nullable().optional(),
+    industry: z.string().nullable().optional(),
+    country: z.string().nullable().optional(),
+    countryCode: z.string().nullable().optional(),
   })
   .strict()
 
@@ -183,6 +190,9 @@ async function upsertImportPositionOnBuy(
     direction?: "LONG" | "SHORT" | null
     optionType?: "CALL" | "PUT" | null
     contractSize?: number | null
+    sector?: string | null
+    industry?: string | null
+    country?: string | null
   },
 ) {
   const symbol = body.symbol.toUpperCase()
@@ -215,6 +225,9 @@ async function upsertImportPositionOnBuy(
         companyName: body.instrumentName ?? existing.companyName,
         instrumentCurrency: body.currency,
         assetType: body.assetType ?? existing.assetType,
+        sector: body.sector ?? existing.sector,
+        industry: body.industry ?? existing.industry,
+        country: body.country ?? existing.country,
         fees: String(Number(existing.fees ?? "0") + body.feesSettled),
         updatedAt: new Date(),
       })
@@ -237,8 +250,9 @@ async function upsertImportPositionOnBuy(
       contractSize: body.contractSize != null ? String(body.contractSize) : null,
       direction: body.direction ?? null,
       optionType: body.optionType ?? null,
-      sector: "Other",
-      country: "Other",
+      sector: body.sector ?? "Other",
+      industry: body.industry ?? "Other",
+      country: body.country ?? "Other",
       fees: String(body.feesSettled),
       isOpen: true,
       openedAt: new Date(),
@@ -878,6 +892,9 @@ async function insertImportPortfolioTx(
       direction: ptx.direction ?? null,
       optionType: ptx.optionType ?? null,
       contractSize: ptx.contractSize ?? null,
+      sector: ptx.sector ?? null,
+      industry: ptx.industry ?? null,
+      country: ptx.country ?? null,
     })
     positionId = position.id
   } else if (ptx.type === "SELL") {

@@ -39,6 +39,7 @@ const TransactionCreateSchema = z.object({
   instrumentCurrency: z.string().length(3).optional(),
   assetType: z.string().optional(),
   sector: z.string().optional(),
+  industry: z.string().optional(),
   country: z.string().optional(),
   fees: z.number().nonnegative().optional(),
   feesType: z.enum(["fixed", "pct"]).optional(),
@@ -113,6 +114,7 @@ async function upsertPositionOnBuy(
     instrumentCurrency?: string
     assetType?: string
     sector?: string
+    industry?: string
     country?: string
     positionId?: string
     walletId?: string
@@ -176,6 +178,7 @@ async function upsertPositionOnBuy(
         instrumentCurrency: instCcy,
         assetType: body.assetType ?? pos.assetType,
         sector: body.sector ?? pos.sector,
+        industry: body.industry ?? pos.industry,
         country: body.country ?? pos.country,
         walletId: body.walletId ?? pos.walletId,
         fees: String(Number(pos.fees ?? "0") + body.feesSettled),
@@ -203,6 +206,7 @@ async function upsertPositionOnBuy(
       strikePrice: body.strikePrice != null ? String(body.strikePrice) : null,
       expirationDate: body.expirationDate ?? null,
       sector: body.sector ?? "Other",
+      industry: body.industry ?? "Other",
       country: body.country ?? "Other",
       walletId: body.walletId ?? null,
       fees: String(body.feesSettled),

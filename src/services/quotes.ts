@@ -133,6 +133,11 @@ function profileCacheHit(symbol: string): boolean {
   return !!c && Date.now() - c.fetchedAt < CACHE_TTL_MS
 }
 
+function missesEnrichment(value: string | null): boolean {
+  const v = value ?? ""
+  return v.trim() === "" || v === "Other"
+}
+
 function needsPriceRefresh(pos: { priceAsOf: Date | null }): boolean {
   if (!pos.priceAsOf) return true
   return Date.now() - pos.priceAsOf.getTime() > STALE_MS
@@ -152,10 +157,11 @@ function needsProfileRefresh(pos: { companyName: string | null; updatedAt: Date 
  *   unrealizedGainLoss, dayChange, dayChangePercent, priceSource ('quote'|'fallback'), priceAsOf.
  *
  * Profile side: fetches companyName, sector from /:symbol/profile. Country
- * (preferring the ISO countryCode) is filled only when the position has none —
- * an existing country is canonical data recorded at buy time and must never be
- * overwritten by a live guess. These are persisted as live-but-cached values;
- * stored values act as fallback when the instruments service is unavailable.
+ * (preferring the ISO countryCode) is filled only when the position has none,
+ * an empty string, or the "Other" sentinel (plan §28.5 self-heal) — a
+ * real-profile/curated value is canonical and never overwritten by a live
+ * guess. These are persisted as live-but-cached values; stored values act as
+ * fallback when the instruments service is unavailable.
  *
  * Never throws. Instruments errors → keep stored values, mark priceSource 'fallback'.
  */
@@ -208,11 +214,15 @@ export async function refreshQuotes(
       const profileUpdate: Record<string, unknown> = {}
       if (profile) {
         if (profile.name !== null) profileUpdate.companyName = profile.name
-        if (profile.sector !== null) {
+        // Enrichment (plan §28.5): fill the sector/industry/country when the
+        // stored value is null, empty or the "Other" sentinel (imported
+        // positions from before the catalog existed self-heal on the next
+        // quotes pass). A real-profile/curated value is canonical and kept.
+        if (profile.sector !== null && missesEnrichment(p.sector)) {
           profileUpdate.sector = profile.sector
           profileUpdate.industry = profile.sector
         }
-        if (profile.country !== null && p.country == null) profileUpdate.country = profile.country
+        if (profile.country !== null && missesEnrichment(p.country)) profileUpdate.country = profile.country
         if (profile.instrumentCurrency !== null) profileUpdate.instrumentCurrency = profile.instrumentCurrency
       }
 

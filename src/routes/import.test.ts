@@ -501,6 +501,71 @@ describe("POST /api/import/transactions (§23.4)", () => {
     expect(Number(portfolio.totalInvested)).toBe(1000)
   })
 
+  it("persists catalog sector/industry/country and keeps stored values on later buys (plan §28.5)", async () => {
+    const h = await boot()
+    const { portfolioId } = await seedWalletAndPortfolio(h)
+
+    const res = await postTransactions(h, [
+      {
+        externalId: "e-buy-snt",
+        walletName: "IBKR",
+        executedAt: "2024-01-15T10:00:00.000Z",
+        walletTx: { type: "INVEST", amount: -1200, currency: "PLN" },
+        portfolioTx: {
+          portfolioId,
+          type: "BUY",
+          instrumentSymbol: "SNT.WA",
+          quantity: 10,
+          price: 120,
+          currency: "PLN",
+          sector: "Healthcare",
+          industry: "Medical Devices",
+          country: "PL",
+        },
+      },
+    ])
+    expect(res.status).toBe(200)
+    let [pos] = await h.db.select().from(positions).where(eq(positions.portfolioId, portfolioId))
+    expect(pos.sector).toBe("Healthcare")
+    expect(pos.industry).toBe("Medical Devices")
+    expect(pos.country).toBe("PL")
+
+    // a later buy without catalog fields must not revert the curated values
+    const res2 = await postTransactions(h, [
+      {
+        externalId: "e-buy-snt2",
+        walletName: "IBKR",
+        executedAt: "2024-02-15T10:00:00.000Z",
+        walletTx: { type: "INVEST", amount: -1200, currency: "PLN" },
+        portfolioTx: { portfolioId, type: "BUY", instrumentSymbol: "SNT.WA", quantity: 10, price: 120, currency: "PLN" },
+      },
+    ])
+    expect(res2.status).toBe(200)
+    ;[pos] = await h.db.select().from(positions).where(eq(positions.portfolioId, portfolioId))
+    expect(pos.sector).toBe("Healthcare")
+    expect(pos.country).toBe("PL")
+  })
+
+  it("keeps the 'Other' sentinel for assets the catalog does not cover (plan §28.5)", async () => {
+    const h = await boot()
+    const { portfolioId } = await seedWalletAndPortfolio(h)
+
+    const res = await postTransactions(h, [
+      {
+        externalId: "e-buy-fund",
+        walletName: "IBKR",
+        executedAt: "2024-01-15T10:00:00.000Z",
+        walletTx: { type: "INVEST", amount: -100, currency: "PLN" },
+        portfolioTx: { portfolioId, type: "BUY", instrumentSymbol: "GSAK.TFI", quantity: 1, price: 100, currency: "PLN" },
+      },
+    ])
+    expect(res.status).toBe(200)
+    const [pos] = await h.db.select().from(positions).where(eq(positions.portfolioId, portfolioId))
+    expect(pos.sector).toBe("Other")
+    expect(pos.industry).toBe("Other")
+    expect(pos.country).toBe("Other")
+  })
+
   it("BUY with price=0 imports a zero-cost position (free allotment, plan §24.8)", async () => {
     const h = await boot()
     const { portfolioId } = await seedWalletAndPortfolio(h)

@@ -162,6 +162,44 @@ describe("refreshQuotes (D58)", () => {
     expect(updated.companyName).toBe("Meta Platforms, Inc.")
   })
 
+  it("heals the 'Other' sentinel + null values with the profile (plan §28.5)", async () => {
+    const { db, user } = await makeHarness("q-user-7")
+    const { pf, pos } = await seedPortfolioAndPosition(db, user.id, { qty: 5, avg: 200 })
+    // an imported position from before the catalog existed — every field holds
+    // the "Other" sentinel (or null); the next quotes pass must self-heal.
+    await db
+      .update(positions)
+      .set({ sector: "Other", industry: "Other", country: "Other" })
+      .where(eq(positions.id, pos.id))
+    mockFetch(210)
+
+    await refreshQuotes(db, user.id, pf.id, "Bearer test-token")
+
+    const [updated] = await db.select().from(positions).where(eq(positions.id, pos.id))
+    expect(updated.sector).toBe("Technology")
+    expect(updated.industry).toBe("Technology")
+    expect(updated.country).toBe("US")
+  })
+
+  it("keeps curated catalog values — a real sector/country is never overwritten (plan §28.5)", async () => {
+    const { db, user } = await makeHarness("q-user-8")
+    const { pf, pos } = await seedPortfolioAndPosition(db, user.id, { qty: 5, avg: 200 })
+    // the Podsumowanie catalog resolved Synektik (SNT.WA) to Healthcare/PL;
+    // the live profile (Technology/US) must not clobber the curated data.
+    await db
+      .update(positions)
+      .set({ sector: "Healthcare", industry: "Medical Devices", country: "PL" })
+      .where(eq(positions.id, pos.id))
+    mockFetch(210)
+
+    await refreshQuotes(db, user.id, pf.id, "Bearer test-token")
+
+    const [updated] = await db.select().from(positions).where(eq(positions.id, pos.id))
+    expect(updated.sector).toBe("Healthcare")
+    expect(updated.industry).toBe("Medical Devices")
+    expect(updated.country).toBe("PL")
+  })
+
   it("marks priceSource fallback when instruments is unreachable", async () => {
     const { db, user } = await makeHarness("q-user-2")
     const { pf, pos } = await seedPortfolioAndPosition(db, user.id, {
