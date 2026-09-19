@@ -341,6 +341,25 @@ export function runBackfill(
   return enqueueBackfill(portfolioId, (signal) => runBackfillCore(db, portfolioId, authToken, now, signal))
 }
 
+/**
+ * Force-rebuild a portfolio's value-snapshot history on user request.
+ * Uses the full delete+rebuild path (`recalcPortfolioHistory`) rather than the
+ * upsert-only backfill so stale rows (days that no longer carry value) are
+ * removed. Enqueued through the serialized backfill runner; the returned
+ * promise resolves once the slot has been consumed.
+ */
+export function forcePortfolioRecalc(
+  db: DB,
+  portfolioId: string,
+  authToken: string,
+  now = new Date(),
+): Promise<void> {
+  return enqueueBackfill(
+    portfolioId,
+    (signal) => recalcPortfolioHistory(db, portfolioId, authToken, now, signal),
+  )
+}
+
 async function runBackfillCore(
   db: DB,
   portfolioId: string,

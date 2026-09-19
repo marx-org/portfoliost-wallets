@@ -14,7 +14,7 @@ import {
 import { preferredBaseCurrency } from "../services/preferences.js"
 import { refreshQuotes } from "../services/quotes.js"
 import { getPortfolioNews } from "../services/portfolioNews.js"
-import { runBackfill, getBackfillStatus, buildBenchmarkSeries } from "../services/backfill.js"
+import { runBackfill, getBackfillStatus, buildBenchmarkSeries, forcePortfolioRecalc } from "../services/backfill.js"
 import { dailyNetCashFlows } from "../services/cashFlows.js"
 import { computeRiskMetrics } from "../services/riskMetrics.js"
 import { createTransactionRoutes } from "./portfolio-transactions.js"
@@ -804,6 +804,24 @@ export function createPortfolioRoutes(db?: DB) {
       weight: 0,
       positionCount: posRows.length,
     } satisfies components["schemas"]["PortfolioSummaryMetrics"] & { weight: number; positionCount: number })
+  })
+
+  routes.post("/:id/recompute", async (c) => {
+    const identity = c.get("userIdentity")
+    const id = c.req.param("id")
+    const database = getDbInstance()
+
+    // Verify portfolio belongs to user
+    const [pf] = await database
+      .select({ id: portfolios.id })
+      .from(portfolios)
+      .where(and(eq(portfolios.id, id), eq(portfolios.userId, identity.id)))
+      .limit(1)
+    if (!pf) return c.json({ error: "NotFound", message: "Portfolio not found" }, 404)
+
+    // Fire-and-forget; the serialized runner resolves it once the pass runs.
+    void forcePortfolioRecalc(database, id, c.req.header("Authorization") ?? "").catch(() => undefined)
+    return c.json({ backfillStatus: "pending" } satisfies components["schemas"]["BackfillRecomputeResponse"])
   })
 
   routes.get("/:id/analytics", async (c) => {
