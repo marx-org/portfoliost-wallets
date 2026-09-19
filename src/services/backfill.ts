@@ -26,6 +26,7 @@ import {
 } from "../db/schema.js"
 import { latestRates } from "./fee-fx.js"
 import { dailyNetCashFlows } from "./cashFlows.js"
+import { enqueueBackfill } from "./backfill-runner.js"
 import {
   recomputeReturnColumns,
   buildSimple,
@@ -68,6 +69,50 @@ async function fetchPriceBars(
   } catch {
     return null
   }
+}
+
+/**
+ * Max symbols fetched concurrently by one recompute pass (RECALC_PRICE_CONCURRENCY,
+ * default 4). A full-import portfolio has 100+ symbols; fetching them all at
+ * once (the old Promise.all) multiplied the price_bars_all load by the number
+ * of concurrent passes and pegged the node's CPU (2026-09-19 incident). The
+ * global runner serializes passes; this caps the per-pass fan-out.
+ */
+const PRICE_FETCH_CONCURRENCY = Math.max(1, Number(process.env.RECALC_PRICE_CONCURRENCY ?? 4))
+
+/**
+ * Fetch per-symbol price series with a bounded worker pool (default 4
+ * concurrent). Aborts promptly: an aborted signal stops dispatching further
+ * symbols (in-flight fetches resolve and are dropped).
+ */
+export async function fetchPriceSeries(
+  symbols: string[],
+  from: string,
+  to: string,
+  authToken: string,
+  fetcher: (
+    symbol: string,
+    from: string,
+    to: string,
+    authToken: string,
+    signal?: AbortSignal,
+  ) => Promise<PriceBarSeries | null> = fetchPriceBars,
+  signal?: AbortSignal,
+): Promise<Map<string, PriceBarSeries>> {
+  const out = new Map<string, PriceBarSeries>()
+  let next = 0
+  const worker = async (): Promise<void> => {
+    for (;;) {
+      throwIfAborted(signal)
+      const i = next++
+      if (i >= symbols.length) return
+      const series = await fetcher(symbols[i], from, to, authToken, signal)
+      if (series && series.dates.length > 0) out.set(symbols[i], series)
+    }
+  }
+  const workers = Math.min(PRICE_FETCH_CONCURRENCY, symbols.length)
+  await Promise.all(Array.from({ length: workers }, () => worker()))
+  return out
 }
 
 /**
@@ -282,19 +327,35 @@ async function setBackfillStatus(
 
 /**
  * Run the full historical backfill for one portfolio. Called fire-and-forget
- * from the analytics endpoint; never throws (errors → status='failed').
+ * from the analytics endpoint; the returned promise resolves once the pass
+ * has been consumed by the serialized backfill runner (passes run one at a
+ * time cluster-wide — a page reload mid-import cannot fan out a second
+ * price-bar storm). Errors never propagate (→ status='failed').
  */
-export async function runBackfill(
+export function runBackfill(
   db: DB,
   portfolioId: string,
   authToken: string,
   now = new Date(),
 ): Promise<void> {
+  return enqueueBackfill(portfolioId, (signal) => runBackfillCore(db, portfolioId, authToken, now, signal))
+}
+
+async function runBackfillCore(
+  db: DB,
+  portfolioId: string,
+  authToken: string,
+  now: Date,
+  signal?: AbortSignal,
+): Promise<void> {
   await setBackfillStatus(db, portfolioId, "pending")
   try {
-    await _runBackfillCore(db, portfolioId, authToken, now)
+    await _runBackfillCore(db, portfolioId, authToken, now, signal)
     await setBackfillStatus(db, portfolioId, "complete", { completedAt: new Date() })
   } catch (err) {
+    // An aborted pass stays silent: the pass that replaced it recomputes the
+    // latest state.
+    if (err instanceof RecalcAbortedError) return
     const msg = err instanceof Error ? err.message : String(err)
     await setBackfillStatus(db, portfolioId, "failed", { errorMessage: msg }).catch(() => undefined)
   }
@@ -397,15 +458,10 @@ export async function computeSnapshotBatch(
     symbolEvents.set(tx.symbol, arr)
   }
 
-  // 4. Fetch price series per symbol from instruments
+  // 4. Fetch price series per symbol from instruments (bounded fan-out —
+  //    see fetchPriceSeries; an aborted signal rejects promptly)
   const symbols = [...symbolCcy.keys()]
-  const priceSeries = new Map<string, PriceBarSeries>()
-  await Promise.all(
-    symbols.map(async (sym) => {
-      const series = await fetchPriceBars(sym, from, to, authToken, signal)
-      if (series && series.dates.length > 0) priceSeries.set(sym, series)
-    }),
-  )
+  const priceSeries = await fetchPriceSeries(symbols, from, to, authToken, fetchPriceBars, signal)
   throwIfAborted(signal)
 
   // 5. Get portfolio baseCurrency + FX rates
@@ -518,8 +574,9 @@ async function _runBackfillCore(
   portfolioId: string,
   authToken: string,
   now: Date,
+  signal?: AbortSignal,
 ): Promise<void> {
-  const batch = await computeSnapshotBatch(db, portfolioId, authToken, now)
+  const batch = await computeSnapshotBatch(db, portfolioId, authToken, now, signal)
   if (batch.length === 0) return
 
   // Bulk upsert in chunks to avoid huge parameter lists

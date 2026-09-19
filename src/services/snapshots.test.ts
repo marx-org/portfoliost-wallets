@@ -20,6 +20,7 @@ import {
 } from "../db/schema.js"
 import { snapshotPortfolioValue } from "./quotes.js"
 import { runBackfill, calendarDays } from "./backfill.js"
+import { __resetBackfillRunnerForTests } from "./backfill-runner.js"
 
 // ── helpers ────────────────────────────────────────────────────────────────
 
@@ -167,7 +168,7 @@ describe("snapshotPortfolioValue — today snapshot", () => {
 
 describe("runBackfill — 3 positions over 10 days (H9)", () => {
   beforeEach(() => { process.env.INSTRUMENTS_URL = "http://instruments:3000" })
-  afterEach(() => { vi.unstubAllGlobals(); delete process.env.INSTRUMENTS_URL })
+  afterEach(() => { vi.unstubAllGlobals(); delete process.env.INSTRUMENTS_URL; __resetBackfillRunnerForTests() })
 
   it("builds a 10-day series for 3 symbols with correct daily values", async () => {
     const { db, user } = await makeHarness("snap-bf-10d")

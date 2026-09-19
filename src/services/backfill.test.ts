@@ -9,6 +9,7 @@ import {
   runBackfill,
   recalcPortfolioHistory,
 } from "./backfill.js"
+import { __resetBackfillRunnerForTests } from "./backfill-runner.js"
 
 // ── mock fetch for instruments price-bars ──────────────────────────────
 
@@ -134,6 +135,7 @@ describe("runBackfill (H6)", () => {
   afterEach(() => {
     vi.unstubAllGlobals()
     delete process.env.INSTRUMENTS_URL
+    __resetBackfillRunnerForTests()
   })
 
   it("upserts daily value snapshots for a simple single-symbol portfolio", async () => {
@@ -263,6 +265,7 @@ describe("recalcPortfolioHistory (background recalc on transaction changes)", ()
   afterEach(() => {
     vi.unstubAllGlobals()
     delete process.env.INSTRUMENTS_URL
+    __resetBackfillRunnerForTests()
   })
 
   it("replaces stale history (including superseded days) with a fresh series", async () => {

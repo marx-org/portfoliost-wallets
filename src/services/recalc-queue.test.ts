@@ -87,7 +87,7 @@ describe("recalc-queue (background recalc on transaction changes)", () => {
     expect(restartSignal?.aborted).toBe(false) // fresh pass, uncontaminated signal
   })
 
-  it("runs at most one pass concurrently per portfolio, but different portfolios are independent", async () => {
+  it("different portfolios both run, but serialized (one pass at a time cluster-wide)", async () => {
     const { db, user } = await makeHarness("queue-user-3")
     const pfA = await seedPortfolio(db, user.id, "Queue PF A")
     const pfB = await seedPortfolio(db, user.id, "Queue PF B")
@@ -98,5 +98,32 @@ describe("recalc-queue (background recalc on transaction changes)", () => {
     await vi.advanceTimersByTimeAsync(3000)
 
     expect(mockedRecalc).toHaveBeenCalledTimes(2)
+    expect(mockedRecalc.mock.calls[0][1]).toBe(pfA.id)
+    expect(mockedRecalc.mock.calls[1][1]).toBe(pfB.id)
+  })
+
+  it("a second portfolio's pass waits for the first to finish (global concurrency 1)", async () => {
+    const { db, user } = await makeHarness("queue-user-4")
+    const pfA = await seedPortfolio(db, user.id, "Queue PF A")
+    const pfB = await seedPortfolio(db, user.id, "Queue PF B")
+
+    let releaseA: () => void = () => {}
+    const gateA = new Promise<void>((resolve) => {
+      releaseA = resolve
+    })
+    mockedRecalc.mockImplementationOnce(() => gateA).mockResolvedValue(undefined)
+
+    notifyTransactionsChanged(db, pfA.id, "Bearer test")
+    notifyTransactionsChanged(db, pfB.id, "Bearer test")
+    await vi.advanceTimersByTimeAsync(3000)
+
+    // A is running; B must be queued, not running in parallel.
+    expect(mockedRecalc).toHaveBeenCalledTimes(1)
+    expect(mockedRecalc.mock.calls[0][1]).toBe(pfA.id)
+
+    releaseA()
+    await vi.advanceTimersByTimeAsync(0)
+    expect(mockedRecalc).toHaveBeenCalledTimes(2)
+    expect(mockedRecalc.mock.calls[1][1]).toBe(pfB.id)
   })
 })
