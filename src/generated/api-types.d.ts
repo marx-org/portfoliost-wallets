@@ -1072,6 +1072,25 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/portfolios/{id}/recompute": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: components["parameters"]["portfolioId"];
+            };
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Force-rebuild portfolio history (delete + rebuild value snapshots) */
+        post: operations["portfolioRecompute"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/portfolios/{id}/positions": {
         parameters: {
             query?: never;
@@ -2929,6 +2948,10 @@ export interface components {
         SetLabelsRequest: {
             labelIds: string[];
         };
+        BackfillRecomputeResponse: {
+            /** @enum {string} */
+            backfillStatus: "pending" | "complete" | "failed";
+        };
         PortfolioAnalytics: {
             /** @enum {string|null} */
             backfillStatus?: "pending" | "complete" | "failed" | null;
@@ -3688,7 +3711,7 @@ export interface components {
         TopologyServiceStatus: {
             /** @description Deployment name (matches the topology graph node id) */
             name: string;
-            /** @description Whether /__meta responded within 3 s */
+            /** @description Whether /__meta responded within 3 s (HTTP workloads), or ready replicas >= desired replicas for k8s-only workloads (postgres/redis) */
             reachable: boolean;
             /** @enum {string} */
             impl: "real" | "mock" | "unknown" | "job";
@@ -3715,15 +3738,23 @@ export interface components {
         TopologyServiceTraffic: {
             /** @description Service name (matches the topology graph node id) */
             name: string;
-            requestsPerMin: number;
+            /** @description Requests/min (HTTP) or transactions/min (databases) */
+            requestsPerMin?: number | null;
             /** @description Fraction of requests returning 4xx/5xx (0–1) */
-            errorRate: number;
-            p99LatencyMs: number;
+            errorRate?: number | null;
+            /** @description p99 request latency in ms (HTTP workloads only) */
+            p99LatencyMs?: number | null;
+            /** @description Current CPU usage in cores (workload resource metrics) */
+            cpuCores?: number | null;
+            /** @description Current working-set memory in bytes (workload resource metrics) */
+            memoryBytes?: number | null;
+            /** @description Open database connections (postgres only, via Crunchy exporter) */
+            connections?: number | null;
             /**
-             * @description Metric source used (otel when D56 metrics present, ingress fallback, none when Prometheus unavailable)
+             * @description Metric source used (otel when D56 metrics present, ingress fallback, prometheus for k8s workload resource metrics, none when Prometheus unavailable)
              * @enum {string}
              */
-            source: "otel" | "ingress" | "none";
+            source: "otel" | "ingress" | "none" | "prometheus";
         };
     };
     responses: never;
@@ -5222,6 +5253,37 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["PortfolioAnalytics"];
+                };
+            };
+        };
+    };
+    portfolioRecompute: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: components["parameters"]["portfolioId"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Recompute enqueued */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["BackfillRecomputeResponse"];
+                };
+            };
+            /** @description Portfolio not owned by the caller or missing */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
                 };
             };
         };
