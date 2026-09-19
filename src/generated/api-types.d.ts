@@ -3457,6 +3457,12 @@ export interface components {
             instrumentName?: string | null;
             /** @default STOCK */
             assetType: string;
+            sector?: string | null;
+            industry?: string | null;
+            /** @description ISO-2 country code (e.g. PL) sourced from the import catalog */
+            country?: string | null;
+            /** @description Legacy 2/3-letter country code when it differs from the ISO-2 country */
+            countryCode?: string | null;
             /** @description Post-restatement quantity used in calculations */
             quantity: number;
             /** @description Post-restatement unit price used in calculations */
