@@ -79,7 +79,7 @@ async function fetchQuote(symbol: string, authToken: string): Promise<CachedQuot
       currentPrice: price,
       change: Number(data.change ?? 0),
       percentChange: Number(data.percentChange ?? 0),
-      currency: String(data.currency ?? "USD"),
+      currency: isIsoCurrency(data.currency) ? data.currency.toUpperCase() : "USD",
       fetchedAt: Date.now(),
     }
     quoteCache.set(symbol, entry)
@@ -111,7 +111,7 @@ async function fetchProfile(symbol: string, authToken: string): Promise<CachedPr
         : typeof data.country === "string" && data.country
           ? data.country
           : null,
-      instrumentCurrency: typeof data.currency === "string" && data.currency ? data.currency.toUpperCase() : null,
+      instrumentCurrency: isIsoCurrency(data.currency) ? data.currency.toUpperCase() : null,
       fetchedAt: Date.now(),
     }
     profileCache.set(symbol, entry)
@@ -122,6 +122,17 @@ async function fetchProfile(symbol: string, authToken: string): Promise<CachedPr
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────
+
+/** §39 — accept only 3-letter ISO-4217 codes. The provider tier has served
+ * unit-suffixed codes (biznesradar prices LSE in pence, "GBp") — a lowercased
+ * "gbp" would pass a plain ISO check, uppercase to a plausible "GBP" and mask
+ * a 100× price. Non-ISO (and pence) codes must never overwrite a position's
+ * stored currency. */
+export function isIsoCurrency(code: unknown): code is string {
+  if (typeof code !== "string" || !/^[A-Za-z]{3}$/.test(code)) return false
+  // "gbp" in any mixed casing is the provider's pence unit, not the ISO code
+  return code.toLowerCase() !== "gbp" || code === "GBP"
+}
 
 function quoteCacheHit(symbol: string): boolean {
   const c = quoteCache.get(symbol)

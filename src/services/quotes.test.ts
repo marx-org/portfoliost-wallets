@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import { makeHarness } from "../routes/test-utils.js"
 import { portfolios, positions, valueSnapshots } from "../db/schema.js"
 import { eq } from "drizzle-orm"
-import { refreshQuotes, snapshotPortfolioValue, _clearQuoteCache } from "./quotes.js"
+import { refreshQuotes, snapshotPortfolioValue, _clearQuoteCache, isIsoCurrency } from "./quotes.js"
 
 // ── helpers ──────────────────────────────────────────────────────────────
 
@@ -80,6 +80,25 @@ async function seedPortfolioAndPosition(
 }
 
 // ── tests ─────────────────────────────────────────────────────────────────
+
+describe("isIsoCurrency (§39)", () => {
+  it("accepts ISO codes in upper and lower case", () => {
+    expect(isIsoCurrency("GBP")).toBe(true)
+    expect(isIsoCurrency("usd")).toBe(true)
+    expect(isIsoCurrency("PLN")).toBe(true)
+  })
+  it("rejects the pence unit code in any casing", () => {
+    expect(isIsoCurrency("GBp")).toBe(false)
+    expect(isIsoCurrency("gbp")).toBe(false)
+    expect(isIsoCurrency("gBP")).toBe(false)
+  })
+  it("rejects non-currency junk", () => {
+    expect(isIsoCurrency("GB")).toBe(false)
+    expect(isIsoCurrency("GBPx")).toBe(false)
+    expect(isIsoCurrency(123)).toBe(false)
+    expect(isIsoCurrency(null)).toBe(false)
+  })
+})
 
 describe("refreshQuotes (D58)", () => {
   beforeEach(() => {
@@ -160,6 +179,67 @@ describe("refreshQuotes (D58)", () => {
     const [updated] = await db.select().from(positions).where(eq(positions.id, pos.id))
     expect(updated.country).toBe("US")
     expect(updated.companyName).toBe("Meta Platforms, Inc.")
+  })
+
+  it("§39: rejects a non-ISO quote/profile currency (GBp) and keeps the stored currency", async () => {
+    const { db, user } = await makeHarness("q-user-gbp")
+    // a real LSE position recorded in GBP — the live provider (biznesradar)
+    // answers the quote/profile with the pence unit code "GBp".
+    const { pf, pos } = await seedPortfolioAndPosition(db, user.id, { qty: 861, avg: 5 })
+    await db.update(positions).set({ instrumentCurrency: "GBP" }).where(eq(positions.id, pos.id))
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockImplementation((url: string) => {
+        const u = String(url)
+        if (u.includes("/profile")) {
+          return Promise.resolve({
+            ok: true,
+            json: async () => ({ ticker: "CSN.L", name: "Chesnara plc", country: "GB", currency: "GBp" }),
+          })
+        }
+        return Promise.resolve({
+          ok: true,
+          // instruments §39.1 already normalizes this to GBP/3.575; this test
+          // guards the wallets boundary against a regressed raw provider row.
+          json: async () => ({ symbol: "CSN.L", currentPrice: 357.5, change: 0.5, percentChange: 0.14, currency: "GBp" }),
+        })
+      }),
+    )
+
+    await refreshQuotes(db, user.id, pf.id, "Bearer test-token")
+
+    const [updated] = await db.select().from(positions).where(eq(positions.id, pos.id))
+    // non-ISO code must NOT overwrite the canonical buy-time currency
+    expect(updated.instrumentCurrency).toBe("GBP")
+    expect(updated.companyName).toBe("Chesnara plc")
+    expect(updated.country).toBe("GB")
+  })
+
+  it("§39: still overwrites instrumentCurrency when the quote carries an ISO code", async () => {
+    const { db, user } = await makeHarness("q-user-gbp2")
+    const { pf, pos } = await seedPortfolioAndPosition(db, user.id, { qty: 10, avg: 150 })
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockImplementation((url: string) => {
+        const u = String(url)
+        if (u.includes("/profile")) {
+          return Promise.resolve({
+            ok: true,
+            json: async () => ({ ticker: "CSN.L", name: "Chesnara plc", country: "GB", currency: "GBP" }),
+          })
+        }
+        return Promise.resolve({
+          ok: true,
+          json: async () => ({ symbol: "CSN.L", currentPrice: 3.575, change: 0.005, percentChange: 0.14, currency: "GBP" }),
+        })
+      }),
+    )
+
+    await refreshQuotes(db, user.id, pf.id, "Bearer test-token")
+
+    const [updated] = await db.select().from(positions).where(eq(positions.id, pos.id))
+    expect(updated.instrumentCurrency).toBe("GBP")
+    expect(Number(updated.currentPrice)).toBeCloseTo(3.575)
   })
 
   it("heals the 'Other' sentinel + null values with the profile (plan §28.5)", async () => {
