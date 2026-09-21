@@ -2363,13 +2363,16 @@ export interface components {
                 [key: string]: unknown;
             }[];
         };
+        /** @enum {string} */
+        InstrumentType: "STOCK" | "ETF" | "BOND" | "CRYPTO" | "FUND" | "CORP_BOND";
         InstrumentDetail: {
             id?: string;
             symbol?: string;
             name?: string;
             exchange?: string;
-            type?: string;
-            currency?: string;
+            type?: components["schemas"]["InstrumentType"];
+            /** @description ISO-4217; null when the provider does not declare one (45.2 — never guessed) */
+            currency?: string | null;
         };
         InstrumentProfile: {
             ticker?: string;
@@ -2377,7 +2380,8 @@ export interface components {
             country?: string | null;
             countryCode?: string | null;
             isin?: string | null;
-            currency?: string;
+            /** @description ISO-4217; null when the provider does not declare one (45.2 — never guessed) */
+            currency?: string | null;
             exchange?: string;
             finnhubIndustry?: string | null;
             ipo?: string | null;
@@ -2493,7 +2497,8 @@ export interface components {
             ask: number;
             bidSize: number;
             askSize: number;
-            currency: string;
+            /** @description ISO-4217; null when the provider does not declare one (45.2 — never guessed) */
+            currency: string | null;
             regularMarketPrice: number;
             extendedHoursChange: number;
             extendedHoursChangePercent: number;
@@ -2515,7 +2520,7 @@ export interface components {
         SearchResult: {
             symbol?: string;
             name?: string;
-            type?: string;
+            type?: components["schemas"]["InstrumentType"];
             exchange?: string;
             countryCode?: string | null;
             source?: string;
@@ -2700,7 +2705,8 @@ export interface components {
             symbol: string;
             timeframe: string;
             stale: boolean;
-            currency?: string | null;
+            /** @description ISO-4217 currency of the closes (resolved from the profile/ticker reference; USD when unknown - 45.2: this resolver always returns a code, so the field stays non-null) */
+            currency: string;
             dates: string[];
             closes: number[];
         };
@@ -5014,7 +5020,10 @@ export interface operations {
     };
     getMergedPortfolios: {
         parameters: {
-            query?: never;
+            query?: {
+                /** @description Performance timeframe for the merged series (defaults to all available history) */
+                timeframe?: "1W" | "1M" | "3M" | "6M" | "1Y" | "2Y" | "ALL";
+            };
             header?: never;
             path?: never;
             cookie?: never;
