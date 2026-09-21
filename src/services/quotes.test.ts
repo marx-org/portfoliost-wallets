@@ -242,6 +242,37 @@ describe("refreshQuotes (D58)", () => {
     expect(Number(updated.currentPrice)).toBeCloseTo(3.575)
   })
 
+  it("45.3: a null-currency profile keeps the stored instrumentCurrency (no USD clobber)", async () => {
+    const { db, user } = await makeHarness("q-user-453")
+    const { pf, pos } = await seedPortfolioAndPosition(db, user.id, { qty: 10, avg: 150 })
+    // a sheet import set the true price currency; the provider profile/quote
+    // now declares no currency (nullable since contracts 1.6.29) and must
+    // NOT clobber the stored value.
+    await db.update(positions).set({ instrumentCurrency: "PLN" }).where(eq(positions.id, pos.id))
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockImplementation((url: string) => {
+        const u = String(url)
+        if (u.includes("/profile")) {
+          return Promise.resolve({
+            ok: true,
+            json: async () => ({ ticker: "INGAKC.TFI", name: "ING Akcji", currency: null }),
+          })
+        }
+        return Promise.resolve({
+          ok: true,
+          json: async () => ({ symbol: "INGAKC.TFI", currentPrice: 812.36, change: 13.56, percentChange: 1.7, currency: null }),
+        })
+      }),
+    )
+
+    await refreshQuotes(db, user.id, pf.id, "Bearer test-token")
+
+    const [updated] = await db.select().from(positions).where(eq(positions.id, pos.id))
+    expect(updated.instrumentCurrency).toBe("PLN")
+    expect(Number(updated.currentPrice)).toBeCloseTo(812.36)
+  })
+
   it("heals the 'Other' sentinel + null values with the profile (plan §28.5)", async () => {
     const { db, user } = await makeHarness("q-user-7")
     const { pf, pos } = await seedPortfolioAndPosition(db, user.id, { qty: 5, avg: 200 })
