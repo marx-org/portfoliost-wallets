@@ -17,6 +17,8 @@ import { getPortfolioNews } from "../services/portfolioNews.js"
 import { runBackfill, getBackfillStatus, buildBenchmarkSeries, forcePortfolioRecalc } from "../services/backfill.js"
 import { dailyNetCashFlows } from "../services/cashFlows.js"
 import { computeRiskMetrics } from "../services/riskMetrics.js"
+import { latestRates } from "../services/fee-fx.js"
+import { sumSnapshotsByDate, buildMergedPerformance } from "../services/mergedAnalytics.js"
 import { createTransactionRoutes } from "./portfolio-transactions.js"
 import type { components } from "../generated/api-types.js"
 
@@ -547,6 +549,94 @@ export function createPortfolioRoutes(db?: DB) {
       }
       throw err
     }
+  })
+
+  // GET /api/portfolios/merged — combined all-portfolios performance (§46,
+  // §41 follow-up 1). Sums every portfolio's value_snapshots into USD (the
+  // currency the SPA assumes as source via total-metrics.baseCurrency).
+  // Registered ABOVE "/:id" so "merged" is not parsed as a portfolio id.
+  routes.get("/merged", async (c) => {
+    const identity = c.get("userIdentity")
+    const timeframe = c.req.query("timeframe") || "ALL"
+    const database = getDbInstance()
+
+    const portfolioRows = await database
+      .select({ id: portfolios.id, baseCurrency: portfolios.baseCurrency })
+      .from(portfolios)
+      .where(sql`${portfolios.userId} = ${identity.id}`)
+
+    // Backfill gate: any portfolio with < 2 snapshots keeps the merged series
+    // pending (mirror /:id/analytics fire-and-forget path).
+    const pendingIds: string[] = []
+    for (const p of portfolioRows) {
+      const [{ n }] = await database
+        .select({ n: drizzleCount() })
+        .from(valueSnapshots)
+        .where(eq(valueSnapshots.portfolioId, p.id))
+      if (n < 2) pendingIds.push(p.id)
+    }
+    if (pendingIds.length > 0) {
+      const authToken = c.req.header("Authorization") ?? ""
+      for (const id of pendingIds) {
+        const status = await getBackfillStatus(database, id)
+        if (status !== "pending") {
+          void runBackfill(database, id, authToken).catch(() => undefined)
+        }
+      }
+      return c.json({
+        timeframe,
+        backfillStatus: "pending",
+        performance: {
+          timeSeries: [],
+          totalValue: 0,
+          totalInvested: 0,
+          totalReturn: 0,
+          totalReturnPercent: 0,
+          monthlyReturns: [],
+        },
+        benchmarks: [],
+      } satisfies components["schemas"]["PortfolioAnalytics"])
+    }
+
+    const cutoff = timeframeCutoff(timeframe)
+    const rows = await database
+      .select({
+        portfolioId: valueSnapshots.portfolioId,
+        baseCurrency: portfolios.baseCurrency,
+        snapshotDate: valueSnapshots.snapshotDate,
+        value: valueSnapshots.value,
+        invested: valueSnapshots.invested,
+      })
+      .from(valueSnapshots)
+      .innerJoin(portfolios, eq(valueSnapshots.portfolioId, portfolios.id))
+      .where(
+        cutoff
+          ? and(
+              sql`${portfolios.userId} = ${identity.id}`,
+              sql`${valueSnapshots.snapshotDate} >= ${cutoff}`,
+            )
+          : sql`${portfolios.userId} = ${identity.id}`,
+      )
+      .orderBy(asc(valueSnapshots.snapshotDate))
+
+    const rates = await latestRates(database)
+    const series = sumSnapshotsByDate(
+      rows.map((r) => ({
+        baseCurrency: r.baseCurrency,
+        snapshotDate: r.snapshotDate,
+        value: Number(r.value),
+        invested: Number(r.invested),
+      })),
+      rates,
+      "USD",
+    )
+
+    return c.json({
+      timeframe,
+      backfillStatus: "complete",
+      performance: buildMergedPerformance(series),
+      benchmarks: [],
+    } satisfies components["schemas"]["PortfolioAnalytics"])
   })
 
   // GET /api/portfolios/:id — detail with metrics

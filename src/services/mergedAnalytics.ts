@@ -73,6 +73,6 @@ export function buildMergedPerformance(series: MergedPoint[]) {
     monthlyReturns: [],
     timeWeightedReturn: null,
     moneyWeightedReturn: null,
-    simpleReturnPercent: null,
+    simpleReturnPercent: undefined,
   }
 }

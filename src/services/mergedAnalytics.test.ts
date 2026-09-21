@@ -84,7 +84,7 @@ describe("buildMergedPerformance (§46.1)", () => {
     expect(perf.monthlyReturns).toEqual([])
     expect(perf.timeWeightedReturn).toBeNull()
     expect(perf.moneyWeightedReturn).toBeNull()
-    expect(perf.simpleReturnPercent).toBeNull()
+    expect(perf.simpleReturnPercent).toBeUndefined()
   })
 
   it("empty series → zeros", () => {

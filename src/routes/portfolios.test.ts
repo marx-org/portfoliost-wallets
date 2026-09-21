@@ -6,8 +6,11 @@ import {
   portfolios,
   positions,
   portfolioTransactions,
+  valueSnapshots,
+  fxRates,
 } from "../db/schema.js"
 import { sql } from "drizzle-orm"
+import { __resetBackfillRunnerForTests } from "../services/backfill-runner.js"
 
 function app(db: Parameters<typeof makeHarness>[0] extends string ? never : Parameters<typeof createPortfolioRoutes>[0]) {
   const a = new Hono()
@@ -316,5 +319,99 @@ describe("GET /api/portfolios/:id/news (N6)", () => {
         previous_cursor: null,
       },
     })
+  })
+})
+
+describe("GET /api/portfolios/merged (§46, §41 follow-up 1)", () => {
+  async function seedPfWithSnapshots(
+    h: Awaited<ReturnType<typeof makeHarness>>,
+    name: string,
+    baseCurrency: string,
+    snapshots: Array<{ snapshotDate: string; value: string; invested: string }>,
+  ) {
+    const [pf] = await h.db
+      .insert(portfolios)
+      .values({ userId: h.user.id, name, currency: baseCurrency, baseCurrency })
+      .returning()
+    for (const s of snapshots) {
+      await h.db.insert(valueSnapshots).values({
+        portfolioId: pf.id,
+        snapshotDate: s.snapshotDate,
+        value: s.value,
+        invested: s.invested,
+        netFlow: "0",
+      })
+    }
+    return pf
+  }
+
+  it("sums USD + PLN portfolios into USD at latest rates (FX-converted last point)", async () => {
+    const h = await makeHarness("merged-usd-pln")
+    const a = app(h.db)
+    await h.db.insert(fxRates).values([
+      { rateDate: "2026-09-18", currency: "USD", rate: "1.08" },
+      { rateDate: "2026-09-18", currency: "PLN", rate: "4.3" },
+    ])
+    await seedPfWithSnapshots(h, "USD pf", "USD", [
+      { snapshotDate: "2026-09-01", value: "1000", invested: "800" },
+      { snapshotDate: "2026-09-02", value: "1100", invested: "800" },
+    ])
+    await seedPfWithSnapshots(h, "PLN pf", "PLN", [
+      { snapshotDate: "2026-09-01", value: "4300", invested: "4000" },
+      { snapshotDate: "2026-09-02", value: "4400", invested: "4000" },
+    ])
+
+    const res = await a.request("/api/portfolios/merged?timeframe=ALL", { headers: h.headers })
+    expect(res.status).toBe(200)
+    const body = await res.json()
+    expect(body.backfillStatus).toBe("complete")
+    expect(body.performance.timeSeries).toHaveLength(2)
+    // last point: 1100 + 4400 * (1.08 / 4.3) = 1100 + 1104.6511...
+    expect(body.performance.timeSeries[1].value).toBeCloseTo(1100 + 4400 * (1.08 / 4.3), 6)
+    expect(body.performance.timeSeries[1].invested).toBeUndefined()
+    expect(body.performance.totalValue).toBeCloseTo(1100 + 4400 * (1.08 / 4.3), 6)
+    expect(body.performance.totalInvested).toBeCloseTo(800 + 4000 * (1.08 / 4.3), 6)
+    expect(body.performance.monthlyReturns).toEqual([])
+    expect(body.benchmarks).toEqual([])
+  })
+
+  it("is served by the static route — not captured by GET /:id", async () => {
+    const h = await makeHarness("merged-not-id")
+    const a = app(h.db)
+    await seedPfWithSnapshots(h, "Only pf", "USD", [
+      { snapshotDate: "2026-09-01", value: "500", invested: "400" },
+      { snapshotDate: "2026-09-02", value: "600", invested: "400" },
+    ])
+
+    const res = await a.request("/api/portfolios/merged", { headers: h.headers })
+    expect(res.status).toBe(200)
+    const body = await res.json()
+    // Analytics-shaped body, NOT a single-portfolio detail (404 for id "merged").
+    expect(body.performance).toBeDefined()
+    expect(body.performance.timeSeries).toHaveLength(2)
+    expect(body.backfillStatus).toBe("complete")
+    expect(body.benchmarks).toEqual([])
+  })
+
+  it("returns pending + fires backfill when any portfolio has < 2 snapshots", async () => {
+    const h = await makeHarness("merged-pending")
+    const a = app(h.db)
+    // Two snapshots — has series.
+    await seedPfWithSnapshots(h, "Ready pf", "USD", [
+      { snapshotDate: "2026-09-01", value: "500", invested: "400" },
+      { snapshotDate: "2026-09-02", value: "600", invested: "400" },
+    ])
+    // No snapshots at all — must keep the merged series pending.
+    await seedPfWithSnapshots(h, "Empty pf", "USD", [])
+
+    const res = await a.request("/api/portfolios/merged", { headers: h.headers })
+    expect(res.status).toBe(200)
+    const body = await res.json()
+    expect(body.backfillStatus).toBe("pending")
+    expect(body.performance.timeSeries).toEqual([])
+    expect(body.benchmarks).toEqual([])
+
+    // Clean up: the fire-and-forget enqueue must not leak into other tests.
+    __resetBackfillRunnerForTests()
   })
 })
