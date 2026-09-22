@@ -17,7 +17,7 @@ import { getPortfolioNews } from "../services/portfolioNews.js"
 import { runBackfill, getBackfillStatus, buildBenchmarkSeries, forcePortfolioRecalc, hasBackfillableHistory } from "../services/backfill.js"
 import { dailyNetCashFlows } from "../services/cashFlows.js"
 import { computeRiskMetrics } from "../services/riskMetrics.js"
-import { resolveRates } from "../services/instruments-fx.js"
+import { resolveRates, fxTo } from "../services/instruments-fx.js"
 import { sumSnapshotsByDate, buildMergedPerformance } from "../services/mergedAnalytics.js"
 import { createTransactionRoutes } from "./portfolio-transactions.js"
 import type { components } from "../generated/api-types.js"
@@ -260,21 +260,40 @@ export function createPortfolioRoutes(db?: DB) {
       .from(portfolios)
       .where(sql`${portfolios.userId} = ${identity.id}`)
 
+    // plan §48.6e B5 — each portfolio's value/invested is denominated in its
+    // own base_currency (each position in its instrument currency). Convert
+    // to the aggregate baseCurrency (USD) via instruments' FX BEFORE summing
+    // — never add foreign-currency values raw. Unresolvable pairs degrade
+    // 1:1 (plan §48.3).
+    const toBase = await fxTo(c.req.header("Authorization") ?? "", "USD")
+
     // Compute actual totals from positions + transactions rather than
     // stale denormalized columns.
     const portfolioBreakdown = await Promise.all(
       portfolioRows.map(async (p) => {
-        const totalInvested = Number(p.totalInvested || 0)
+        const totalInvested =
+          Number(p.totalInvested || 0) * (await toBase(p.baseCurrency ?? "USD"))
 
-        // Sum market values from open positions
-        const [posAgg] = await database
+        // Sum market values from open positions (each in its instrument ccy)
+        const posRows = await database
           .select({
-            totalMarketValue: sql<string>`COALESCE(SUM(CASE WHEN ${positions.isOpen} = true THEN COALESCE(${positions.marketValue}, ${positions.quantity} * ${positions.averageCostBasis}) ELSE 0 END), 0)`,
+            marketValue: positions.marketValue,
+            quantity: positions.quantity,
+            averageCostBasis: positions.averageCostBasis,
+            instrumentCurrency: positions.instrumentCurrency,
           })
           .from(positions)
-          .where(sql`${positions.portfolioId} = ${p.id}`)
+          .where(and(sql`${positions.portfolioId} = ${p.id}`, eq(positions.isOpen, true)))
 
-        const currentValue = Number(posAgg.totalMarketValue || 0)
+        let currentValue = 0
+        for (const r of posRows) {
+          const mv =
+            r.marketValue != null
+              ? Number(r.marketValue)
+              : Number(r.quantity) * Number(r.averageCostBasis)
+          currentValue += mv * (await toBase(r.instrumentCurrency ?? "USD"))
+        }
+
         const gainLoss = currentValue - totalInvested
         const returnPct = totalInvested > 0 ? (gainLoss / totalInvested) * 100 : 0
         return {
@@ -302,6 +321,8 @@ export function createPortfolioRoutes(db?: DB) {
       totalInvested,
       totalGainLoss,
       returnPercentage,
+      // plan §48.6e B5 — the aggregate denomination every portfolio value
+      // above has been converted into (the SPA treats it as the FX source).
       baseCurrency: "USD",
       portfolioBreakdown,
       externalCapitalReturnPercent: returnPercentage,

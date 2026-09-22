@@ -4,6 +4,7 @@ import { createPortfolioRoutes } from "./portfolios.js"
 import { createPublicShareRoutes } from "./portfolios.js"
 import { createCrossPortfolioTransactionsRoute } from "./portfolio-transactions.js"
 import { makeHarness } from "./test-utils.js"
+import { mockInstrumentsFx, unmockInstrumentsFx } from "../test-fx-mock.js"
 import {
   portfolios,
   positions,
@@ -1279,6 +1280,57 @@ describe("Aggregates & metrics (§15 Phase G)", () => {
     expect(body.totalInvested).toBeGreaterThan(0)
     expect(body.portfolioBreakdown.length).toBe(1)
     expect(body.portfolioBreakdown[0].name).toBe("P1")
+  })
+
+  it("GET /total-metrics — converts per-portfolio values to the aggregate base (§48.6e B5)", async () => {
+    const h = await makeHarness()
+    const a = app(h.db)
+    // EUR-quoted table: PLN→USD = 2/4 = 0.5 (the D27 cross-rate).
+    mockInstrumentsFx({ table: { USD: 2, PLN: 4 } })
+    try {
+      // PLN-base portfolio (prod shape: `currency` left at the API default,
+      // base declared separately) holding a PLN position.
+      const plnRes = await a.request("/api/portfolios", {
+        method: "POST",
+        headers: h.headers,
+        body: JSON.stringify({ name: "PLN P", currency: "USD", baseCurrency: "PLN" }),
+      })
+      const pln = await plnRes.json()
+      await a.request(`/api/portfolios/${pln.id}/positions`, {
+        method: "POST",
+        headers: h.headers,
+        body: JSON.stringify({ symbol: "SNT.WA", quantity: 10, price: 150, currency: "PLN" }),
+      })
+
+      // Plain USD portfolio (identity rate) for the cross-currency sum.
+      await a.request("/api/portfolios", {
+        method: "POST",
+        headers: h.headers,
+        body: JSON.stringify({ name: "P1", currency: "USD" }),
+      })
+      const list = await a.request("/api/portfolios", { headers: h.headers })
+      const usd = (await list.json()).find((p: { name: string }) => p.name === "P1")
+      await a.request(`/api/portfolios/${usd.id}/transactions`, {
+        method: "POST",
+        headers: h.headers,
+        body: JSON.stringify(BUY_BODY),
+      })
+
+      const res = await a.request("/api/portfolios/total-metrics", { headers: h.headers })
+      expect(res.status).toBe(200)
+      const body = await res.json()
+      expect(body.baseCurrency).toBe("USD")
+      // 10×150 PLN × 0.5 = 750 USD — never 1,500 raw PLN as USD.
+      expect(body.totalValue).toBeCloseTo(750 + 1500, 2)
+      expect(body.totalInvested).toBeCloseTo(750 + 1500, 2)
+      const byName = (n: string) => body.portfolioBreakdown.find((r: { name: string }) => r.name === n)
+      expect(byName("PLN P").totalValue).toBeCloseTo(750, 2)
+      expect(byName("PLN P").totalInvested).toBeCloseTo(750, 2)
+      expect(byName("P1").totalValue).toBeCloseTo(1500, 2)
+      expect(byName("P1").totalInvested).toBeCloseTo(1500, 2)
+    } finally {
+      unmockInstrumentsFx()
+    }
   })
 
   it("GET /held-stocks — open positions grouped by symbol", async () => {
