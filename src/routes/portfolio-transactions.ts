@@ -12,7 +12,8 @@ import {
   positionLabels,
   transactionLabels,
 } from "../db/schema.js"
-import { resolveFeeFx, latestRates } from "../services/fee-fx.js"
+import { resolveFeeFx } from "../services/fee-fx.js"
+import { resolveRates } from "../services/instruments-fx.js"
 import {
   labelsForPositions,
   labelsForTransactions,
@@ -395,7 +396,7 @@ function positionWire(
   p: PositionRow,
   portfolio: { id: string; baseCurrency: string },
   totalValue: number,
-  fxTable?: Record<string, number> | null,
+  fxRates: Map<string, number | null> = new Map(),
   labels: Label[] = [],
 ) {
   const avg   = Number(p.averageCostBasis)
@@ -408,12 +409,12 @@ function positionWire(
   // Instrument native currency (e.g. PLN for KRU.WA)
   const instrCcy = p.instrumentCurrency ?? portfolio.baseCurrency
 
-  // Convert native → displayCurrency using latest FX table (current rate for all fields)
+  // Convert native → displayCurrency using the resolved pair rates (plan
+  // §48.3 — resolved via instruments; unresolvable pair → null, as before).
   function toDisplay(nativeValue: number | null): number | null {
     if (nativeValue == null) return null
     if (instrCcy === portfolio.baseCurrency) return nativeValue
-    if (!fxTable) return null
-    const rate = convert(1, instrCcy, portfolio.baseCurrency, fxTable)
+    const rate = fxRates.get(instrCcy.toUpperCase())
     return rate != null ? round2(nativeValue * rate) : null
   }
 
@@ -508,7 +509,7 @@ export function createTransactionRoutes(db?: DB) {
     const instCcy = (body.instrumentCurrency ?? body.currency).toUpperCase()
     const notional = body.quantity * body.price
 
-    const fx = await resolveFeeFx(database, body, txCcy, { notional })
+    const fx = await resolveFeeFx(c.req.header("Authorization") ?? "", body, txCcy, { notional })
     if (!fx.ok) return c.json({ error: "ValidationError", message: fx.message }, 422)
 
     const executedAt = body.executedAt ? new Date(body.executedAt) : new Date()
@@ -677,7 +678,7 @@ export function createTransactionRoutes(db?: DB) {
     const txCcy = existing.currency.toUpperCase()
     const notional = quantity * price
 
-    const fx = await resolveFeeFx(database, merged, txCcy, { notional })
+    const fx = await resolveFeeFx(c.req.header("Authorization") ?? "", merged, txCcy, { notional })
     if (!fx.ok) return c.json({ error: "ValidationError", message: fx.message }, 422)
 
     const result = await database.transaction(async (tx) => {
@@ -932,8 +933,8 @@ export function createTransactionRoutes(db?: DB) {
     if (!updated) return c.json({ error: "NotFound", message: "Position not found" }, 404)
 
     const totalValue = await openPositionsValue(database, identity.id, portfolioId)
-    const fxTable = await latestRates(database)
-    return c.json(positionWire(updated, portfolio, totalValue, fxTable))
+    const fxRates = await resolveRates(c.req.header("Authorization") ?? "", portfolio.baseCurrency, [updated.instrumentCurrency])
+    return c.json(positionWire(updated, portfolio, totalValue, fxRates))
   })
 
   // DELETE /:id/positions/:positionId — remove position + its transactions
@@ -1020,7 +1021,7 @@ export function createTransactionRoutes(db?: DB) {
     })
 
     notifyTransactionsChanged(database, portfolioId, c.req.header("Authorization") ?? "")
-    return c.json(positionWire(closed, portfolio, 0, await latestRates(database)))
+    return c.json(positionWire(closed, portfolio, 0, await resolveRates(c.req.header("Authorization") ?? "", portfolio.baseCurrency, [closed.instrumentCurrency])))
   })
 
   // ── D1: GET /:id/transactions — paginated with filters + sorting ─────
@@ -1211,7 +1212,7 @@ export function createTransactionRoutes(db?: DB) {
     const notional = body.quantity * price
 
     const fx = await resolveFeeFx(
-      database,
+      c.req.header("Authorization") ?? "",
       {
         fees: body.fees,
         feesType: body.feesType,
@@ -1335,10 +1336,10 @@ export function createTransactionRoutes(db?: DB) {
       .from(positions)
       .where(eq(positions.id, result.position.id))
     const totalValue = await openPositionsValue(database, identity.id, portfolioId)
-    const fxTable = await latestRates(database)
+    const fxRates = await resolveRates(c.req.header("Authorization") ?? "", portfolio.baseCurrency, [fresh.instrumentCurrency])
 
     notifyTransactionsChanged(database, portfolioId, c.req.header("Authorization") ?? "")
-    return c.json(positionWire(fresh, portfolio, totalValue, fxTable), 201)
+    return c.json(positionWire(fresh, portfolio, totalValue, fxRates), 201)
   })
 
   // ── E1: GET /:id/positions — full position list (example-service wire shape) ──
@@ -1374,7 +1375,7 @@ export function createTransactionRoutes(db?: DB) {
       .where(and(...conditions))
 
     const totalValue = await openPositionsValue(database, identity.id, portfolioId)
-    const fxTable = await latestRates(database)
+    const fxRates = await resolveRates(c.req.header("Authorization") ?? "", portfolio.baseCurrency, posRows.map((p) => p.instrumentCurrency))
     const labelMap = await labelsForPositions(
       database,
       posRows.map((p) => p.id),
@@ -1382,7 +1383,7 @@ export function createTransactionRoutes(db?: DB) {
 
     return c.json(
       posRows.map((p) =>
-        positionWire(p, portfolio, totalValue, fxTable, labelMap.get(p.id) ?? []),
+        positionWire(p, portfolio, totalValue, fxRates, labelMap.get(p.id) ?? []),
       ),
     )
   })

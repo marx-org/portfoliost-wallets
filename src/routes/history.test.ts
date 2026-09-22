@@ -51,11 +51,6 @@ describe("GET /:id/transactions pagination (§11.6)", () => {
 describe("recent-transactions feed shapes (D19 read model)", () => {
   it("maps displayLabel, signed amounts, internal-transfer flag", async () => {
     const h = await boot()
-    const { fxRates } = await import("../db/schema.js")
-    await h.db.insert(fxRates).values([
-      { rateDate: "2026-08-21", currency: "USD", rate: "1.0800000000" },
-      { rateDate: "2026-08-21", currency: "EUR", rate: "1" },
-    ])
     const a = await h.mk()
     const b = await h.mk("EUR")
     await h.json(`/api/wallets/${a}/deposits`, { amount: 100, description: "salary" })

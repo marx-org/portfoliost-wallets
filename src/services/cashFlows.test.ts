@@ -44,7 +44,7 @@ describe("dailyNetCashFlows (D50)", () => {
     await seedTx(db, user.id, pf.id, "BUY", 10, 100, "2026-07-01", 2.5) // +1002.5
     await seedTx(db, user.id, pf.id, "SELL", 2, 110, "2026-07-03", 1) // −(220−1) = −219
 
-    const flows = await dailyNetCashFlows(db, pf.id, "2026-07-01", "2026-07-05", "USD")
+    const flows = await dailyNetCashFlows(db, "Bearer t", pf.id, "2026-07-01", "2026-07-05", "USD")
     expect(flows.get("2026-07-01")).toBeCloseTo(1002.5)
     expect(flows.get("2026-07-03")).toBeCloseTo(-219)
     expect(flows.get("2026-07-02")).toBeUndefined()
@@ -56,9 +56,9 @@ describe("dailyNetCashFlows (D50)", () => {
     await seedTx(db, user.id, pf.id, "BUY", 1, 50, "2026-07-02") // +50
     await seedTx(db, user.id, pf.id, "BUY", 1, 30, "2026-07-02") // +30
 
-    const flows = await dailyNetCashFlows(db, pf.id, "2026-07-03", "2026-07-04", "USD")
+    const flows = await dailyNetCashFlows(db, "Bearer t", pf.id, "2026-07-03", "2026-07-04", "USD")
     expect(flows.size).toBe(0) // window excludes 07-02
-    const full = await dailyNetCashFlows(db, pf.id, "2026-07-01", "2026-07-10", "USD")
+    const full = await dailyNetCashFlows(db, "Bearer t", pf.id, "2026-07-01", "2026-07-10", "USD")
     expect(full.get("2026-07-02")).toBeCloseTo(80)
   })
 })

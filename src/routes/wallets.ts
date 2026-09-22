@@ -123,7 +123,7 @@ export function createWalletRoutes(db?: DB) {
     const identity = c.get("userIdentity")
     const database = getDbInstance()
     const base = (c.req.query("baseCurrency") ?? "USD").toUpperCase()
-    return c.json(await totalBalance(database, identity.id, base) satisfies WalletsTotalBalance)
+    return c.json(await totalBalance(database, c.req.header("Authorization") ?? "", identity.id, base) satisfies WalletsTotalBalance)
   })
 
   routes.patch("/:id", async (c) => {

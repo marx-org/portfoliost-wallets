@@ -9,17 +9,16 @@
  * Amounts are the wallet-debit/credit convention from createWalletLink —
  * BUY = −(qty×price + feesSettled), SELL = +(qty×price − feesSettled) — with the
  * sign flipped so the result is "net invested" per day (D50). All figures are
- * converted to the portfolio's base currency via the latest fx_rates snapshot
- * (rate=1 fallback when the table or a pair is missing).
+ * converted to the portfolio's base currency via instruments' fx_rates (plan
+ * §48.3 — rate=1 fallback when instruments is down or a pair is missing).
  *
  * This is the single source of truth for both the portfolio's own return-type
  * columns (value_snapshots.netFlow) and the cash-flow-mirrored benchmark overlay.
  */
 import { and, eq, sql } from "drizzle-orm"
-import { convert } from "@marx2/contracts/fx"
 import type { DB } from "../db/index.js"
 import { portfolioTransactions } from "../db/schema.js"
-import { latestRates } from "./fee-fx.js"
+import { fxTo } from "./instruments-fx.js"
 
 /** Normalise a value that may be a Date, ISO string, or timestamptz string to YYYY-MM-DD. */
 function toDateStr(v: unknown): string | null {
@@ -43,6 +42,7 @@ function toDateStr(v: unknown): string | null {
  */
 export async function dailyNetCashFlows(
   db: DB,
+  authToken: string | null,
   portfolioId: string,
   from: string,
   to: string,
@@ -68,12 +68,8 @@ export async function dailyNetCashFlows(
 
   if (rows.length === 0) return new Map()
 
-  const fxTable = await latestRates(db)
-  const fxRate = (ccy: string): number => {
-    if (ccy === base) return 1
-    const r = fxTable ? convert(1, ccy, base, fxTable) : null
-    return r ?? 1
-  }
+  // plan §48.3 — pair rates resolved via instruments, memoized per currency.
+  const toBase = await fxTo(authToken, base)
 
   const flows = new Map<string, number>()
   for (const r of rows) {
@@ -82,7 +78,7 @@ export async function dailyNetCashFlows(
     const notional = Number(r.totalAmount ?? 0)
     const fees = Number(r.feesSettled ?? 0)
     const cash = r.type === "BUY" ? notional + fees : -(notional - fees)
-    const baseAmount = cash * fxRate((r.currency ?? base).toUpperCase())
+    const baseAmount = cash * (await toBase((r.currency ?? base).toUpperCase(), 1))
     flows.set(day, (flows.get(day) ?? 0) + baseAmount)
   }
   return flows

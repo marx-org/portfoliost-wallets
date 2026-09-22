@@ -1,10 +1,11 @@
-import { describe, expect, it } from "vitest"
+import { afterEach, describe, expect, it } from "vitest"
 import { Hono } from "hono"
 import { eq } from "drizzle-orm"
 import { createWalletRoutes } from "./wallets.js"
 import { createMovementRoutes } from "./movements.js"
 import { makeHarness } from "./test-utils.js"
-import { fxRates, wallets } from "../db/schema.js"
+import { wallets } from "../db/schema.js"
+import { mockInstrumentsFx, unmockInstrumentsFx } from "../test-fx-mock.js"
 
 async function boot() {
   const h = await makeHarness()
@@ -25,19 +26,18 @@ async function boot() {
   return { ...h, request, json, mk }
 }
 
-async function seedRates(db: Awaited<ReturnType<typeof boot>>["db"]) {
-  // EUR-based demo closes (mirrors fees-and-custom-fx D32 demo table)
-  await db.insert(fxRates).values([
-    { rateDate: "2026-08-21", currency: "USD", rate: "1.0800000000" },
-    { rateDate: "2026-08-21", currency: "PLN", rate: "4.3000000000" },
-    { rateDate: "2026-08-21", currency: "GBP", rate: "0.8500000000" },
-  ])
+function seedRates() {
+  // plan §48.3 — the FX data moved to instruments; the stand-in serves the
+  // same EUR-based demo closes (fees-and-custom-fx D32) over the internal route.
+  mockInstrumentsFx({ table: { USD: 1.08, PLN: 4.3, GBP: 0.85 }, asOf: "2026-08-21" })
 }
+
+afterEach(() => unmockInstrumentsFx())
 
 describe("deposits/withdrawals (§11.4)", () => {
   it("deposit echoes resolved defaults and updates balance; snapshot rate auto from fx_rates", async () => {
     const h = await boot()
-    await seedRates(h.db)
+    seedRates()
     const id = await h.mk("EUR")
     const res = await h.json(`/api/wallets/${id}/deposits`, { amount: 1000 })
     expect(res.status).toBe(201)
@@ -53,7 +53,7 @@ describe("deposits/withdrawals (§11.4)", () => {
 
   it("withdrawal pct fee materializes against the amount (D28)", async () => {
     const h = await boot()
-    await seedRates(h.db)
+    seedRates()
     const id = await h.mk("EUR")
     await h.json(`/api/wallets/${id}/deposits`, { amount: 1000 })
     const res = await h.json(`/api/wallets/${id}/withdrawals`, {
@@ -69,7 +69,7 @@ describe("deposits/withdrawals (§11.4)", () => {
 
   it("foreign-currency fee settles into wallet ccy via fx_rates", async () => {
     const h = await boot()
-    await seedRates(h.db)
+    seedRates()
     const id = await h.mk("EUR")
     await h.json(`/api/wallets/${id}/deposits`, { amount: 1000 })
     const res = await h.json(`/api/wallets/${id}/withdrawals`, {
@@ -85,7 +85,7 @@ describe("deposits/withdrawals (§11.4)", () => {
 
   it("manual rates are echoed verbatim; invalid ones → 422", async () => {
     const h = await boot()
-    await seedRates(h.db)
+    seedRates()
     const id = await h.mk("USD")
     const okRes = await h.json(`/api/wallets/${id}/deposits`, {
       amount: 1,
@@ -106,7 +106,7 @@ describe("deposits/withdrawals (§11.4)", () => {
 
   it("overdraft → 422 insufficient funds; ledger untouched", async () => {
     const h = await boot()
-    await seedRates(h.db)
+    seedRates()
     const id = await h.mk("USD")
     const res = await h.json(`/api/wallets/${id}/withdrawals`, { amount: 5 })
     expect(res.status).toBe(422)
@@ -127,7 +127,7 @@ describe("transfers incl. cross-currency elastic legs (§11.4 / wallets D22)", (
   // each case seeds rates itself (cross-currency legs need them)
   it("same-currency transfer mirrors value on both linked legs", async () => {
     const h = await boot()
-    await seedRates(h.db)
+    seedRates()
 
     const a = await h.mk("USD", "A")
     const b = await h.mk("USD", "B")
@@ -148,7 +148,7 @@ describe("transfers incl. cross-currency elastic legs (§11.4 / wallets D22)", (
 
   it("cross-currency: credits converted target, stores rate + targetAmount on both legs", async () => {
     const h = await boot()
-    await seedRates(h.db)
+    seedRates()
     const eur = await h.mk("EUR", "EUR main")
     const usd = await h.mk("USD", "USD side")
     await h.json(`/api/wallets/${eur}/deposits`, { amount: 43 })
@@ -168,7 +168,7 @@ describe("transfers incl. cross-currency elastic legs (§11.4 / wallets D22)", (
 
   it("manual targetAmount wins over the computed conversion", async () => {
     const h = await boot()
-    await seedRates(h.db)
+    seedRates()
     const eur = await h.mk("EUR")
     const pln = await h.mk("PLN")
     await h.json(`/api/wallets/${eur}/deposits`, { amount: 20 })

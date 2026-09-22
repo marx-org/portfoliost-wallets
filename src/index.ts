@@ -6,8 +6,6 @@ import { createWalletRoutes } from "./routes/wallets.js"
 import { createMovementRoutes } from "./routes/movements.js"
 import { createTransactionRoutes } from "./routes/transactions.js"
 import { createHistoryRoutes } from "./routes/history.js"
-import { createRegistryRoutes } from "./routes/registry.js"
-import { createAdminRoutes } from "./routes/admin.js"
 import { createPortfolioRoutes } from "./routes/portfolios.js"
 import { createPublicShareRoutes } from "./routes/portfolios.js"
 import { createCrossPortfolioTransactionsRoute } from "./routes/portfolio-transactions.js"
@@ -53,10 +51,6 @@ api.route("/wallets", walletsApi)
 api.route("/wallets", createMovementRoutes())
 api.route("/wallets/transactions", createTransactionRoutes())
 api.route("/wallets", createHistoryRoutes())
-// registry: /api/currencies (public) + /api/internal/fx-rates (D20/D26)
-api.route("/", createRegistryRoutes())
-// D47 — admin-facing FX rates endpoint
-api.route("/admin", createAdminRoutes())
 
 // §15 — portfolio management (D53–D64)
 // D2: cross-portfolio transaction feed (must be mounted before portfolio routes to avoid /:id collision)

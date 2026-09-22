@@ -15,7 +15,6 @@
  *  7. Mark portfolio_backfill_metadata complete (or failed on error).
  */
 import { and, eq, lt, sql } from "drizzle-orm"
-import { convert } from "@marx2/contracts/fx"
 import type { DB } from "../db/index.js"
 import {
   portfolioBackfillMetadata,
@@ -24,7 +23,7 @@ import {
   positions,
   valueSnapshots,
 } from "../db/schema.js"
-import { latestRates } from "./fee-fx.js"
+import { fxTo, instrumentsBase, resolvedFxRate } from "./instruments-fx.js"
 import { dailyNetCashFlows } from "./cashFlows.js"
 import { enqueueBackfill } from "./backfill-runner.js"
 import {
@@ -35,14 +34,6 @@ import {
 } from "./returnColumns.js"
 
 // ── instruments client ────────────────────────────────────────────────────
-
-function instrumentsBase(): string {
-  return (
-    process.env.INSTRUMENTS_URL ??
-    process.env.API_INSTRUMENTS_URL ??
-    ""
-  ).replace(/\/$/, "")
-}
 
 interface PriceBarSeries {
   symbol: string
@@ -58,11 +49,12 @@ async function fetchPriceBars(
   to: string,
   authToken: string,
   signal?: AbortSignal,
+  currency?: string,
 ): Promise<PriceBarSeries | null> {
   const base = instrumentsBase()
   if (!base) return null
   try {
-    const url = `${base}/api/instruments/${encodeURIComponent(symbol)}/price-bars?from=${from}&to=${to}`
+    const url = `${base}/api/instruments/${encodeURIComponent(symbol)}/price-bars?from=${from}&to=${to}${currency ? `&currency=${encodeURIComponent(currency)}` : ""}`
     const res = await fetch(url, { headers: { Authorization: authToken }, signal })
     if (!res.ok) return null
     return (await res.json()) as PriceBarSeries
@@ -82,8 +74,11 @@ const PRICE_FETCH_CONCURRENCY = Math.max(1, Number(process.env.RECALC_PRICE_CONC
 
 /**
  * Fetch per-symbol price series with a bounded worker pool (default 4
- * concurrent). Aborts promptly: an aborted signal stops dispatching further
- * symbols (in-flight fetches resolve and are dropped).
+ * concurrent). `targetCcy` (plan §48.3) carries the per-symbol conversion
+ * target — instruments serves the closes already converted, so the value
+ * path multiplies qty × close with no FX lookup. Aborts promptly: an aborted
+ * signal stops dispatching further symbols (in-flight fetches resolve and
+ * are dropped).
  */
 export async function fetchPriceSeries(
   symbols: string[],
@@ -96,8 +91,10 @@ export async function fetchPriceSeries(
     to: string,
     authToken: string,
     signal?: AbortSignal,
+    currency?: string,
   ) => Promise<PriceBarSeries | null> = fetchPriceBars,
   signal?: AbortSignal,
+  targetCcy?: Map<string, string | null>,
 ): Promise<Map<string, PriceBarSeries>> {
   const out = new Map<string, PriceBarSeries>()
   let next = 0
@@ -106,7 +103,7 @@ export async function fetchPriceSeries(
       throwIfAborted(signal)
       const i = next++
       if (i >= symbols.length) return
-      const series = await fetcher(symbols[i], from, to, authToken, signal)
+      const series = await fetcher(symbols[i], from, to, authToken, signal, targetCcy?.get(symbols[i] ?? "") ?? undefined)
       if (series && series.dates.length > 0) out.set(symbols[i], series)
     }
   }
@@ -155,12 +152,10 @@ export async function buildBenchmarkSeries(
 
   const base = ctx.baseCurrency.toUpperCase()
   const isBaseCcy = !series.currency || series.currency.toUpperCase() === base
-  const fxTable = await latestRates(ctx.db)
-  const toBase = (v: number): number => {
-    if (isBaseCcy) return v
-    if (!fxTable) return v
-    return v * (convert(1, series.currency!.toUpperCase(), base, fxTable) ?? 1)
-  }
+  // plan §48.3 — one resolved pair rate for the overlay (benchmarks are a
+  // single instrument; the rate degrades 1:1 when unresolvable).
+  const rate = isBaseCcy ? 1 : (await resolvedFxRate(authToken, series.currency!, base))?.rate ?? 1
+  const toBase = (v: number): number => (isBaseCcy ? v : v * rate)
 
   // Carry-forward closes (converted to base currency) over every calendar day.
   const days = calendarDays(from, to)
@@ -456,10 +451,11 @@ export async function computeSnapshotBatch(
 
   if (txRows.length === 0) return []
 
-  // Collect unique symbols + their instrument currencies
-  const symbolCcy = new Map<string, string>()
+  // Collect unique symbols + their instrument currencies (null = unknown,
+  // never guessed — plan §45.3)
+  const symbolCcy = new Map<string, string | null>()
   for (const tx of txRows) {
-    if (tx.symbol) symbolCcy.set(tx.symbol, tx.instrumentCurrency ?? "USD")
+    if (tx.symbol) symbolCcy.set(tx.symbol, tx.instrumentCurrency)
   }
 
   // 3. Build cumulative qty_held per symbol per day.
@@ -477,32 +473,40 @@ export async function computeSnapshotBatch(
     symbolEvents.set(tx.symbol, arr)
   }
 
-  // 4. Fetch price series per symbol from instruments (bounded fan-out —
-  //    see fetchPriceSeries; an aborted signal rejects promptly)
-  const symbols = [...symbolCcy.keys()]
-  const priceSeries = await fetchPriceSeries(symbols, from, to, authToken, fetchPriceBars, signal)
-  throwIfAborted(signal)
-
-  // 5. Get portfolio baseCurrency + FX rates
+  // 4. Portfolio base currency (needed before the price fetch — plan §48.3
+  //    converts server-side INTO the base, so the target must be known up front).
   const [portfolio] = await db
     .select({ baseCurrency: portfolios.baseCurrency })
     .from(portfolios)
     .where(eq(portfolios.id, portfolioId))
     .limit(1)
-  const base = portfolio?.baseCurrency ?? "USD"
-  const fxTable = await latestRates(db)
-  const fxRate = (ccy: string): number => {
-    if (ccy === base) return 1
-    if (!fxTable) return 1
-    return convert(1, ccy, base, fxTable) ?? 1
+  const base = (portfolio?.baseCurrency ?? "USD").toUpperCase()
+
+  // Per-symbol conversion target: known non-base instrument currencies are
+  // converted server-side (?currency=<base>); unknown or already-base
+  // currencies stay native. The value path then multiplies qty × close with
+  // no FX lookup (the "qty-only" property, plan §48.3).
+  const targetCcy = new Map<string, string | null>()
+  for (const [sym, ccy] of symbolCcy) {
+    targetCcy.set(sym, ccy && ccy.toUpperCase() !== base ? base : null)
   }
+
+  // 5. Fetch price series per symbol from instruments (bounded fan-out —
+  //    see fetchPriceSeries; an aborted signal rejects promptly)
+  const symbols = [...symbolCcy.keys()]
+  const priceSeries = await fetchPriceSeries(symbols, from, to, authToken, fetchPriceBars, signal, targetCcy)
+  throwIfAborted(signal)
+
+  // Cost-basis currency conversion for `invested` — a genuine rate-only need
+  // (the stored avgCost is denominated in the instrument currency, plan §48.3).
+  const toBase = await fxTo(authToken, base)
 
   // 6. Build daily value series
   const days = calendarDays(from, to)
 
   // Daily net cash flows (BUY − SELL) in base currency populate netFlow so the
   // portfolio's own TWR/MWR/simple columns are flow-aware (D49/D50).
-  const dailyFlows = await dailyNetCashFlows(db, portfolioId, from, to, base)
+  const dailyFlows = await dailyNetCashFlows(db, authToken, portfolioId, from, to, base)
   throwIfAborted(signal)
 
   // Pre-build carry-forward price maps per symbol
@@ -566,12 +570,12 @@ export async function computeSnapshotBatch(
       if (qty <= 0) continue
       const price = priceMaps.get(sym)?.get(day)
       if (!price) continue
-      const ccy = symbolCcy.get(sym) ?? "USD"
-      const rate = fxRate(ccy)
-      totalValue += qty * price * rate
+      // plan §48.3 — the close is already in the portfolio base currency
+      // (server-side conversion); the value path is qty × close.
+      totalValue += qty * price
       const cost = costPerSymbol.get(sym)
       if (cost) {
-        totalInvested += qty * cost.avg * fxRate(cost.ccy)
+        totalInvested += qty * cost.avg * (await toBase(cost.ccy, 1))
       }
     }
     if (totalValue > 0) {

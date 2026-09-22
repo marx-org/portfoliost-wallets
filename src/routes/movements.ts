@@ -61,7 +61,7 @@ export function createMovementRoutes(db?: DB) {
       }
     }
 
-    const fx = await resolveFeeFx(database, body, wallet.currency, {
+    const fx = await resolveFeeFx(c.req.header("Authorization") ?? "", body, wallet.currency, {
       notional: kind === "TRANSFER" && dest ? Number(wallet.balance) : body.amount,
       toWalletCcy: dest?.currency ?? null,
     })

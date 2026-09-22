@@ -1,7 +1,12 @@
 import { describe, expect, it } from "vitest"
+import { crossRate } from "@marx2/contracts/fx"
 import { buildMergedPerformance, sumSnapshotsByDate, type SnapshotRow } from "./mergedAnalytics.js"
 
-const RATES: Record<string, number> = { USD: 1.08, PLN: 4.3, EUR: 1 } // 1 EUR = ...
+// EUR-quoted table (D27): the rate callback resolves from→USD cross-rates the
+// same way the real service does (plan §48.3 — resolved upstream, passed in).
+const TABLE = { USD: 1.08, PLN: 4.3, EUR: 1 }
+const RATES = (from: string): number | null => crossRate(from, "USD", TABLE) ?? null
+const NULL_RATES = (_from: string): number | null => null
 
 describe("sumSnapshotsByDate (§46.1)", () => {
   it("single portfolio in its own currency == its own series, no FX", () => {
@@ -46,7 +51,7 @@ describe("sumSnapshotsByDate (§46.1)", () => {
       { baseCurrency: "USD", snapshotDate: "2026-01-01", value: 1000, invested: 900 },
       { baseCurrency: "PLN", snapshotDate: "2026-01-01", value: 4300, invested: 4000 },
     ]
-    expect(sumSnapshotsByDate(rows, null, "USD")).toEqual([
+    expect(sumSnapshotsByDate(rows, NULL_RATES, "USD")).toEqual([
       { date: "2026-01-01", value: 1000, invested: 900 },
     ])
   })

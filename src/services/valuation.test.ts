@@ -1,18 +1,18 @@
-import { describe, expect, it } from "vitest"
+import { afterEach, describe, expect, it } from "vitest"
 import { Hono } from "hono"
-import { createTestDb } from "../db/test-db.js"
 import { makeHarness } from "../routes/test-utils.js"
 import { createWalletRoutes } from "../routes/wallets.js"
-import { fxRates, wallets } from "../db/schema.js"
+import { wallets } from "../db/schema.js"
 import { snapshotRate, totalBalance } from "./valuation.js"
+import { mockInstrumentsFx, unmockInstrumentsFx } from "../test-fx-mock.js"
+
+afterEach(() => unmockInstrumentsFx())
 
 async function seedWorld() {
   const h = await makeHarness("valuer")
-  await h.db.insert(fxRates).values([
-    { rateDate: "2026-08-21", currency: "USD", rate: "1.0800000000" },
-    { rateDate: "2026-08-21", currency: "EUR", rate: "1" },
-    { rateDate: "2026-08-21", currency: "PLN", rate: "4.3000000000" },
-  ])
+  // plan §48.3 — FX data lives in instruments; the stand-in serves the
+  // EUR-based demo closes over the internal route.
+  mockInstrumentsFx({ table: { USD: 1.08, PLN: 4.3 }, asOf: "2026-08-21" })
   await h.db.insert(wallets).values([
     { userId: "valuer", name: "US cash", currency: "USD", balance: "100.00000000", availableBalance: "100.00000000" },
     { userId: "valuer", name: "EU savings", currency: "EUR", balance: "200.00000000", availableBalance: "200.00000000" },
@@ -21,16 +21,16 @@ async function seedWorld() {
 }
 
 describe("snapshotRate (D21)", () => {
-  it("same-currency is 1 even without tables; manual wins verbatim", async () => {
-    const { db } = await createTestDb()
-    expect((await snapshotRate(db, "USD", "USD")).rate).toBe(1)
-    const m = await snapshotRate(db, "EUR", "USD", 1.23)
+  it("same-currency is 1 even without instruments; manual wins verbatim", async () => {
+    expect((await snapshotRate("Bearer t", "USD", "USD")).rate).toBe(1)
+    const m = await snapshotRate("Bearer t", "EUR", "USD", 1.23)
     expect(m).toEqual({ rate: 1.23, source: "manual" })
   })
 
-  it("auto resolves via latest table", async () => {
+  it("auto resolves via instruments' fx_rates", async () => {
     const h = await seedWorld()
-    const r = await snapshotRate(h.db, "EUR", "USD")
+    void h
+    const r = await snapshotRate("Bearer t", "EUR", "USD")
     expect(r.source).toBe("automatic")
     expect(r.rate).toBeCloseTo(1.08, 8)
   })
@@ -59,7 +59,7 @@ describe("totalBalance aggregation (§11.9)", () => {
 
   it("isolates users (D24)", async () => {
     const h = await seedWorld()
-    const res = await totalBalance(h.db, "nobody")
+    const res = await totalBalance(h.db, "Bearer t", "nobody")
     expect(res.walletBreakdown.length).toBe(0)
   })
 })

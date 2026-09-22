@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest"
 import { sql } from "drizzle-orm"
 import { createTestDb } from "./test-db.js"
 import {
-  walletsSchema, wallets, walletTransactions, fxRates, fxSyncState, syncRuns,
+  walletsSchema, wallets, walletTransactions, syncRuns,
   portfoliosSchema, portfolios, positions, portfolioTransactions, shares, valueSnapshots,
 } from "./schema.js"
 
@@ -105,17 +105,6 @@ describe("wallets schema (D17/D24)", () => {
     }
     await db.insert(walletTransactions).values(base)
     await expect(db.insert(walletTransactions).values(base)).rejects.toThrow(/duplicate key|Failed query/u)
-  })
-
-  it("fx tables hold global EUR-based rates and sync bookkeeping", async () => {
-    const { db } = await createTestDb()
-    await db.insert(fxRates).values({ rateDate: "2026-08-21", currency: "USD", rate: "1.0812", source: "ecb" })
-    await expect(
-      db.insert(fxRates).values({ rateDate: "2026-08-21", currency: "USD", rate: "9" }),
-    ).rejects.toThrow() // pk(rate_date, currency)
-
-    const [state] = await db.insert(fxSyncState).values({ lastStatus: "ok" }).returning()
-    expect(state.id).toBe(1)
   })
 })
 

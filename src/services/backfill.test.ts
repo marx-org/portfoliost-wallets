@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
+import { crossRate } from "@marx2/contracts/fx"
 import { makeHarness } from "../routes/test-utils.js"
 import { portfolios, portfolioTransactions, positions, valueSnapshots } from "../db/schema.js"
 import { eq } from "drizzle-orm"
@@ -341,5 +342,108 @@ describe("recalcPortfolioHistory (background recalc on transaction changes)", ()
 
     const snaps = await db.select().from(valueSnapshots).where(eq(valueSnapshots.portfolioId, pf.id))
     expect(snaps.length).toBe(0) // nothing written
+  })
+})
+
+describe("golden value — mixed-currency portfolio (plan §48.3)", () => {
+  // EUR-quoted table (D27): PLN→USD = 1.08/4.3 ≈ 0.2511627907, EUR→USD = 1.08.
+  // Dev-mode correctness proof: hand-computed expected values over a seeded
+  // USD portfolio holding USD/PLN/EUR instruments — no prod diff needed.
+  const TABLE = { USD: 1.08, PLN: 4.3 }
+  const asOf = "2026-07-02"
+
+  beforeEach(() => {
+    process.env.INSTRUMENTS_URL = "http://instruments.test"
+  })
+  afterEach(() => {
+    vi.unstubAllGlobals()
+    delete process.env.INSTRUMENTS_URL
+    __resetBackfillRunnerForTests()
+  })
+
+  it("converts server-side (?currency=<base>) and multiplies qty × converted close only", async () => {
+    const { db, user } = await makeHarness("golden-483")
+    const pf = await seedPortfolio(db, user.id, "USD")
+
+    // Day 1 buys: 10 AAA @ 100 USD, 5 BBB @ 200 PLN, 2 CCC @ 500 EUR.
+    await seedBuy(db, user.id, pf.id, "AAA", 10, 100, "2026-07-01", "USD")
+    await seedBuy(db, user.id, pf.id, "BBB", 5, 200, "2026-07-01", "PLN")
+    await seedBuy(db, user.id, pf.id, "CCC", 2, 500, "2026-07-01", "EUR")
+    await seedPosition(db, user.id, pf.id, "AAA", 10, 100)
+    await seedPosition(db, user.id, pf.id, "BBB", 5, 200, "PLN")
+    await seedPosition(db, user.id, pf.id, "CCC", 2, 500, "EUR")
+
+    // One stub stands in for the whole instruments service: price-bars honors
+    // ?currency= by converting closes server-side (as the real join does), and
+    // the internal fx-rates route serves the pair rate for cost-basis conversion.
+    const requestedCurrency = new Map<string, string | null>()
+    const series: Record<string, { dates: string[]; closes: number[]; ccy: string }> = {
+      AAA: { dates: ["2026-07-01", "2026-07-02"], closes: [100, 110], ccy: "USD" },
+      BBB: { dates: ["2026-07-01", "2026-07-02"], closes: [200, 205], ccy: "PLN" },
+      CCC: { dates: ["2026-07-01", "2026-07-02"], closes: [500, 510], ccy: "EUR" },
+    }
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = String(input)
+        if (url.includes("/api/internal/fx-rates")) {
+          const q = new URL(url).searchParams
+          const from = (q.get("from") ?? "").toUpperCase()
+          const to = (q.get("to") ?? "EUR").toUpperCase()
+          if (from === to) return new Response(JSON.stringify({ rate: 1, asOf }), { status: 200 })
+          const rate = crossRate(from, to, { EUR: 1, ...TABLE })
+          return rate === undefined
+            ? new Response(JSON.stringify({ error: "NotFound" }), { status: 404 })
+            : new Response(JSON.stringify({ rate, asOf }), { status: 200 })
+        }
+        const sym = decodeURIComponent(url.match(/\/instruments\/([^/]+)\/price-bars/)?.[1] ?? "")
+        const data = series[sym]
+        if (!data) return new Response("nope", { status: 404 })
+        const target = new URL(url).searchParams.get("currency")?.toUpperCase() ?? null
+        requestedCurrency.set(sym, target)
+        const factor =
+          target && target !== data.ccy ? crossRate(data.ccy, target, { EUR: 1, ...TABLE }) ?? 1 : 1
+        return new Response(
+          JSON.stringify({
+            symbol: sym,
+            dates: data.dates,
+            closes: data.closes.map((c) => c * factor),
+            currency: target ?? data.ccy,
+            stale: false,
+          }),
+          { status: 200 },
+        )
+      }),
+    )
+
+    const now = new Date("2026-07-03T00:00:00Z") // yesterday = 2026-07-02
+    await runBackfill(db, pf.id, "Bearer t", now)
+
+    // Non-base symbols requested converted into the base; base symbol as-is.
+    expect(requestedCurrency.get("AAA")).toBeNull()
+    expect(requestedCurrency.get("BBB")).toBe("USD")
+    expect(requestedCurrency.get("CCC")).toBe("USD")
+
+    const snaps = await db
+      .select()
+      .from(valueSnapshots)
+      .where(eq(valueSnapshots.portfolioId, pf.id))
+      .orderBy(valueSnapshots.snapshotDate)
+
+    expect(snaps).toHaveLength(2)
+    const plnToUsd = 1.08 / 4.3 // 0.25116279069767...
+
+    // Day 1 — value = 10×100 + 5×(200×p) + 2×(500×1.08) = 1000 + 251.162791 + 1080
+    expect(Number(snaps[0].value)).toBeCloseTo(1000 + 1000 * plnToUsd + 1080, 6)
+    // Day 1 — invested: cost basis converted at the same rates (1000 + 251.162791 + 1080)
+    expect(Number(snaps[0].invested)).toBeCloseTo(1000 + 1000 * plnToUsd + 1080, 6)
+    // Day 1 — netFlow: all three buys deployed, in base currency
+    expect(Number(snaps[0].netFlow)).toBeCloseTo(1000 + 1000 * plnToUsd + 1080, 6)
+
+    // Day 2 — value at day-2 closes: 10×110 + 5×(205×p) + 2×(510×1.08)
+    expect(Number(snaps[1].value)).toBeCloseTo(1100 + 1025 * plnToUsd + 1101.6, 6)
+    // invested is static (current position cost basis), netFlow zero
+    expect(Number(snaps[1].invested)).toBeCloseTo(1000 + 1000 * plnToUsd + 1080, 6)
+    expect(Number(snaps[1].netFlow)).toBeCloseTo(0, 8)
   })
 })

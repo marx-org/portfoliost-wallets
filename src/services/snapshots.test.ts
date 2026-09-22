@@ -3,7 +3,7 @@
  *
  * Covers:
  *  - today's snapshot with 2 USD positions
- *  - multi-currency positions (PLN, EUR) via fxRates seed
+ *  - multi-currency positions (PLN, EUR) via the instruments fx stand-in
  *  - backfill with 3 positions over 10 days
  *  - timeframe filter (6M / 1Y / ALL)
  *  - empty portfolio → timeSeries: []
@@ -12,7 +12,6 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import { and, eq, gte } from "drizzle-orm"
 import { makeHarness } from "../routes/test-utils.js"
 import {
-  fxRates,
   portfolios,
   portfolioTransactions,
   positions,
@@ -21,18 +20,9 @@ import {
 import { snapshotPortfolioValue } from "./quotes.js"
 import { runBackfill, calendarDays } from "./backfill.js"
 import { __resetBackfillRunnerForTests } from "./backfill-runner.js"
+import { mockInstrumentsFx, unmockInstrumentsFx } from "../test-fx-mock.js"
 
 // ── helpers ────────────────────────────────────────────────────────────────
-
-async function seedFxRates(
-  db: Awaited<ReturnType<typeof makeHarness>>["db"],
-  rateDate: string,
-  rates: Record<string, number>,
-) {
-  for (const [currency, rate] of Object.entries(rates)) {
-    await db.insert(fxRates).values({ rateDate, currency, rate: String(rate) }).onConflictDoNothing()
-  }
-}
 
 async function seedPortfolio(
   db: Awaited<ReturnType<typeof makeHarness>>["db"],
@@ -110,7 +100,7 @@ function mockPriceBars(series: Record<string, { dates: string[]; closes: number[
 // ── tests ──────────────────────────────────────────────────────────────────
 
 describe("snapshotPortfolioValue — today snapshot", () => {
-  afterEach(() => vi.unstubAllGlobals())
+  afterEach(() => { vi.unstubAllGlobals(); unmockInstrumentsFx() })
 
   it("writes a single row with correct value for 2 USD positions", async () => {
     const { db, user } = await makeHarness("snap-2pos")
@@ -121,7 +111,7 @@ describe("snapshotPortfolioValue — today snapshot", () => {
       { marketValue: "750", averageCostBasis: "250", quantity: "3", instrumentCurrency: "USD" },
     ]
     const now = new Date("2026-09-01T10:00:00Z")
-    await snapshotPortfolioValue(db, pf.id, posRows, now)
+    await snapshotPortfolioValue(db, "Bearer t", pf.id, posRows, now)
 
     const snaps = await db.select().from(valueSnapshots).where(eq(valueSnapshots.portfolioId, pf.id))
     expect(snaps).toHaveLength(1)
@@ -134,9 +124,10 @@ describe("snapshotPortfolioValue — today snapshot", () => {
     const { db, user } = await makeHarness("snap-multiccy")
     const pf = await seedPortfolio(db, user.id, "USD")
 
-    // EUR-based rates: 1 EUR = 1.10 USD, 1 EUR = 4.40 PLN
+    // EUR-based rates (plan §48.3 — resolved via the instruments stand-in):
+    // 1 EUR = 1.10 USD, 1 EUR = 4.40 PLN
     // → PLN→USD = 1.10/4.40 = 0.25; EUR→USD = 1.10/1.10 = 1.0
-    await seedFxRates(db, "2026-09-01", { USD: 1.10, PLN: 4.40 })
+    mockInstrumentsFx({ table: { USD: 1.10, PLN: 4.40 }, asOf: "2026-09-01" })
 
     const posRows = [
       { marketValue: "4000", averageCostBasis: "400", quantity: "10", instrumentCurrency: "PLN" },
@@ -145,7 +136,7 @@ describe("snapshotPortfolioValue — today snapshot", () => {
       // 1000 USD → 1000 × (1.10/1.10) = 1000 USD
     ]
     const now = new Date("2026-09-01T10:00:00Z")
-    await snapshotPortfolioValue(db, pf.id, posRows, now)
+    await snapshotPortfolioValue(db, "Bearer t", pf.id, posRows, now)
 
     const snaps = await db.select().from(valueSnapshots).where(eq(valueSnapshots.portfolioId, pf.id))
     expect(Number(snaps[0].value)).toBeCloseTo(1000 + 1000) // 2000 USD
@@ -157,7 +148,7 @@ describe("snapshotPortfolioValue — today snapshot", () => {
     const { db, user } = await makeHarness("snap-empty")
     const pf = await seedPortfolio(db, user.id)
 
-    await snapshotPortfolioValue(db, pf.id, [], new Date("2026-09-01T10:00:00Z"))
+    await snapshotPortfolioValue(db, "Bearer t", pf.id, [], new Date("2026-09-01T10:00:00Z"))
 
     const snaps = await db.select().from(valueSnapshots).where(eq(valueSnapshots.portfolioId, pf.id))
     expect(snaps).toHaveLength(1)

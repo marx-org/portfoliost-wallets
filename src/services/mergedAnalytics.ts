@@ -5,13 +5,12 @@
  * Each portfolio's `value_snapshots` rows are denominated in that portfolio's
  * `base_currency`. The merged series sums every portfolio's value/invested on
  * each snapshot date into a SINGLE target currency (USD, the currency the SPA
- * assumes for the combined chart via `total-metrics.baseCurrency`), converting
- * per portfolio with the shared EUR-based latest-rates table
- * (`@marx2/contracts/fx`). A row whose rate is unavailable is skipped — never
- * fabricate a 1:1 rate for an unknown currency.
+ * assumes for the combined chart via `total-metrics.baseCurrency`).
+ *
+ * Rates are resolved upstream via instruments' fx_rates (plan §48.3) and
+ * handed in as a from→target cross-rate callback. A row whose rate is
+ * unavailable is skipped — never fabricate a 1:1 rate for an unknown currency.
  */
-
-import { convert } from "@marx2/contracts/fx"
 
 export interface SnapshotRow {
   baseCurrency: string | null
@@ -28,22 +27,24 @@ export interface MergedPoint {
 
 /**
  * Group snapshot rows by date, convert each row from its portfolio's base
- * currency into `target`, and sum value/invested. Rows that cannot be
- * converted (no rate for either side) are skipped. Ascending by date.
+ * currency into `target`, and sum value/invested. `rateFor(from)` returns the
+ * from→target cross rate (resolved upstream, D27) or null; the identity
+ * (from === target) needs no rate. Rows that cannot be converted are skipped.
+ * Ascending by date.
  */
 export function sumSnapshotsByDate(
   rows: SnapshotRow[],
-  rates: Record<string, number> | null,
+  rateFor: (from: string) => number | null,
   target: string,
 ): MergedPoint[] {
   const to = target.toUpperCase()
   const byDate = new Map<string, MergedPoint>()
   for (const row of rows) {
     const from = (row.baseCurrency ?? to).toUpperCase()
-    const value = convert(Number(row.value), from, to, rates ?? {})
-    if (value === undefined) continue
-    const invested = convert(Number(row.invested), from, to, rates ?? {})
-    if (invested === undefined) continue
+    const rate = from === to ? 1 : rateFor(from)
+    if (rate == null) continue
+    const value = Number(row.value) * rate
+    const invested = Number(row.invested) * rate
     const acc = byDate.get(row.snapshotDate) ?? { date: row.snapshotDate, value: 0, invested: 0 }
     acc.value += value
     acc.invested += invested

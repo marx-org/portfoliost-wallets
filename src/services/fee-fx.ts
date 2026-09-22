@@ -1,7 +1,5 @@
-import { desc, eq, inArray } from "drizzle-orm"
-import { convert, crossRate, isValidRate, settleFee } from "@marx2/contracts/fx"
-import type { DB } from "../db/index.js"
-import { fxRates } from "../db/schema.js"
+import { isValidRate, settleFee } from "@marx2/contracts/fx"
+import { resolvedFxRate } from "./instruments-fx.js"
 
 export interface FeeFxFields {
   feeCurrency: string
@@ -19,33 +17,17 @@ export type FeeFxResult =
   | { ok: false; message: string }
 
 /**
- * Latest available EUR-based table (D20): carry-forward across non-business
- * days is implicit — we simply take the most recent date that has rows.
- */
-export async function latestRates(db: DB): Promise<Record<string, number> | null> {
-  const [latest] = await db
-    .select({ rateDate: fxRates.rateDate })
-    .from(fxRates)
-    .orderBy(desc(fxRates.rateDate))
-    .limit(1)
-  if (!latest) return null
-  const rows = await db.select().from(fxRates).where(eq(fxRates.rateDate, latest.rateDate))
-  const table: Record<string, number> = {}
-  for (const r of rows) table[r.currency] = Number(r.rate)
-  return table
-}
-
-/**
  * Resolve + validate fee/FX fields of a movement request (fees-and-custom-fx
  * D28/D29/D32), computing the settled fee in the WALLET currency.
  *
  * - `rateSource=manual` requires a positive finite `exchangeRate` (tx ccy ->
- *   wallet base ccy); `automatic` resolves from fx_rates.
+ *   wallet base ccy); `automatic` resolves from instruments' fx_rates (plan
+ *   §48.3 — the FX data moved to the instruments module).
  * - `pct` fees are materialized against `notional` on the fly.
  * - foreign `feeCurrency` settles via `settleFee` (manual fee rate wins).
  */
 export async function resolveFeeFx(
-  db: DB,
+  authToken: string | null,
   body: Record<string, unknown>,
   walletCcy: string,
   opts: { notional: number; toWalletCcy?: string | null } = { notional: 0 },
@@ -58,7 +40,7 @@ export async function resolveFeeFx(
   const feeCurrency = String(body.fee_currency ?? body.feeCurrency ?? walletCcy).toUpperCase()
   const upperWallet = walletCcy.toUpperCase()
 
-  // main rate snapshot (tx ccy -> wallet base currency)
+  // main rate (tx ccy -> wallet base currency)
   let exchangeRate: number
   if (rateSource === "manual") {
     const r = num(body.exchangeRate)
@@ -66,13 +48,11 @@ export async function resolveFeeFx(
     exchangeRate = r
   } else if (upperWallet === "USD") {
     exchangeRate = 1
-  } else if (upperWallet === "USD") {
-    exchangeRate = 1
   } else {
-    // D20/D25 degrade path: without imported rates we value 1:1 rather than
-    // block cash movements; the next daily import fixes snapshots going forward
-    const table = await latestRates(db)
-    exchangeRate = table ? convert(1, upperWallet, "USD", table) ?? 1 : 1
+    // plan §48.3 / D20-D25 degrade path: when the pair cannot be resolved
+    // (instruments down, no imported rate) we value 1:1 rather than block
+    // cash movements; the next daily import fixes snapshots going forward.
+    exchangeRate = (await resolvedFxRate(authToken, upperWallet, "USD"))?.rate ?? 1
   }
 
   // fee materialization + settlement
@@ -87,8 +67,7 @@ export async function resolveFeeFx(
       if (!isValidRate(fr)) return { ok: false, message: "feeExchangeRate must be a positive number when feeRateSource is 'manual'" }
       feeExchangeRate = fr
     } else {
-      const table = await latestRates(db)
-      feeExchangeRate = table ? crossRate(feeCurrency, upperWallet, table) ?? 1 : 1
+      feeExchangeRate = (await resolvedFxRate(authToken, feeCurrency, upperWallet))?.rate ?? 1
     }
   }
 
@@ -116,8 +95,7 @@ export async function resolveFeeFx(
       if (!isValidRate(r)) return { ok: false, message: "targetFxRate must be a positive number" }
       transferFxRate = r
     } else if (toUpper !== upperWallet) {
-      const table = await latestRates(db)
-      transferFxRate = table ? crossRate(upperWallet, toUpper, table) ?? 1 : 1
+      transferFxRate = (await resolvedFxRate(authToken, upperWallet, toUpper))?.rate ?? 1
     } else {
       transferFxRate = 1
     }
@@ -140,17 +118,4 @@ export async function resolveFeeFx(
     },
     feesSettled,
   }
-}
-
-/** Batch variant used by recent-transactions joins (kept for §11.6). */
-export async function ratesForDates(db: DB, dates: string[]): Promise<Map<string, Record<string, number>>> {
-  const map = new Map<string, Record<string, number>>()
-  if (!dates.length) return map
-  const rows = await db.select().from(fxRates).where(inArray(fxRates.rateDate, dates))
-  for (const r of rows) {
-    const t = map.get(r.rateDate) ?? {}
-    t[r.currency] = Number(r.rate)
-    map.set(r.rateDate, t)
-  }
-  return map
 }

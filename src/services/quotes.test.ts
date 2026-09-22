@@ -377,7 +377,7 @@ describe("snapshotPortfolioValue (H5)", () => {
       { marketValue: "500", averageCostBasis: "200", quantity: "3", instrumentCurrency: "USD" },
     ]
     const now = new Date("2026-09-03T10:00:00Z")
-    await snapshotPortfolioValue(db, pf.id, posRows, now)
+    await snapshotPortfolioValue(db, "Bearer t", pf.id, posRows, now)
 
     const snaps = await db.select().from(valueSnapshots).where(eq(valueSnapshots.portfolioId, pf.id))
     expect(snaps).toHaveLength(1)
@@ -397,12 +397,12 @@ describe("snapshotPortfolioValue (H5)", () => {
       { marketValue: "1000", averageCostBasis: "100", quantity: "10", instrumentCurrency: "USD" },
     ]
     const now = new Date("2026-09-03T10:00:00Z")
-    await snapshotPortfolioValue(db, pf.id, posRows, now)
+    await snapshotPortfolioValue(db, "Bearer t", pf.id, posRows, now)
     // second call with updated value
     const posRows2 = [
       { marketValue: "1100", averageCostBasis: "100", quantity: "10", instrumentCurrency: "USD" },
     ]
-    await snapshotPortfolioValue(db, pf.id, posRows2, now)
+    await snapshotPortfolioValue(db, "Bearer t", pf.id, posRows2, now)
 
     const snaps = await db.select().from(valueSnapshots).where(eq(valueSnapshots.portfolioId, pf.id))
     expect(snaps).toHaveLength(1)

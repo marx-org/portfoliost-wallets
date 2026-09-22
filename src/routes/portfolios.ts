@@ -17,7 +17,7 @@ import { getPortfolioNews } from "../services/portfolioNews.js"
 import { runBackfill, getBackfillStatus, buildBenchmarkSeries, forcePortfolioRecalc } from "../services/backfill.js"
 import { dailyNetCashFlows } from "../services/cashFlows.js"
 import { computeRiskMetrics } from "../services/riskMetrics.js"
-import { latestRates } from "../services/fee-fx.js"
+import { resolveRates } from "../services/instruments-fx.js"
 import { sumSnapshotsByDate, buildMergedPerformance } from "../services/mergedAnalytics.js"
 import { createTransactionRoutes } from "./portfolio-transactions.js"
 import type { components } from "../generated/api-types.js"
@@ -619,7 +619,11 @@ export function createPortfolioRoutes(db?: DB) {
       )
       .orderBy(asc(valueSnapshots.snapshotDate))
 
-    const rates = await latestRates(database)
+    const rateMap = await resolveRates(
+      c.req.header("Authorization") ?? "",
+      "USD",
+      rows.map((r) => r.baseCurrency),
+    )
     const series = sumSnapshotsByDate(
       rows.map((r) => ({
         baseCurrency: r.baseCurrency,
@@ -627,7 +631,7 @@ export function createPortfolioRoutes(db?: DB) {
         value: Number(r.value),
         invested: Number(r.invested),
       })),
-      rates,
+      (from) => rateMap.get(from.toUpperCase()) ?? null,
       "USD",
     )
 
@@ -995,7 +999,7 @@ export function createPortfolioRoutes(db?: DB) {
       const from = firstRow.snapshotDate
       const to = lastRow.snapshotDate
       const baseCurrency = pf.baseCurrency ?? "USD"
-      const flows = await dailyNetCashFlows(database, id, from, to, baseCurrency)
+      const flows = await dailyNetCashFlows(database, c.req.header("Authorization") ?? "", id, from, to, baseCurrency)
       const seedInvested = Number(firstRow.invested ?? 0)
       const calcType = (["moneyWeighted", "timeWeighted", "simple"] as const).includes(
         benchmarkCalcType as "moneyWeighted" | "timeWeighted" | "simple",

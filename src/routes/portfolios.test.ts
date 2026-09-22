@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest"
+import { afterEach, describe, expect, it } from "vitest"
 import { Hono } from "hono"
 import { createPortfolioRoutes } from "./portfolios.js"
 import { makeHarness } from "./test-utils.js"
@@ -7,10 +7,10 @@ import {
   positions,
   portfolioTransactions,
   valueSnapshots,
-  fxRates,
 } from "../db/schema.js"
 import { sql } from "drizzle-orm"
 import { __resetBackfillRunnerForTests } from "../services/backfill-runner.js"
+import { mockInstrumentsFx, unmockInstrumentsFx } from "../test-fx-mock.js"
 
 function app(db: Parameters<typeof makeHarness>[0] extends string ? never : Parameters<typeof createPortfolioRoutes>[0]) {
   const a = new Hono()
@@ -323,6 +323,8 @@ describe("GET /api/portfolios/:id/news (N6)", () => {
 })
 
 describe("GET /api/portfolios/merged (§46, §41 follow-up 1)", () => {
+  afterEach(() => unmockInstrumentsFx())
+
   async function seedPfWithSnapshots(
     h: Awaited<ReturnType<typeof makeHarness>>,
     name: string,
@@ -348,10 +350,9 @@ describe("GET /api/portfolios/merged (§46, §41 follow-up 1)", () => {
   it("sums USD + PLN portfolios into USD at latest rates (FX-converted last point)", async () => {
     const h = await makeHarness("merged-usd-pln")
     const a = app(h.db)
-    await h.db.insert(fxRates).values([
-      { rateDate: "2026-09-18", currency: "USD", rate: "1.08" },
-      { rateDate: "2026-09-18", currency: "PLN", rate: "4.3" },
-    ])
+    // plan §48.3 — the FX data moved to instruments; the stand-in serves the
+    // same EUR-based closes over the internal route.
+    mockInstrumentsFx({ table: { USD: 1.08, PLN: 4.3 }, asOf: "2026-09-18" })
     await seedPfWithSnapshots(h, "USD pf", "USD", [
       { snapshotDate: "2026-09-01", value: "1000", invested: "800" },
       { snapshotDate: "2026-09-02", value: "1100", invested: "800" },

@@ -128,31 +128,6 @@ export const walletTransactions = walletsSchema.table(
 )
 
 /**
- * Global EUR-based daily closes (D20/D25). NOT user-scoped — shared reference
- * data. Availability of distinct currencies here IS the supported-currency
- * registry served publicly as GET /api/currencies (D26).
- */
-export const fxRates = walletsSchema.table(
-  "fx_rates",
-  {
-    rateDate: date("rate_date").notNull(),
-    currency: char("currency", { length: 3 }).notNull(),
-    rate: numeric("rate", { precision: 20, scale: 10 }).notNull(),
-    source: text("source").notNull().default("ecb"),
-    fetchedAt: timestamp("fetched_at", { withTimezone: true }).notNull().defaultNow(),
-  },
-  (t) => [primaryKey({ columns: [t.rateDate, t.currency] })],
-)
-
-/** Singleton bookkeeping row for the daily import job (D20). */
-export const fxSyncState = walletsSchema.table("fx_sync_state", {
-  id: integer("id").primaryKey().default(1),
-  lastRateDate: date("last_rate_date"),
-  lastRunAt: timestamp("last_run_at", { withTimezone: true }),
-  lastStatus: text("last_status"),
-})
-
-/**
  * Import sync-run tracking (import API). One row per (user, externalSource,
  * spreadsheetId, sheet) — the importer cursor + batch counters over the
  * /api/import surface.

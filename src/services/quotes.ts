@@ -13,10 +13,9 @@
  */
 
 import { and, eq, sql } from "drizzle-orm"
-import { convert } from "@marx2/contracts/fx"
 import type { DB } from "../db/index.js"
 import { positions, portfolios, valueSnapshots } from "../db/schema.js"
-import { latestRates } from "./fee-fx.js"
+import { fxTo } from "./instruments-fx.js"
 import { dailyNetCashFlows } from "./cashFlows.js"
 import { recomputeReturnColumns } from "./returnColumns.js"
 
@@ -289,20 +288,21 @@ export async function refreshQuotes(
 
   // H5 — snapshot-on-read: upsert today's portfolio value into value_snapshots.
   // Best-effort: errors are swallowed so they never affect the positions response.
-  void snapshotPortfolioValue(db, portfolioId, liveValues, now).catch(() => undefined)
+  void snapshotPortfolioValue(db, authToken, portfolioId, liveValues, now).catch(() => undefined)
 }
 
 /**
  * Compute and upsert a single-day value snapshot for a portfolio.
  *
- * portfolioValue = Σ pos.marketValue × fx(instrumentCurrency → baseCurrency)
- * invested       = Σ (pos.averageCostBasis × pos.quantity) × fx(instrumentCurrency → baseCurrency)
- *
- * Falls back to rate=1 when FX table is unavailable or a pair is missing.
- * Exported for unit testing.
- */
+  * portfolioValue = Σ pos.marketValue × fx(instrumentCurrency → baseCurrency)
+  * invested       = Σ (pos.averageCostBasis × pos.quantity) × fx(instrumentCurrency → baseCurrency)
+  *
+  * Falls back to rate=1 when instruments FX is unavailable or a pair is missing (plan §48.3).
+  * Exported for unit testing.
+  */
 export async function snapshotPortfolioValue(
   db: DB,
+  authToken: string | null,
   portfolioId: string,
   positionRows: Array<{
     marketValue: string | null
@@ -320,19 +320,14 @@ export async function snapshotPortfolioValue(
   if (!portfolio) return
 
   const base = portfolio.baseCurrency
-  const fxTable = await latestRates(db)
-
-  const fxRate = (ccy: string | null): number => {
-    const from = (ccy ?? "USD").toUpperCase()
-    if (from === base) return 1
-    if (!fxTable) return 1
-    return convert(1, from, base, fxTable) ?? 1
-  }
+  // plan §48.3 — pair rates resolved via instruments, memoized per currency.
+  const toBase = await fxTo(authToken, base)
 
   let totalValue = 0
   let totalInvested = 0
   for (const p of positionRows) {
-    const rate = fxRate(p.instrumentCurrency)
+    const from = (p.instrumentCurrency ?? "USD").toUpperCase()
+    const rate = await toBase(from, 1)
     const mv = Number(p.marketValue ?? 0)
     const cost = Number(p.averageCostBasis) * Number(p.quantity)
     totalValue += mv * rate
@@ -340,7 +335,7 @@ export async function snapshotPortfolioValue(
   }
 
   const snapshotDate = now.toISOString().slice(0, 10)
-  const todayFlows = await dailyNetCashFlows(db, portfolioId, snapshotDate, snapshotDate, base)
+  const todayFlows = await dailyNetCashFlows(db, authToken, portfolioId, snapshotDate, snapshotDate, base)
   await db
     .insert(valueSnapshots)
     .values({
