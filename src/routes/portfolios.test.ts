@@ -394,7 +394,7 @@ describe("GET /api/portfolios/merged (§46, §41 follow-up 1)", () => {
     expect(body.benchmarks).toEqual([])
   })
 
-  it("returns pending + fires backfill when any portfolio has < 2 snapshots", async () => {
+  it("returns pending + fires backfill when any portfolio has < 2 snapshots and backfillable history", async () => {
     const h = await makeHarness("merged-pending")
     const a = app(h.db)
     // Two snapshots — has series.
@@ -402,8 +402,20 @@ describe("GET /api/portfolios/merged (§46, §41 follow-up 1)", () => {
       { snapshotDate: "2026-09-01", value: "500", invested: "400" },
       { snapshotDate: "2026-09-02", value: "600", invested: "400" },
     ])
-    // No snapshots at all — must keep the merged series pending.
-    await seedPfWithSnapshots(h, "Empty pf", "USD", [])
+    // No snapshots + a BUY from before yesterday — backfillable, must keep
+    // the merged series pending.
+    const empty = await seedPfWithSnapshots(h, "Empty pf", "USD", [])
+    await h.db.insert(portfolioTransactions).values({
+      userId: h.user.id,
+      portfolioId: empty.id,
+      type: "BUY",
+      instrumentSymbol: "AAPL",
+      quantity: "1",
+      price: "150",
+      currency: "USD",
+      totalAmount: "150",
+      executedAt: new Date("2026-09-01T12:00:00Z"),
+    })
 
     const res = await a.request("/api/portfolios/merged", { headers: h.headers })
     expect(res.status).toBe(200)
@@ -413,6 +425,45 @@ describe("GET /api/portfolios/merged (§46, §41 follow-up 1)", () => {
     expect(body.benchmarks).toEqual([])
 
     // Clean up: the fire-and-forget enqueue must not leak into other tests.
+    __resetBackfillRunnerForTests()
+  })
+
+  it("does not go pending for a portfolio whose only trades are from today (§48.4)", async () => {
+    const h = await makeHarness("merged-sameday")
+    const a = app(h.db)
+    await seedPfWithSnapshots(h, "Ready pf", "USD", [
+      { snapshotDate: "2026-09-01", value: "500", invested: "400" },
+      { snapshotDate: "2026-09-02", value: "600", invested: "400" },
+    ])
+    // No snapshots, but the only trade executed today — the backfill window
+    // [firstTxDate, yesterday] is empty, so this portfolio is complete (empty
+    // history), not pending: it must not poison the merged series.
+    const sameDay = await seedPfWithSnapshots(h, "Same-day pf", "USD", [])
+    await h.db.insert(portfolioTransactions).values({
+      userId: h.user.id,
+      portfolioId: sameDay.id,
+      type: "BUY",
+      instrumentSymbol: "AAPL",
+      quantity: "1",
+      price: "150",
+      currency: "USD",
+      totalAmount: "150",
+      executedAt: new Date(),
+    })
+
+    const res = await a.request("/api/portfolios/merged", { headers: h.headers })
+    expect(res.status).toBe(200)
+    const body = await res.json()
+    expect(body.backfillStatus).toBe("complete")
+    expect(body.performance.timeSeries).toHaveLength(2)
+
+    // The same-day portfolio's own analytics is complete-with-empty, not pending.
+    const own = await a.request(`/api/portfolios/${sameDay.id}/analytics?timeframe=1Y`, { headers: h.headers })
+    expect(own.status).toBe(200)
+    const ownBody = await own.json()
+    expect(ownBody.backfillStatus).toBe("complete")
+    expect(ownBody.performance.timeSeries).toEqual([])
+
     __resetBackfillRunnerForTests()
   })
 })

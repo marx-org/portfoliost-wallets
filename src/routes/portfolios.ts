@@ -14,7 +14,7 @@ import {
 import { preferredBaseCurrency } from "../services/preferences.js"
 import { refreshQuotes } from "../services/quotes.js"
 import { getPortfolioNews } from "../services/portfolioNews.js"
-import { runBackfill, getBackfillStatus, buildBenchmarkSeries, forcePortfolioRecalc } from "../services/backfill.js"
+import { runBackfill, getBackfillStatus, buildBenchmarkSeries, forcePortfolioRecalc, hasBackfillableHistory } from "../services/backfill.js"
 import { dailyNetCashFlows } from "../services/cashFlows.js"
 import { computeRiskMetrics } from "../services/riskMetrics.js"
 import { resolveRates } from "../services/instruments-fx.js"
@@ -565,15 +565,18 @@ export function createPortfolioRoutes(db?: DB) {
       .from(portfolios)
       .where(sql`${portfolios.userId} = ${identity.id}`)
 
-    // Backfill gate: any portfolio with < 2 snapshots keeps the merged series
-    // pending (mirror /:id/analytics fire-and-forget path).
+    // Backfill gate: any portfolio with < 2 snapshots AND a backfillable
+    // history (a BUY/SELL on or before yesterday) keeps the merged series
+    // pending (mirror /:id/analytics fire-and-forget path). Portfolios whose
+    // trades all start today can never produce snapshots — they are complete,
+    // not pending (§48.4).
     const pendingIds: string[] = []
     for (const p of portfolioRows) {
       const [{ n }] = await database
         .select({ n: drizzleCount() })
         .from(valueSnapshots)
         .where(eq(valueSnapshots.portfolioId, p.id))
-      if (n < 2) pendingIds.push(p.id)
+      if (n < 2 && (await hasBackfillableHistory(database, p.id))) pendingIds.push(p.id)
     }
     if (pendingIds.length > 0) {
       const authToken = c.req.header("Authorization") ?? ""
@@ -943,7 +946,7 @@ export function createPortfolioRoutes(db?: DB) {
       .from(valueSnapshots)
       .where(eq(valueSnapshots.portfolioId, id))
 
-    if (n < 2) {
+    if (n < 2 && (await hasBackfillableHistory(database, id))) {
       const status = await getBackfillStatus(database, id)
       if (status !== "pending") {
         // Trigger backfill fire-and-forget

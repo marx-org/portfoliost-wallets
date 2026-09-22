@@ -355,6 +355,32 @@ export function forcePortfolioRecalc(
   )
 }
 
+/**
+ * True when a backfill could actually produce snapshots for this portfolio:
+ * the window is [first BUY/SELL date, yesterday], so a portfolio whose only
+ * trades are from today (or that has no trades) is NOT backfillable — it has
+ * an empty (complete) history, not a pending one. Mirrors computeSnapshotBatch's
+ * guards exactly (plan §48.4 — merged/analytics must not stay "pending" for
+ * same-day-only portfolios).
+ */
+export async function hasBackfillableHistory(
+  db: DB,
+  portfolioId: string,
+  now = new Date(),
+): Promise<boolean> {
+  const [row] = await db
+    .select({ minDate: sql<string>`min(${portfolioTransactions.executedAt})` })
+    .from(portfolioTransactions)
+    .where(
+      and(
+        eq(portfolioTransactions.portfolioId, portfolioId),
+        sql`${portfolioTransactions.type} in ('BUY','SELL')`,
+      ),
+    )
+  const from = row?.minDate ? toDateStr(row.minDate) : null
+  return from !== null && from <= daysAgo(1, now)
+}
+
 async function runBackfillCore(
   db: DB,
   portfolioId: string,
