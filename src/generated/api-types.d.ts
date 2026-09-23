@@ -2622,6 +2622,7 @@ export interface components {
             sumOfCurrentPositions: number;
             sumOfCurrentPositionsValue: number;
         };
+        /** @description Instrument research dividend history (`history`) OR the portfolio's own dividend rows (`totalDividends`/`count`/`items`) — see the exposing endpoint. For portfolio items, gross = quantity × price, taxes is the withholding tax, amount is the NET (gross − taxes) per the example-service convention, and convertedAmount is amount in the display currency. */
         DividendsData: {
             history?: {
                 date: string;
@@ -2629,6 +2630,22 @@ export interface components {
                 amount: number;
                 currency: string;
                 type: string;
+            }[];
+            /** @description Sum of net dividend amounts in the display currency */
+            totalDividends?: number;
+            count?: number;
+            items?: {
+                symbol: string;
+                instrumentName?: string | null;
+                date: string;
+                quantity: number;
+                gross: number;
+                taxes?: number | null;
+                amount: number;
+                currency: string;
+                exchangeRate?: number | null;
+                convertedAmount?: number | null;
+                notes?: string | null;
             }[];
         };
         CalendarData: {
