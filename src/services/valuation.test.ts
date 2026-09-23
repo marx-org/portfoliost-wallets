@@ -62,4 +62,21 @@ describe("totalBalance aggregation (§11.9)", () => {
     const res = await totalBalance(h.db, "Bearer t", "nobody")
     expect(res.walletBreakdown.length).toBe(0)
   })
+
+  it("all-drawn wallets (negative total) still carry signed weights (§48.6e B4)", async () => {
+    const h = await makeHarness("drawn")
+    mockInstrumentsFx({ table: { USD: 1.08, PLN: 4.3 }, asOf: "2026-08-21" })
+    await h.db.insert(wallets).values([
+      { userId: "drawn", name: "PLN drawn", currency: "PLN", balance: "-100.00000000", availableBalance: "-100.00000000" },
+      { userId: "drawn", name: "USD drawn", currency: "USD", balance: "-216.00000000", availableBalance: "-216.00000000" },
+    ])
+    const body = await totalBalance(h.db, "Bearer t", "drawn", "USD")
+    // -100 PLN × (1.08/4.3) + -216 USD = -241.12 (2dp) — the `> 0` guard used to
+    // zero every weight on a negative total (prod: all wallets drawn).
+    expect(body.totalBalance).toBeCloseTo(-241.12, 1)
+    const weightSum = body.walletBreakdown.reduce((s: number, w: any) => s + w.weight, 0)
+    expect(weightSum).toBeCloseTo(100, 0)
+    const plnRow = body.walletBreakdown.find((w: any) => w.currency === "PLN")
+    expect(plnRow?.weight).toBeCloseTo(10.42, 1)
+  })
 })

@@ -68,10 +68,12 @@ export async function totalBalance(db: DB, authToken: string | null, userId: str
     baseCurrency: base,
     walletBreakdown: breakdown.map((r) => {
       const totalRounded = Math.round(total * 100) / 100
+      // Signed ratio: all-drawn wallets (negative total) still carry
+      // meaningful shares — only a zero total has none.
       return {
         ...r,
         weight:
-          totalRounded > 0 ? Math.round((r.convertedBalance / totalRounded) * 1e4) / 100 : 0,
+          totalRounded !== 0 ? Math.round((r.convertedBalance / totalRounded) * 1e4) / 100 : 0,
       }
     }),
   }
