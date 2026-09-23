@@ -2363,6 +2363,17 @@ export interface components {
                 [key: string]: unknown;
             }[];
         };
+        /**
+         * @description How the instrument `currency` was determined (plan §47):
+         *     - `provider` — the upstream provider declared the currency (e.g. the
+         *       biznesradar `priceCurrency` meta tag);
+         *     - `estimated` — no provider declaration; resolved locally from the
+         *       symbol (e.g. `.TFI`/`.FIZ` → PLN) or the exchange;
+         *     - `unknown` — nothing is known; `currency` is null and must never be
+         *       silently defaulted to a code.
+         * @enum {string}
+         */
+        CurrencySource: "provider" | "estimated" | "unknown";
         /** @enum {string} */
         InstrumentType: "STOCK" | "ETF" | "BOND" | "CRYPTO" | "FUND" | "CORP_BOND";
         InstrumentDetail: {
@@ -2373,6 +2384,8 @@ export interface components {
             type?: components["schemas"]["InstrumentType"];
             /** @description ISO-4217; null when the provider does not declare one (45.2 — never guessed) */
             currency?: string | null;
+            /** @description How currency was determined (provider/estimated/unknown, plan §47.3) */
+            currencySource?: components["schemas"]["CurrencySource"];
         };
         InstrumentProfile: {
             ticker?: string;
@@ -2385,6 +2398,8 @@ export interface components {
             exchange?: string;
             finnhubIndustry?: string | null;
             ipo?: string | null;
+            /** @description How currency was determined (provider/estimated/unknown, plan §47.3) */
+            currencySource?: components["schemas"]["CurrencySource"];
             logo?: string | null;
             marketCapitalization?: number | null;
             marketCapCurrency?: string | null;
@@ -2499,6 +2514,8 @@ export interface components {
             askSize: number;
             /** @description ISO-4217; null when the provider does not declare one (45.2 — never guessed) */
             currency: string | null;
+            /** @description How currency was determined (provider/estimated/unknown, plan §47.3) */
+            currencySource?: components["schemas"]["CurrencySource"];
             regularMarketPrice: number;
             extendedHoursChange: number;
             extendedHoursChangePercent: number;
@@ -2515,7 +2532,17 @@ export interface components {
             volumes: number[];
             timestamps: number[];
             status: string;
-            currency: string;
+            /** @description ISO-4217; null when the provider does not declare one (45.2 — never guessed). PriceHistory.currency was previously non-null; plan §47 makes it nullable to match Quote/Profile. With ?currency= (plan §48.2) this is the converted output currency */
+            currency: string | null;
+            /** @description How currency was determined (provider/estimated/unknown, plan §47.3) */
+            currencySource?: components["schemas"]["CurrencySource"];
+            /** @description ISO-4217 the series is natively denominated in (resolved; null when unknown). Equals currency when no conversion was applied (plan §48.2) */
+            baseCurrency?: string | null;
+            /**
+             * Format: date
+             * @description Earliest FX rate date covering the window; bars before it are unconverted (native baseCurrency). Null when no conversion was applied (plan §48.2)
+             */
+            fxFrom?: string | null;
         };
         SearchResult: {
             symbol?: string;
@@ -2700,13 +2727,27 @@ export interface components {
             date?: string;
             price?: number;
             currency?: string;
+            /** @description ISO-4217 the price is natively denominated in (resolved; null when unknown). Equals currency when no conversion was applied (plan §48.2) */
+            baseCurrency?: string | null;
+            /**
+             * Format: date
+             * @description Date of the FX rate table used for the conversion; null when no conversion was applied (plan §48.2)
+             */
+            fxFrom?: string | null;
         };
         PriceBarSeries: {
             symbol: string;
             timeframe: string;
             stale: boolean;
-            /** @description ISO-4217 currency of the closes (resolved from the profile/ticker reference; USD when unknown - 45.2: this resolver always returns a code, so the field stays non-null) */
+            /** @description ISO-4217 currency of the closes — the native trading currency, or the ?currency= target when converted (plan §48.2) */
             currency: string;
+            /** @description ISO-4217 the closes are natively denominated in (resolved; null when unknown). Equals currency when no conversion was applied (plan §48.2) */
+            baseCurrency?: string | null;
+            /**
+             * Format: date
+             * @description Earliest FX rate date covering the window; bars before it are unconverted (native baseCurrency). Null when no conversion was applied (plan §48.2)
+             */
+            fxFrom?: string | null;
             dates: string[];
             closes: number[];
         };
@@ -2807,6 +2848,7 @@ export interface components {
             strategy: string;
             type: string;
             currency: string;
+            baseCurrency?: string;
             /** Format: uuid */
             walletId: string;
             totalInvested: number;
@@ -3149,6 +3191,7 @@ export interface components {
                 issues?: Record<string, never>[];
             };
         };
+        /** @description A portfolio transaction row. For `type: DIVIDEND` the example-service convention applies (verified against the live API 2026-09-26): `price` is the per-share gross dividend, `quantity × price` is the gross total, `taxes` is the withholding tax, and `totalAmount` is the **net** (gross − taxes). BUY/SELL rows keep `totalAmount = quantity × price + fees`. */
         Transaction: components["schemas"]["FeeFxFields"] & {
             /** Format: uuid */
             id: string;
@@ -3165,6 +3208,8 @@ export interface components {
             quantity: number;
             price: number;
             fees: number;
+            /** @description Withholding tax on a DIVIDEND (gross − taxes = net totalAmount); null otherwise */
+            taxes?: number | null;
             totalAmount: number;
             currency: string;
             priceCurrency: string;
@@ -3191,6 +3236,8 @@ export interface components {
             originalQuantity?: number | null;
             /** @description Pre-split/pre-restatement price; frozen at creation */
             originalPrice?: number | null;
+            /** @description Optional user note on the transaction (e.g. dividend remittance details) */
+            notes?: string | null;
             labels?: components["schemas"]["Label"][];
         };
         FeeFxFields: {
@@ -3215,6 +3262,10 @@ export interface components {
             fees?: number;
             /** @enum {string} */
             feesType?: "fixed" | "pct";
+            /** @description Withholding tax on a DIVIDEND (nullable, ≥ 0). When set for `type: DIVIDEND`, totalAmount is stored net (quantity × price − taxes). */
+            taxes?: number | null;
+            /** @description Optional user note on the transaction */
+            notes?: string | null;
             /** Format: date-time */
             executedAt?: string;
             /** Format: uuid */
@@ -3780,6 +3831,8 @@ export interface components {
         eventId: string;
         /** @description Opaque cursor for keyset pagination */
         cursor: string;
+        /** @description Optional ISO-4217 target currency — prices are converted server-side (plan §48.2); same/absent value serves the native series */
+        currency: string;
         limit: number;
         page: number;
         perPage: number;
@@ -4618,6 +4671,8 @@ export interface operations {
             query?: {
                 resolution?: "1" | "5" | "15" | "30" | "60" | "daily" | "weekly" | "monthly";
                 timeframe?: string;
+                /** @description Optional ISO-4217 target currency — prices are converted server-side (plan §48.2); same/absent value serves the native series */
+                currency?: components["parameters"]["currency"];
             };
             header?: never;
             path: {
@@ -4808,6 +4863,8 @@ export interface operations {
             query: {
                 date: string;
                 exchange?: string;
+                /** @description Optional ISO-4217 target currency — prices are converted server-side (plan §48.2); same/absent value serves the native series */
+                currency?: components["parameters"]["currency"];
             };
             header?: never;
             path: {
@@ -4834,6 +4891,8 @@ export interface operations {
             query: {
                 from: string;
                 to: string;
+                /** @description Optional ISO-4217 target currency — prices are converted server-side (plan §48.2); same/absent value serves the native series */
+                currency?: components["parameters"]["currency"];
             };
             header?: never;
             path: {
