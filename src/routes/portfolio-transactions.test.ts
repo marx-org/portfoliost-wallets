@@ -12,7 +12,7 @@ import {
   walletTransactions,
   wallets,
 } from "../db/schema.js"
-import { sql } from "drizzle-orm"
+import { eq, sql } from "drizzle-orm"
 
 function app(db: Parameters<typeof makeHarness>[0] extends string ? never : Parameters<typeof createPortfolioRoutes>[0]) {
   const a = new Hono()
@@ -1573,5 +1573,207 @@ describe("Shares CRUD (§15 Phase G3/G4)", () => {
 
     const res = await pa.request("/api/portfolios/public/00000000-0000-0000-0000-000000000000")
     expect(res.status).toBe(404)
+  })
+})
+
+describe("Portfolio dividends (§49)", () => {
+  async function portfolioWithWallet(h: Awaited<ReturnType<typeof makeHarness>>, a: ReturnType<typeof app>) {
+    const [wallet] = await h.db
+      .insert(wallets)
+      .values({ userId: "user-1", name: "Cash USD", currency: "USD" })
+      .returning()
+    const createRes = await a.request("/api/portfolios", {
+      method: "POST",
+      headers: h.headers,
+      body: JSON.stringify({ name: "P", currency: "USD", walletId: wallet.id }),
+    })
+    const portfolio = await createRes.json()
+    return { wallet, portfolio }
+  }
+
+  it("DIVIDEND with tax — net totalAmount persisted, wallet credited net (§49.3)", async () => {
+    const h = await makeHarness()
+    const a = app(h.db)
+    const { wallet, portfolio } = await portfolioWithWallet(h, a)
+
+    const res = await a.request(`/api/portfolios/${portfolio.id}/transactions`, {
+      method: "POST",
+      headers: h.headers,
+      body: JSON.stringify({
+        type: "DIVIDEND",
+        symbol: "AAPL",
+        quantity: 10,
+        price: 2,
+        currency: "USD",
+        taxes: 3,
+        notes: "april payout",
+        walletId: wallet.id,
+        executedAt: "2026-01-10T00:00:00Z",
+      }),
+    })
+    expect(res.status).toBe(201)
+    const body = await res.json()
+    expect(body.type).toBe("DIVIDEND")
+    expect(body.totalAmount).toBe(17) // 10×2 − 3 withholding
+    expect(body.taxes).toBe(3)
+    expect(body.notes).toBe("april payout")
+
+    const [w] = await h.db.select().from(wallets).where(eq(wallets.id, wallet.id))
+    expect(Number(w.balance)).toBeCloseTo(17, 6) // wallet credited the NET
+
+    const [wt] = await h.db.select().from(walletTransactions)
+    expect(Number(wt.amount)).toBeCloseTo(17, 6)
+    expect(wt.reference).toContain("PORTFOLIO_DIVIDEND_AAPL_")
+    expect(wt.currency).toBe("USD")
+  })
+
+  it("DIVIDEND without tax — net = gross, taxes null (§49.3)", async () => {
+    const h = await makeHarness()
+    const a = app(h.db)
+    const { wallet, portfolio } = await portfolioWithWallet(h, a)
+
+    const res = await a.request(`/api/portfolios/${portfolio.id}/transactions`, {
+      method: "POST",
+      headers: h.headers,
+      body: JSON.stringify({
+        type: "DIVIDEND",
+        symbol: "MSFT",
+        quantity: 5,
+        price: 4,
+        currency: "USD",
+        walletId: wallet.id,
+        executedAt: "2026-02-10T00:00:00Z",
+      }),
+    })
+    expect(res.status).toBe(201)
+    const body = await res.json()
+    expect(body.totalAmount).toBe(20) // net = gross
+    expect(body.taxes).toBeNull()
+
+    const [w] = await h.db.select().from(wallets).where(eq(wallets.id, wallet.id))
+    expect(Number(w.balance)).toBeCloseTo(20, 6)
+  })
+
+  it("DIVIDEND taxes > gross → 422 (§49.3)", async () => {
+    const h = await makeHarness()
+    const a = app(h.db)
+    const { portfolio } = await portfolioWithWallet(h, a)
+
+    const res = await a.request(`/api/portfolios/${portfolio.id}/transactions`, {
+      method: "POST",
+      headers: h.headers,
+      body: JSON.stringify({
+        type: "DIVIDEND",
+        symbol: "AAPL",
+        quantity: 1,
+        price: 2,
+        currency: "USD",
+        taxes: 2.5,
+      }),
+    })
+    expect(res.status).toBe(422)
+  })
+
+  it("PATCH DIVIDEND — taxes/notes change re-derives net totalAmount + wallet delta (§49.3)", async () => {
+    const h = await makeHarness()
+    const a = app(h.db)
+    const { wallet, portfolio } = await portfolioWithWallet(h, a)
+
+    const post = await a.request(`/api/portfolios/${portfolio.id}/transactions`, {
+      method: "POST",
+      headers: h.headers,
+      body: JSON.stringify({
+        type: "DIVIDEND",
+        symbol: "AAPL",
+        quantity: 10,
+        price: 2,
+        currency: "USD",
+        taxes: 1,
+        walletId: wallet.id,
+        executedAt: "2026-03-10T00:00:00Z",
+      }),
+    })
+    const tx = await post.json()
+    expect(tx.totalAmount).toBe(19)
+
+    const patchRes = await a.request(`/api/portfolios/${portfolio.id}/transactions/${tx.id}`, {
+      method: "PATCH",
+      headers: h.headers,
+      body: JSON.stringify({ taxes: 3, notes: "corrected withholding" }),
+    })
+    expect(patchRes.status).toBe(200)
+    const patched = await patchRes.json()
+    expect(patched.totalAmount).toBe(17)
+    expect(patched.taxes).toBe(3)
+    expect(patched.notes).toBe("corrected withholding")
+
+    const [w] = await h.db.select().from(wallets).where(eq(wallets.id, wallet.id))
+    expect(Number(w.balance)).toBeCloseTo(17, 6) // 19 − 2 delta
+
+    const [wt] = await h.db.select().from(walletTransactions)
+    expect(Number(wt.amount)).toBeCloseTo(17, 6)
+
+    // taxes > gross on patch → 422
+    const bad = await a.request(`/api/portfolios/${portfolio.id}/transactions/${tx.id}`, {
+      method: "PATCH",
+      headers: h.headers,
+      body: JSON.stringify({ taxes: 99 }),
+    })
+    expect(bad.status).toBe(422)
+  })
+
+  it("GET /:id/dividends — aggregates real DIVIDEND rows, date desc + totals (§49.3)", async () => {
+    const h = await makeHarness()
+    const a = app(h.db)
+    const { portfolio } = await portfolioWithWallet(h, a)
+
+    const record = (body: Record<string, unknown>) =>
+      a.request(`/api/portfolios/${portfolio.id}/transactions`, {
+        method: "POST",
+        headers: h.headers,
+        body: JSON.stringify(body),
+      })
+
+    // older dividend WITH tax
+    await record({ type: "DIVIDEND", symbol: "AAPL", quantity: 10, price: 2, currency: "USD", taxes: 3, executedAt: "2026-01-10T00:00:00Z" })
+    // newer dividend without tax
+    await record({ type: "DIVIDEND", symbol: "MSFT", quantity: 5, price: 4, currency: "USD", executedAt: "2026-02-10T00:00:00Z" })
+
+    const res = await a.request(`/api/portfolios/${portfolio.id}/dividends`, { headers: h.headers })
+    expect(res.status).toBe(200)
+    const body = await res.json()
+    expect(body.count).toBe(2)
+    expect(body.items).toHaveLength(2)
+    // newest first (MSFT recorded later)
+    expect(body.items[0].symbol).toBe("MSFT")
+    expect(body.items[0].gross).toBe(20)
+    expect(body.items[0].taxes).toBeNull()
+    expect(body.items[0].amount).toBe(20)
+    expect(body.items[1].symbol).toBe("AAPL")
+    expect(body.items[1].gross).toBe(20)
+    expect(body.items[1].taxes).toBe(3)
+    expect(body.items[1].amount).toBe(17)
+    expect(body.items[1].notes).toBeNull()
+    expect(body.totalDividends).toBe(37) // 20 + 17 (display ccy net sum)
+  })
+
+  it("BUY/SELL totals unchanged by §49 dividend changes (§49.3)", async () => {
+    const h = await makeHarness()
+    const a = app(h.db)
+    const { portfolio } = await portfolioWithWallet(h, a)
+
+    await a.request(`/api/portfolios/${portfolio.id}/transactions`, {
+      method: "POST",
+      headers: h.headers,
+      body: JSON.stringify(BUY_BODY),
+    })
+    const sellRes = await a.request(`/api/portfolios/${portfolio.id}/transactions`, {
+      method: "POST",
+      headers: h.headers,
+      body: JSON.stringify({ ...SELL_BODY, quantity: 5 }),
+    })
+    const sell = await sellRes.json()
+    expect(sell.totalAmount).toBe(170 * 5) // gross, unchanged
+    expect(sell.taxes).toBeNull()
   })
 })

@@ -49,6 +49,8 @@ const TransactionCreateSchema = z.object({
   exchangeRate: z.number().positive().optional(),
   feeRateSource: z.enum(["automatic", "manual"]).optional(),
   feeExchangeRate: z.number().positive().optional(),
+  taxes: z.number().nonnegative().nullable().optional(),
+  notes: z.string().max(2000).nullable().optional(),
   walletId: z.string().uuid().optional(),
   positionId: z.string().uuid().optional(),
   executedAt: z.string().optional(),
@@ -65,6 +67,8 @@ const TransactionPatchSchema = z.object({
   exchangeRate: z.number().positive().optional(),
   feeRateSource: z.enum(["automatic", "manual"]).optional(),
   feeExchangeRate: z.number().positive().optional(),
+  taxes: z.number().nonnegative().nullable().optional(),
+  notes: z.string().max(2000).nullable().optional(),
   executedAt: z.string().optional(),
 })
 
@@ -305,6 +309,7 @@ async function createWalletLink(
     price: number
     currency: string
     feesSettled: number
+    taxes?: number
     exchangeRate: number
     transactionId: string
     portfolioId: string
@@ -324,7 +329,7 @@ async function createWalletLink(
     ? -(body.quantity * body.price + body.feesSettled)
     : body.type === "SELL"
       ? body.quantity * body.price - body.feesSettled
-      : body.quantity * body.price
+      : body.quantity * body.price - (body.taxes ?? 0) // DIVIDEND credits the NET (gross − withholding tax)
 
   const [fresh] = await tx
     .select()
@@ -359,6 +364,52 @@ async function createWalletLink(
     .returning()
 
   return { walletTx: wt, newBalance, newAvailable }
+}
+
+/**
+ * Rewrite the paired wallet ledger row + balance after a PATCH changes the
+ * transaction's quantity/price/taxes. Applies the signed delta between the new
+ * wallet effect and the previously credited amount (§49.3).
+ */
+async function applyWalletDelta(
+  tx: DB,
+  existing: typeof portfolioTransactions.$inferSelect,
+  txId: string,
+  newSigned: number,
+) {
+  if (!existing.walletId) return
+  const reference = `PORTFOLIO_${existing.type}_${existing.instrumentSymbol}_${txId.slice(0, 8)}`
+  const [wt] = await tx
+    .select()
+    .from(walletTransactions)
+    .where(and(eq(walletTransactions.reference, reference), eq(walletTransactions.walletId, existing.walletId)))
+    .limit(1)
+  if (!wt) return
+
+  const oldSigned = Number(wt.amount)
+  const delta = Math.round((newSigned - oldSigned) * 1e8) / 1e8
+  if (delta === 0) return
+
+  const [wallet] = await tx
+    .select()
+    .from(wallets)
+    .where(eq(wallets.id, existing.walletId))
+    .limit(1)
+  if (!wallet) return
+
+  await tx
+    .update(wallets)
+    .set({
+      balance: scale8(Math.round((Number(wallet.balance) + delta) * 1e8) / 1e8),
+      availableBalance: scale8(Math.round((Number(wallet.availableBalance) + delta) * 1e8) / 1e8),
+      updatedAt: new Date(),
+    })
+    .where(eq(wallets.id, wallet.id))
+
+  await tx
+    .update(walletTransactions)
+    .set({ amount: scale8(newSigned), updatedAt: new Date() })
+    .where(eq(walletTransactions.id, wt.id))
 }
 
 const PositionCreateSchema = z.object({
@@ -509,6 +560,15 @@ export function createTransactionRoutes(db?: DB) {
     const instCcy = (body.instrumentCurrency ?? body.currency).toUpperCase()
     const notional = body.quantity * body.price
 
+    // example-service convention (§49): for DIVIDEND, taxes is the withholding tax and
+    // totalAmount is the NET (gross − taxes); wallet is credited the net.
+    const taxes = body.taxes ?? null
+    if (taxes != null && taxes > notional) {
+      return c.json({ error: "ValidationError", message: "taxes cannot exceed the gross amount (quantity × price)" }, 422)
+    }
+    const isDividend = body.type === "DIVIDEND"
+    const netAmount = isDividend ? round2(notional - (taxes ?? 0)) : round2(notional)
+
     const fx = await resolveFeeFx(c.req.header("Authorization") ?? "", body, txCcy, { notional })
     if (!fx.ok) return c.json({ error: "ValidationError", message: fx.message }, 422)
 
@@ -538,12 +598,14 @@ export function createTransactionRoutes(db?: DB) {
           feesType: fx.fields.feesType,
           feeCurrency: fx.fields.feeCurrency,
           feesSettled: String(fx.feesSettled),
-          totalAmount: String(round2(notional)),
+          taxes: taxes != null ? String(taxes) : null,
+          notes: body.notes ?? null,
+          totalAmount: String(netAmount),
           exchangeRate: String(fx.fields.exchangeRate),
           rateSource: fx.fields.rateSource,
           feeRateSource: fx.fields.feeRateSource,
           feeExchangeRate: fx.fields.feeExchangeRate != null ? String(fx.fields.feeExchangeRate) : null,
-          convertedTotalAmount: String(round2(notional * fx.fields.exchangeRate)),
+          convertedTotalAmount: String(round2(netAmount * fx.fields.exchangeRate)),
           convertedPrice: String(round2(body.price * fx.fields.exchangeRate)),
           convertedFees: String(round2(fx.feesSettled * fx.fields.exchangeRate)),
           displayCurrency: "USD",
@@ -596,6 +658,7 @@ export function createTransactionRoutes(db?: DB) {
         walletLink = await createWalletLink(tx, identity.id, {
           ...body,
           symbol,
+          taxes: taxes ?? 0,
           feesSettled: fx.feesSettled,
           exchangeRate: fx.fields.exchangeRate,
           transactionId: inserted.id,
@@ -619,11 +682,13 @@ export function createTransactionRoutes(db?: DB) {
           quantity: body.quantity,
           price: body.price,
           fees: body.fees ?? 0,
-          totalAmount: round2(notional),
+          taxes,
+          notes: body.notes ?? null,
+          totalAmount: netAmount,
           feesSettled: fx.feesSettled,
           exchangeRate: fx.fields.exchangeRate,
           rateSource: fx.fields.rateSource,
-          convertedTotalAmount: round2(notional * fx.fields.exchangeRate),
+          convertedTotalAmount: round2(netAmount * fx.fields.exchangeRate),
           convertedPrice: round2(body.price * fx.fields.exchangeRate),
           convertedFees,
           realizedGainLoss,
@@ -678,6 +743,18 @@ export function createTransactionRoutes(db?: DB) {
     const txCcy = existing.currency.toUpperCase()
     const notional = quantity * price
 
+    const taxes = body.taxes !== undefined
+      ? body.taxes
+      : existing.taxes != null ? Number(existing.taxes) : null
+    if (taxes != null && taxes > notional) {
+      return c.json({ error: "ValidationError", message: "taxes cannot exceed the gross amount (quantity × price)" }, 422)
+    }
+    const isDividend = existing.type === "DIVIDEND"
+    const netAmount = isDividend
+      ? round2(notional - (taxes ?? 0))
+      : round2(notional)
+    const notes = body.notes !== undefined ? body.notes : existing.notes
+
     const fx = await resolveFeeFx(c.req.header("Authorization") ?? "", merged, txCcy, { notional })
     if (!fx.ok) return c.json({ error: "ValidationError", message: fx.message }, 422)
 
@@ -691,12 +768,14 @@ export function createTransactionRoutes(db?: DB) {
           feesType: fx.fields.feesType,
           feeCurrency: fx.fields.feeCurrency,
           feesSettled: String(fx.feesSettled),
-          totalAmount: String(round2(notional)),
+          taxes: taxes != null ? String(taxes) : null,
+          notes,
+          totalAmount: String(netAmount),
           exchangeRate: String(fx.fields.exchangeRate),
           rateSource: fx.fields.rateSource,
           feeRateSource: fx.fields.feeRateSource,
           feeExchangeRate: fx.fields.feeExchangeRate != null ? String(fx.fields.feeExchangeRate) : null,
-          convertedTotalAmount: String(round2(notional * fx.fields.exchangeRate)),
+          convertedTotalAmount: String(round2(netAmount * fx.fields.exchangeRate)),
           convertedPrice: String(round2(price * fx.fields.exchangeRate)),
           convertedFees: String(round2(fx.feesSettled * fx.fields.exchangeRate)),
           executedAt: body.executedAt ? new Date(body.executedAt) : existing.executedAt,
@@ -705,6 +784,13 @@ export function createTransactionRoutes(db?: DB) {
         .where(eq(portfolioTransactions.id, txId))
         .returning()
 
+      // Re-derive the wallet delta (taxes/quantity/price changes) — §49.3
+      const feesSettled = fx.feesSettled
+      const newSigned = existing.type === "BUY"
+        ? -(netAmount + feesSettled)
+        : netAmount - feesSettled
+      await applyWalletDelta(tx, existing, txId, newSigned)
+
       await recomputePortfolioTotals(tx, identity.id, portfolioId)
 
       return {
@@ -712,11 +798,13 @@ export function createTransactionRoutes(db?: DB) {
         quantity,
         price,
         fees,
+        taxes,
+        notes,
         feesSettled: fx.feesSettled,
-        totalAmount: round2(notional),
+        totalAmount: netAmount,
         exchangeRate: fx.fields.exchangeRate,
         rateSource: fx.fields.rateSource,
-        convertedTotalAmount: round2(notional * fx.fields.exchangeRate),
+        convertedTotalAmount: round2(netAmount * fx.fields.exchangeRate),
         convertedPrice: round2(price * fx.fields.exchangeRate),
         convertedFees: round2(fx.feesSettled * fx.fields.exchangeRate),
       }
@@ -1544,6 +1632,8 @@ function serializeTx(r: typeof portfolioTransactions.$inferSelect, labels: Label
     quantity: Number(r.quantity),
     price: Number(r.price),
     fees: r.fees != null ? Number(r.fees) : 0,
+    taxes: r.taxes != null ? Number(r.taxes) : null,
+    notes: r.notes ?? null,
     feesType: r.feesType,
     feeCurrency: r.feeCurrency,
     feesSettled: Number(r.feesSettled),

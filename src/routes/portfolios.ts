@@ -1,5 +1,5 @@
 import { Hono } from "hono"
-import { and, asc, count as drizzleCount, eq, sql } from "drizzle-orm"
+import { and, asc, count as drizzleCount, desc, eq, sql } from "drizzle-orm"
 import { z } from "zod"
 import { userIdentityMiddleware } from "../auth.js"
 import { getDb, type DB } from "../db/index.js"
@@ -28,6 +28,8 @@ type HeldStocks = components["schemas"]["HeldStocks"]
 type PortfolioSummaryMetrics = components["schemas"]["PortfolioSummaryMetrics"]
 
 const ISO_CURRENCY = /^[A-Za-z]{3}$/
+
+const round2 = (n: number) => Math.round(n * 100) / 100
 
 // ── Request schemas ────────────────────────────────────────────────────
 
@@ -1073,8 +1075,57 @@ export function createPortfolioRoutes(db?: DB) {
     })
   })
 
-  routes.get("/:id/dividends", (c) => {
-    return c.json({ totalDividends: 0, count: 0, items: [] })
+  routes.get("/:id/dividends", async (c) => {
+    const identity = c.get("userIdentity")
+    const database = getDbInstance()
+    const id = c.req.param("id")
+
+    const [pf] = await database
+      .select({ id: portfolios.id })
+      .from(portfolios)
+      .where(and(eq(portfolios.id, id), eq(portfolios.userId, identity.id)))
+      .limit(1)
+    if (!pf) return c.json({ error: "NotFound", message: "Portfolio not found" }, 404)
+
+    // §49.3: aggregate the portfolio's REAL DIVIDEND transactions (gross =
+    // quantity × price, amount = net = gross − taxes), newest first.
+    const rows = await database
+      .select()
+      .from(portfolioTransactions)
+      .where(
+        and(
+          eq(portfolioTransactions.portfolioId, id),
+          eq(portfolioTransactions.userId, identity.id),
+          eq(portfolioTransactions.type, "DIVIDEND"),
+        ),
+      )
+      .orderBy(desc(portfolioTransactions.executedAt))
+
+    const items = rows.map((r) => {
+      const quantity = Number(r.quantity)
+      const gross = round2(quantity * Number(r.price))
+      const taxes = r.taxes != null ? Number(r.taxes) : null
+      const amount = Math.round((gross - (taxes ?? 0)) * 1e8) / 1e8
+      const exchangeRate = r.exchangeRate != null ? Number(r.exchangeRate) : null
+      return {
+        symbol: r.instrumentSymbol,
+        instrumentName: r.instrumentName,
+        date: r.executedAt?.toISOString?.() ?? r.executedAt,
+        quantity,
+        gross,
+        taxes,
+        amount,
+        currency: r.currency,
+        exchangeRate,
+        convertedAmount: exchangeRate != null ? round2(amount * exchangeRate) : null,
+        notes: r.notes ?? null,
+      }
+    })
+
+    const count = items.length
+    const totalDividends = round2(items.reduce((s, it) => s + (it.convertedAmount ?? it.amount), 0))
+
+    return c.json({ totalDividends, count, items })
   })
 
   routes.get("/:id/calendar", (c) => {
