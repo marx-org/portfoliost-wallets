@@ -282,6 +282,7 @@ export const portfolioTransactions = portfoliosSchema.table(
     feesType: text("fees_type", { enum: ["fixed", "pct"] }),
     feeCurrency: char("fee_currency", { length: 3 }),
     taxes: numeric("taxes", { precision: 20, scale: 8 }),
+    notes: text("notes"),
     feesSettled: numeric("fees_settled", { precision: 20, scale: 8 }),
     totalAmount: numeric("total_amount", { precision: 20, scale: 8 }).notNull().default("0"),
     realizedGainLoss: numeric("realized_gain_loss", { precision: 20, scale: 8 }),

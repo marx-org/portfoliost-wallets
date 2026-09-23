@@ -198,11 +198,15 @@ describe("portfolios schema (§15, D54)", () => {
         totalAmount: "1500.00000000",
         rateSource: "automatic",
         feeRateSource: "automatic",
+        taxes: "30.00000000",
+        notes: "dividend remittance note",
       })
       .returning()
     expect(tx.type).toBe("BUY")
     expect(tx.rateSource).toBe("automatic")
     expect(Number(tx.totalAmount)).toBe(1500)
+    expect(Number(tx.taxes)).toBe(30)
+    expect(tx.notes).toBe("dividend remittance note")
 
     // type CHECK constraint
     await expect(
@@ -355,6 +359,7 @@ describe("import API migration (provenance + split columns)", () => {
     expect(await cols("transactions", "portfolios")).toContain("external_id")
     expect(await cols("transactions", "portfolios")).toContain("original_quantity")
     expect(await cols("transactions", "portfolios")).toContain("original_price")
+    expect(await cols("transactions", "portfolios")).toContain("notes")
   })
 
   it("partial unique index rejects duplicate external_id but allows NULL duplicates", async () => {

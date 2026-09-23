@@ -1,0 +1,1 @@
+ALTER TABLE "portfolios"."transactions" ADD COLUMN "notes" text;
