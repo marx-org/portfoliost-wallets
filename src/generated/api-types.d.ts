@@ -2622,7 +2622,7 @@ export interface components {
             sumOfCurrentPositions: number;
             sumOfCurrentPositionsValue: number;
         };
-        /** @description Instrument research dividend history (`history`) OR the portfolio's own dividend rows (`totalDividends`/`count`/`items`) — see the exposing endpoint. For portfolio items, gross = quantity × price, taxes is the withholding tax, amount is the NET (gross − taxes) per the example-service convention, and convertedAmount is amount in the display currency. */
+        /** @description Instrument research dividend history (`history`) OR the portfolio's own dividend rows (`totalDividends`/`count`/`items`) — see the exposing endpoint. For portfolio items, gross = quantity × price, taxes is the withholding tax, amount is the NET (gross − taxes) per the example-service convention, and convertedAmount is amount in the display currency. The research `/dividends` endpoint always also sets `currency` + `currencySource` (plan §49.6, currency is never null); the portfolio endpoint does not. */
         DividendsData: {
             history?: {
                 date: string;
@@ -2630,7 +2630,13 @@ export interface components {
                 amount: number;
                 currency: string;
                 type: string;
+                /** @description Dividend payment date (when the provider carries it; NASDAQ does). Null when the provider only reports the ex-dividend date (e.g. yfinance) — plan §49.9. */
+                paymentDate?: string | null;
             }[];
+            /** @description Research side only: the instrument's resolved trading currency — always set (fallback "USD" only on total uncertainty), see `currencySource` for how it was determined. */
+            currency?: string;
+            /** @description Research side only — how `currency` was determined (§47). */
+            currencySource?: components["schemas"]["CurrencySource"];
             /** @description Sum of net dividend amounts in the display currency */
             totalDividends?: number;
             count?: number;
@@ -2650,24 +2656,10 @@ export interface components {
         };
         CalendarData: {
             currency?: string;
-            earnings?: {
-                date: string;
-                title?: string;
-                year?: number;
-                quarter?: number;
-            }[];
-            exDividend?: {
-                date: string;
-                title?: string;
-                year?: number;
-                amount?: number;
-            }[];
-            dividend?: {
-                date: string;
-                title?: string;
-                year?: number;
-                amount?: number;
-            }[];
+            earnings?: components["schemas"]["CalendarEarningsItem"][];
+            exDividend?: components["schemas"]["CalendarExDividendItem"][];
+            dividend?: components["schemas"]["CalendarDividendItem"][];
+            holdings?: components["schemas"]["CalendarHolding"][];
             upcoming?: {
                 symbol?: string;
                 companyName?: string;
@@ -2686,6 +2678,32 @@ export interface components {
                 amount?: number | null;
                 quarter?: number | null;
             }[];
+        };
+        CalendarEarningsItem: {
+            date: string;
+            title?: string;
+            year?: number;
+            quarter?: number;
+        };
+        CalendarExDividendItem: {
+            date: string;
+            title?: string;
+            year?: number;
+            amount?: number;
+        };
+        CalendarDividendItem: {
+            date: string;
+            title?: string;
+            year?: number;
+            amount?: number;
+        };
+        CalendarHolding: {
+            symbol: string;
+            companyName?: string;
+            currency?: string;
+            earnings?: components["schemas"]["CalendarEarningsItem"][];
+            exDividend?: components["schemas"]["CalendarExDividendItem"][];
+            dividend?: components["schemas"]["CalendarDividendItem"][];
         };
         SeasonalityData: {
             symbol?: string;
