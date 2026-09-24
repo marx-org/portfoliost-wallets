@@ -47,6 +47,16 @@ function daysBetween(a: string, b: string): number {
   return (Date.parse(b) - Date.parse(a)) / 86400000
 }
 
+// §53.1 — Newton on near-zero-capital / one-sided-flow histories "converges"
+// to absurd roots (|r| up to 1e10); such a rate is nonsense, and
+// Math.pow(1+r, t) then overflows the cumulative_mwr numeric column.
+// Rejecting it makes buildMwr take its buildSimple fallback.
+const MAX_ABS_XIRR = 10
+
+function saneRate(r: number): boolean {
+  return Number.isFinite(r) && Math.abs(r) <= MAX_ABS_XIRR
+}
+
 function xirr(cfs: number[], dates: string[]): number | null {
   if (cfs.length < 2) return null
   const hasPos = cfs.some((c) => c > 0)
@@ -65,7 +75,7 @@ function xirr(cfs: number[], dates: string[]): number | null {
     }
     if (Math.abs(dnpv) < 1e-12) break
     const nr = r - npv / dnpv
-    if (Math.abs(nr - r) < 1e-8) return nr
+    if (Math.abs(nr - r) < 1e-8) return saneRate(nr) ? nr : null
     r = isFinite(nr) ? Math.max(nr, -0.9999) : r * 0.5
   }
   return null
