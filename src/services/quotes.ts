@@ -17,7 +17,7 @@ import type { DB } from "../db/index.js"
 import { positions, portfolios, valueSnapshots } from "../db/schema.js"
 import { fxTo } from "./instruments-fx.js"
 import { dailyNetCashFlows } from "./cashFlows.js"
-import { recomputeReturnColumns } from "./returnColumns.js"
+import { recomputeReturnColumns, syncCurrentValueFromSnapshots } from "./returnColumns.js"
 
 // ── Types ─────────────────────────────────────────────────────────────────
 
@@ -356,6 +356,8 @@ export async function snapshotPortfolioValue(
 
   // Recompute stored return-type columns after the new snapshot is written
   await recomputeReturnColumns(db, portfolioId)
+  // §53.5 — keep portfolios.current_value in step with the newest snapshot
+  await syncCurrentValueFromSnapshots(db, portfolioId)
 }
 
 /** Exposed for testing: flush the in-process caches. */

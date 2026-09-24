@@ -305,6 +305,26 @@ describe("recalcPortfolioHistory (background recalc on transaction changes)", ()
     expect(await getBackfillStatus(db, pf.id)).toBe("complete")
   })
 
+  it("syncs portfolios.current_value with the newest snapshot (§53.5)", async () => {
+    const { db, user } = await makeHarness("recalc-cv-1")
+    const pf = await seedPortfolio(db, user.id)
+    await seedBuy(db, user.id, pf.id, "AAPL", 10, 150, "2026-07-01")
+    await seedPosition(db, user.id, pf.id, "AAPL", 10, 150)
+
+    mockPriceBars({
+      AAPL: {
+        dates: ["2026-07-01", "2026-07-02", "2026-07-03"],
+        closes: [150, 155, 160],
+      },
+    })
+
+    const now = new Date("2026-07-04T00:00:00Z")
+    await recalcPortfolioHistory(db, pf.id, "Bearer test", now)
+
+    const [row] = await db.select().from(portfolios).where(eq(portfolios.id, pf.id))
+    expect(Number(row.currentValue)).toBeCloseTo(1600) // last snapshot: 10 × 160
+  })
+
   it("clears the history entirely when all BUY/SELL transactions are deleted", async () => {
     const { db, user } = await makeHarness("recalc-user-2")
     const pf = await seedPortfolio(db, user.id)
@@ -324,6 +344,9 @@ describe("recalcPortfolioHistory (background recalc on transaction changes)", ()
     const snaps = await db.select().from(valueSnapshots).where(eq(valueSnapshots.portfolioId, pf.id))
     expect(snaps.length).toBe(0)
     expect(await getBackfillStatus(db, pf.id)).toBe("complete")
+    // §53.5 — a cleared history resets current_value to 0
+    const [row] = await db.select().from(portfolios).where(eq(portfolios.id, pf.id))
+    expect(Number(row.currentValue)).toBe(0)
   })
 
   it("aborted pass never writes a partial series (swap-in is all-or-nothing)", async () => {

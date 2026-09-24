@@ -28,6 +28,7 @@ import { dailyNetCashFlows } from "./cashFlows.js"
 import { enqueueBackfill } from "./backfill-runner.js"
 import {
   recomputeReturnColumns,
+  syncCurrentValueFromSnapshots,
   buildSimple,
   buildTwr,
   buildMwr,
@@ -647,6 +648,8 @@ async function _runBackfillCore(
 
   // Recompute stored return-type columns now that all snapshots are written
   await recomputeReturnColumns(db, portfolioId)
+  // §53.5 — keep portfolios.current_value in step with the newest snapshot
+  await syncCurrentValueFromSnapshots(db, portfolioId)
 }
 
 /**
@@ -681,6 +684,8 @@ export async function recalcPortfolioHistory(
 
     throwIfAborted(signal)
     await recomputeReturnColumns(db, portfolioId)
+    // §53.5 — keep portfolios.current_value in step (0 when history cleared)
+    await syncCurrentValueFromSnapshots(db, portfolioId)
     await setBackfillStatus(db, portfolioId, "complete", { completedAt: new Date() })
   } catch (err) {
     // An aborted pass must stay silent: the queue restarts with the latest data.

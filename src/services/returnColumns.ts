@@ -10,9 +10,9 @@
  * plain SELECT with zero CPU work.
  */
 
-import { and, asc, eq, sql } from "drizzle-orm"
+import { and, asc, desc, eq, sql } from "drizzle-orm"
 import type { DB } from "../db/index.js"
-import { valueSnapshots } from "../db/schema.js"
+import { portfolios, valueSnapshots } from "../db/schema.js"
 
 // ---------------------------------------------------------------------------
 // Simple return — indexed from first portfolio value
@@ -108,6 +108,25 @@ export function buildMwr(values: number[], flows: number[], dates: string[]): nu
 // ---------------------------------------------------------------------------
 // Public: recompute all three columns for one portfolio
 // ---------------------------------------------------------------------------
+/**
+ * §53.5 — maintain `portfolios.current_value` from the newest
+ * value_snapshots row. A 1-day-old value is acceptable (user decision
+ * 2026-09-23); a portfolio with no snapshots (history cleared) resets to 0.
+ * Call after every value_snapshots write (backfill, recalc, snapshot-on-read).
+ */
+export async function syncCurrentValueFromSnapshots(db: DB, portfolioId: string): Promise<void> {
+  const [latest] = await db
+    .select({ value: valueSnapshots.value })
+    .from(valueSnapshots)
+    .where(eq(valueSnapshots.portfolioId, portfolioId))
+    .orderBy(desc(valueSnapshots.snapshotDate))
+    .limit(1)
+  await db
+    .update(portfolios)
+    .set({ currentValue: latest ? latest.value : "0" })
+    .where(eq(portfolios.id, portfolioId))
+}
+
 export async function recomputeReturnColumns(db: DB, portfolioId: string): Promise<void> {
   const rows = await db
     .select({

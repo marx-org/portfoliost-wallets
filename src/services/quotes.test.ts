@@ -384,6 +384,9 @@ describe("snapshotPortfolioValue (H5)", () => {
     expect(snaps[0].snapshotDate).toBe("2026-09-03")
     expect(Number(snaps[0].value)).toBeCloseTo(2300)   // 1800 + 500
     expect(Number(snaps[0].invested)).toBeCloseTo(2100) // 150×10 + 200×3
+    // §53.5 — the snapshot-on-read upsert maintains portfolios.current_value
+    const [pfRow] = await db.select().from(portfolios).where(eq(portfolios.id, pf.id))
+    expect(Number(pfRow.currentValue)).toBeCloseTo(2300)
   })
 
   it("is idempotent — second call updates value in place", async () => {
@@ -407,6 +410,9 @@ describe("snapshotPortfolioValue (H5)", () => {
     const snaps = await db.select().from(valueSnapshots).where(eq(valueSnapshots.portfolioId, pf.id))
     expect(snaps).toHaveLength(1)
     expect(Number(snaps[0].value)).toBeCloseTo(1100)
+    // §53.5 — current_value follows the updated snapshot
+    const [pfRow] = await db.select().from(portfolios).where(eq(portfolios.id, pf.id))
+    expect(Number(pfRow.currentValue)).toBeCloseTo(1100)
   })
 
   it("refreshQuotes writes a snapshot row after persisting quote fields", async () => {
