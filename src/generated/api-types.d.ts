@@ -1657,6 +1657,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/import/labels/bootstrap": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Idempotently ensure labels exist by name (palette-colored when created) */
+        post: operations["importLabelBootstrap"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/import/transactions": {
         parameters: {
             query?: never;
@@ -3501,6 +3518,20 @@ export interface components {
             /** @description true = just inserted (external_source tagged); false = already existed (not re-tagged) */
             created: boolean;
         };
+        ImportLabelBootstrapRequest: {
+            externalSource: string;
+            /** @description Label names to ensure; idempotent per (user, name) */
+            labels: string[];
+        };
+        ImportLabelBootstrapResponse: {
+            labels: {
+                name: string;
+                /** Format: uuid */
+                id: string;
+                /** @description true = just created; false = already existed */
+                created?: boolean;
+            }[];
+        };
         ImportTransactionsRequest: {
             source: {
                 externalSource: string;
@@ -3579,6 +3610,10 @@ export interface components {
             /** @enum {string|null} */
             optionType?: "CALL" | "PUT" | null;
             contractSize?: number | null;
+            /** @description Label names to attach to the row's open position (resolved server-side per user; unknown names are a row error) */
+            positionLabels?: string[];
+            /** @description Label names to attach to the row's portfolio transaction (same resolution as positionLabels) */
+            transactionLabels?: string[];
         };
         ImportTransactionsResponse: {
             inserted: number;
@@ -6310,6 +6345,48 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["ImportPortfolioBootstrapResponse"];
+                };
+            };
+            /** @description Missing or invalid token */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Malformed payload */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+        };
+    };
+    importLabelBootstrap: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ImportLabelBootstrapRequest"];
+            };
+        };
+        responses: {
+            /** @description Labels ensured */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ImportLabelBootstrapResponse"];
                 };
             };
             /** @description Missing or invalid token */
