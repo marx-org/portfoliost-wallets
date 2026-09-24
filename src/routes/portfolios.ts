@@ -14,6 +14,7 @@ import {
 import { preferredBaseCurrency } from "../services/preferences.js"
 import { refreshQuotes } from "../services/quotes.js"
 import { getPortfolioNews } from "../services/portfolioNews.js"
+import { getPortfolioCalendar } from "../services/portfolioCalendar.js"
 import { runBackfill, getBackfillStatus, buildBenchmarkSeries, forcePortfolioRecalc, hasBackfillableHistory } from "../services/backfill.js"
 import { dailyNetCashFlows } from "../services/cashFlows.js"
 import { computeRiskMetrics } from "../services/riskMetrics.js"
@@ -1128,8 +1129,16 @@ export function createPortfolioRoutes(db?: DB) {
     return c.json({ totalDividends, count, items })
   })
 
-  routes.get("/:id/calendar", (c) => {
-    return c.json({ events: [] })
+  routes.get("/:id/calendar", async (c) => {
+    const identity = c.get("userIdentity")
+    const id = c.req.param("id")
+    const holdings = await getPortfolioCalendar(
+      getDbInstance(),
+      id,
+      identity.id,
+      c.req.header("Authorization") ?? "",
+    )
+    return c.json({ holdings } satisfies components["schemas"]["CalendarData"])
   })
 
   routes.get("/:id/news", async (c) => {
