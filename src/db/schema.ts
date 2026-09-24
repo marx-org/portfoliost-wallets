@@ -374,9 +374,12 @@ export const valueSnapshots = portfoliosSchema.table(
     value: numeric("value", { precision: 20, scale: 8 }).notNull(),
     invested: numeric("invested", { precision: 20, scale: 8 }).notNull(),
     netFlow: numeric("net_flow", { precision: 20, scale: 8 }).notNull().default("0"),
-    cumulativeTwr: numeric("cumulative_twr", { precision: 20, scale: 8 }),
-    cumulativeMwr: numeric("cumulative_mwr", { precision: 20, scale: 8 }),
-    cumulativeSimple: numeric("cumulative_simple", { precision: 20, scale: 8 }),
+    // §53.2 — widened from numeric(20,8): an XIRR that "converges" to a
+    // garbage rate produced cumulative_mwr ≈ 1e12 → 'numeric field overflow'.
+    // (The §53.1 solver guard makes this a belt-and-braces bound.)
+    cumulativeTwr: numeric("cumulative_twr", { precision: 28, scale: 8 }),
+    cumulativeMwr: numeric("cumulative_mwr", { precision: 28, scale: 8 }),
+    cumulativeSimple: numeric("cumulative_simple", { precision: 28, scale: 8 }),
   },
   (t) => [
     primaryKey({ columns: [t.portfolioId, t.snapshotDate] }),
