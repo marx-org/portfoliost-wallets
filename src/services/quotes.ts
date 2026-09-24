@@ -213,7 +213,13 @@ export async function refreshQuotes(
 
   // Persist snapshots for each position; accumulate live values for H5 snapshot
   const now = new Date()
-  const liveValues: Array<{ marketValue: string; averageCostBasis: string; quantity: string; instrumentCurrency: string | null }> = []
+  const liveValues: Array<{
+    marketValue: string
+    averageCostBasis: string
+    quantity: string
+    instrumentCurrency: string | null
+    quoteCurrency: string | null
+  }> = []
 
   await Promise.all(
     rows.map(async (p) => {
@@ -250,6 +256,10 @@ export async function refreshQuotes(
           averageCostBasis: p.averageCostBasis,
           quantity: p.quantity,
           instrumentCurrency: p.instrumentCurrency,
+          // §53.6 — no live quote: the stored MV is converted via the
+          // instrument currency (legacy native-mixed residual, documented in
+          // snapshotPortfolioValue)
+          quoteCurrency: null,
         })
         return
       }
@@ -267,6 +277,9 @@ export async function refreshQuotes(
         averageCostBasis: p.averageCostBasis,
         quantity: p.quantity,
         instrumentCurrency: p.instrumentCurrency,
+        // §53.6 — mv is denominated in the quote's own price currency (§39),
+        // which is not always the stored instrumentCurrency
+        quoteCurrency: quote.currency ?? null,
       })
 
       await db
@@ -292,15 +305,21 @@ export async function refreshQuotes(
 }
 
 /**
- * Compute and upsert a single-day value snapshot for a portfolio.
- *
-  * portfolioValue = Σ pos.marketValue × fx(instrumentCurrency → baseCurrency)
+  * Compute and upsert a single-day value snapshot for a portfolio.
+  *
+  * portfolioValue = Σ pos.marketValue × fx(valueCurrency → baseCurrency)
   * invested       = Σ (pos.averageCostBasis × pos.quantity) × fx(instrumentCurrency → baseCurrency)
+  *
+  * §53.6 — valueCurrency is the quote's own price currency when a live quote
+  * produced the marketValue (the quote path stores it unconverted, §39),
+  * falling back to the position's instrument currency. The stored MVs on the
+  * fallback branch are legacy native-mixed values, so the instrument-currency
+  * conversion there is best-effort (documented residual).
   *
   * Falls back to rate=1 when instruments FX is unavailable or a pair is missing (plan §48.3).
   * Exported for unit testing.
   */
-export async function snapshotPortfolioValue(
+ export async function snapshotPortfolioValue(
   db: DB,
   authToken: string | null,
   portfolioId: string,
@@ -309,6 +328,7 @@ export async function snapshotPortfolioValue(
     averageCostBasis: string
     quantity: string
     instrumentCurrency: string | null
+    quoteCurrency?: string | null
   }>,
   now = new Date(),
 ): Promise<void> {
@@ -326,12 +346,16 @@ export async function snapshotPortfolioValue(
   let totalValue = 0
   let totalInvested = 0
   for (const p of positionRows) {
-    const from = (p.instrumentCurrency ?? "USD").toUpperCase()
-    const rate = await toBase(from, 1)
+    const instFrom = (p.instrumentCurrency ?? "USD").toUpperCase()
+    // Market value is denominated in the quote's currency (live) or the
+    // instrument currency (fallback / legacy stored MV).
+    const valueFrom = (p.quoteCurrency ?? p.instrumentCurrency ?? "USD").toUpperCase()
+    const investedRate = await toBase(instFrom, 1)
+    const valueRate = valueFrom === instFrom ? investedRate : await toBase(valueFrom, 1)
     const mv = Number(p.marketValue ?? 0)
     const cost = Number(p.averageCostBasis) * Number(p.quantity)
-    totalValue += mv * rate
-    totalInvested += cost * rate
+    totalValue += mv * valueRate
+    totalInvested += cost * investedRate
   }
 
   const snapshotDate = now.toISOString().slice(0, 10)

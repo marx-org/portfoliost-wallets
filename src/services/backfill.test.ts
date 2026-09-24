@@ -2,14 +2,16 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import { crossRate } from "@marx2/contracts/fx"
 import { makeHarness } from "../routes/test-utils.js"
 import { portfolios, portfolioTransactions, positions, valueSnapshots } from "../db/schema.js"
-import { eq } from "drizzle-orm"
+import { eq, and } from "drizzle-orm"
 import {
   buildPriceMap,
   calendarDays,
+  computeSnapshotBatch,
   getBackfillStatus,
   runBackfill,
   recalcPortfolioHistory,
 } from "./backfill.js"
+import { snapshotPortfolioValue } from "./quotes.js"
 import { __resetBackfillRunnerForTests } from "./backfill-runner.js"
 
 // ── mock fetch for instruments price-bars ──────────────────────────────
@@ -468,5 +470,95 @@ describe("golden value — mixed-currency portfolio (plan §48.3)", () => {
     // invested is static (current position cost basis), netFlow zero
     expect(Number(snaps[1].invested)).toBeCloseTo(1000 + 1000 * plnToUsd + 1080, 6)
     expect(Number(snaps[1].netFlow)).toBeCloseTo(0, 8)
+  })
+})
+
+describe("§53.6 — snapshot-on-read agrees with the backfill pipeline", () => {
+  const TABLE = { USD: 1.08, PLN: 4.3 }
+  const asOf = "2026-07-02"
+
+  beforeEach(() => {
+    process.env.INSTRUMENTS_URL = "http://instruments.test"
+  })
+  afterEach(() => {
+    vi.unstubAllGlobals()
+    delete process.env.INSTRUMENTS_URL
+  })
+
+  it("snapshotPortfolioValue equals computeSnapshotBatch for the same day (USD lot + PLN lot, base PLN)", async () => {
+    const { db, user } = await makeHarness("agree-536")
+    const pf = await seedPortfolio(db, user.id, "PLN")
+
+    // Day-1 buys: 10 AAA @ 100 USD, 5 BBB @ 200 PLN.
+    await seedBuy(db, user.id, pf.id, "AAA", 10, 100, "2026-07-01", "USD")
+    await seedBuy(db, user.id, pf.id, "BBB", 5, 200, "2026-07-01", "PLN")
+    // AAA's STORED instrumentCurrency is a legacy "EUR" — both pipelines must
+    // ignore it: backfill reads the transaction currency, snapshot-on-read
+    // reads the quote currency (the regression the PROD TSM lot exposed).
+    await seedPosition(db, user.id, pf.id, "AAA", 10, 100, "EUR")
+    await seedPosition(db, user.id, pf.id, "BBB", 5, 200, "PLN")
+
+    const series: Record<string, { dates: string[]; closes: number[]; ccy: string }> = {
+      AAA: { dates: ["2026-07-01", "2026-07-02"], closes: [100, 110], ccy: "USD" },
+      BBB: { dates: ["2026-07-01", "2026-07-02"], closes: [200, 205], ccy: "PLN" },
+    }
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = String(input)
+        if (url.includes("/api/internal/fx-rates")) {
+          const q = new URL(url).searchParams
+          const from = (q.get("from") ?? "").toUpperCase()
+          const to = (q.get("to") ?? "PLN").toUpperCase()
+          if (from === to) return new Response(JSON.stringify({ rate: 1, asOf }), { status: 200 })
+          const rate = crossRate(from, to, { EUR: 1, ...TABLE })
+          return rate === undefined
+            ? new Response(JSON.stringify({ error: "NotFound" }), { status: 404 })
+            : new Response(JSON.stringify({ rate, asOf }), { status: 200 })
+        }
+        const sym = decodeURIComponent(url.match(/\/instruments\/([^/]+)\/price-bars/)?.[1] ?? "")
+        const data = series[sym]
+        if (!data) return new Response("nope", { status: 404 })
+        const target = new URL(url).searchParams.get("currency")?.toUpperCase() ?? null
+        const factor =
+          target && target !== data.ccy ? crossRate(data.ccy, target, { EUR: 1, ...TABLE }) ?? 1 : 1
+        return new Response(
+          JSON.stringify({
+            symbol: sym,
+            dates: data.dates,
+            closes: data.closes.map((c) => c * factor),
+            currency: target ?? data.ccy,
+            stale: false,
+          }),
+          { status: 200 },
+        )
+      }),
+    )
+
+    // Backfill as of 07-03 → the series covers through 07-02 ("yesterday").
+    const batch = await computeSnapshotBatch(db, pf.id, "Bearer t", new Date("2026-07-03T00:00:00Z"))
+    const backfillDay2 = batch.find((r) => r.snapshotDate === "2026-07-02")
+    expect(backfillDay2).toBeDefined()
+
+    // Snapshot-on-read on 07-02 from live quotes at the day-2 closes:
+    // mv is denominated in the QUOTE currency (USD / PLN), not the stored one.
+    await snapshotPortfolioValue(
+      db,
+      "Bearer t",
+      pf.id,
+      [
+        { marketValue: "1100", averageCostBasis: "100", quantity: "10", instrumentCurrency: "EUR", quoteCurrency: "USD" },
+        { marketValue: "1025", averageCostBasis: "200", quantity: "5", instrumentCurrency: "PLN", quoteCurrency: "PLN" },
+      ],
+      new Date("2026-07-02T12:00:00Z"),
+    )
+    const [snap] = await db
+      .select()
+      .from(valueSnapshots)
+      .where(
+        and(eq(valueSnapshots.portfolioId, pf.id), eq(valueSnapshots.snapshotDate, "2026-07-02")),
+      )
+
+    expect(Number(snap.value)).toBeCloseTo(Number(backfillDay2!.value), 6)
   })
 })
