@@ -13,13 +13,18 @@ import {
   valueSnapshots,
   shares,
   portfolioBackfillMetadata,
+  labels,
+  positionLabels,
+  transactionLabels,
 } from "../db/schema.js"
 import { preferredBaseCurrency } from "../services/preferences.js"
+import { nextPaletteColor } from "./labels.js"
 import { ISO_CURRENCY } from "./wallets.js"
 import type { components } from "../generated/api-types.js"
 
 type ImportWalletBootstrapResponse = components["schemas"]["ImportWalletBootstrapResponse"]
 type ImportPortfolioBootstrapResponse = components["schemas"]["ImportPortfolioBootstrapResponse"]
+type ImportLabelBootstrapResponse = components["schemas"]["ImportLabelBootstrapResponse"]
 type ImportTransactionsResponse = components["schemas"]["ImportTransactionsResponse"]
 type SyncRun = components["schemas"]["SyncRun"]
 type SyncRunsResponse = components["schemas"]["SyncRunsResponse"]
@@ -68,6 +73,10 @@ export const ImportPortfolioBootstrapRequestSchema = ExternalSourceSchema.extend
   name: z.string().min(1),
   currency: z.string().regex(ISO_CURRENCY, "currency must be an ISO 4217 code"),
   baseCurrency: z.string().regex(ISO_CURRENCY).optional(),
+}).strict()
+
+export const ImportLabelBootstrapRequestSchema = ExternalSourceSchema.extend({
+  labels: z.array(z.string().trim().min(1).max(40)).min(1).max(200),
 }).strict()
 
 const TX_TYPES = [
@@ -138,6 +147,9 @@ const ImportPortfolioTxSchema = z
     industry: z.string().nullable().optional(),
     country: z.string().nullable().optional(),
     countryCode: z.string().nullable().optional(),
+    // Sheet-derived labels (plan §55): names, resolved server-side per user.
+    positionLabels: z.array(z.string().min(1).max(40)).max(20).optional(),
+    transactionLabels: z.array(z.string().min(1).max(40)).max(20).optional(),
   })
   .strict()
 
@@ -473,6 +485,39 @@ export function createImportRoutes(db?: DB) {
     } satisfies ImportPortfolioBootstrapResponse)
   })
 
+  // §55.1 — label bootstrap: idempotent ensure-by-name per user.
+  routes.post("/labels/bootstrap", async (c) => {
+    const parsed = ImportLabelBootstrapRequestSchema.safeParse(await c.req.json().catch(() => ({})))
+    if (!parsed.success) return validationError(c, parsed)
+    const identity = c.get("userIdentity")
+    const database = getDbInstance()
+
+    const items: NonNullable<ImportLabelBootstrapResponse["labels"]> = []
+    for (const name of parsed.data.labels) {
+      const [inserted] = await database
+        .insert(labels)
+        .values({
+          userId: identity.id,
+          name,
+          color: await nextPaletteColor(database, identity.id),
+        })
+        .onConflictDoNothing({ target: [labels.userId, labels.name] })
+        .returning()
+
+      const [row] = inserted
+        ? [inserted]
+        : await database
+            .select()
+            .from(labels)
+            .where(and(eq(labels.userId, identity.id), eq(labels.name, name)))
+            .limit(1)
+
+      items.push({ name: row.name, id: row.id, created: Boolean(inserted) })
+    }
+
+    return c.json({ labels: items } satisfies ImportLabelBootstrapResponse)
+  })
+
   routes.post("/transactions", async (c) => {
     const parsed = ImportTransactionsRequestSchema.safeParse(await c.req.json().catch(() => ({})))
     if (!parsed.success) return validationError(c, parsed)
@@ -537,7 +582,6 @@ export function createImportRoutes(db?: DB) {
             affectedPortfolios.add(ptx.portfolioId)
             insertedPtx++
           }
-
           return { inserted: true }
         })
       } catch (err) {
@@ -873,6 +917,26 @@ async function insertImportPortfolioTx(
   const feesSettled = settleImportFees(ptx.fees, ptx.feesType, notional)
   const rate = ptx.exchangeRate ?? 1
 
+  // §49 convention (interactive route): a DIVIDEND's totalAmount is the NET
+  // (gross − withholding tax); the wallet leg keeps whatever the importer
+  // sent (the sheet's actual cash). taxes > gross is contradictory → row error.
+  const taxes = ptx.taxes != null ? ptx.taxes : null
+  if (ptx.type === "DIVIDEND" && taxes != null && taxes > notional) {
+    throw new ImportRowError(
+      "dividend_taxes_exceed_gross",
+      row.externalId,
+      `taxes ${taxes} exceed gross ${notional}`,)
+  }
+  const totalAmount =
+    ptx.type === "DIVIDEND" && taxes != null ? round2(notional - taxes) : round2(notional)
+
+  // §55.1: sheet-derived label names → this user's label ids; any unknown
+  // name (one the bootstrap didn't create) fails the row loudly.
+  const labelNames = [...new Set([...(ptx.positionLabels ?? []), ...(ptx.transactionLabels ?? [])])]
+  const labelIds = await resolveImportLabelIds(tx, userId, labelNames, row.externalId)
+  const positionLabelIds = (ptx.positionLabels ?? []).map((n) => labelIds.get(n)!)
+  const transactionLabelIds = (ptx.transactionLabels ?? []).map((n) => labelIds.get(n)!)
+
   let positionId: string | null = null
   let realizedGainLoss: number | null = ptx.realizedGainLoss ?? null
 
@@ -909,6 +973,23 @@ async function insertImportPortfolioTx(
     }
     positionId = res.position.id
     realizedGainLoss = res.realizedGainLoss
+  } else if (ptx.type === "DIVIDEND" && positionLabelIds.length > 0) {
+    // DIVIDEND rows don't touch the position ledger; look up the open lot
+    // only when position labels need a home. No open lot (e.g. a dividend on
+    // an already-closed position) → position labels are skipped, the row
+    // still imports (transaction labels apply regardless).
+    const [pos] = await tx
+      .select({ id: positions.id })
+      .from(positions)
+      .where(
+        and(
+          eq(positions.userId, userId),
+          eq(positions.portfolioId, ptx.portfolioId),
+          eq(positions.symbol, symbol),
+          eq(positions.isOpen, true),
+        ),
+      )
+    positionId = pos?.id ?? null
   }
 
   const [inserted] = await tx
@@ -935,13 +1016,13 @@ async function insertImportPortfolioTx(
       feeCurrency: ptx.feeCurrency?.toUpperCase() ?? null,
       taxes: ptx.taxes != null ? scale8(ptx.taxes) : null,
       feesSettled: scale8(feesSettled),
-      totalAmount: String(round2(notional)),
+      totalAmount: String(totalAmount),
       realizedGainLoss: realizedGainLoss != null ? String(realizedGainLoss) : null,
       exchangeRate: String(rate),
       rateSource: ptx.rateSource ?? "automatic",
       feeRateSource: ptx.feeRateSource ?? "automatic",
       feeExchangeRate: ptx.feeExchangeRate != null ? String(ptx.feeExchangeRate) : null,
-      convertedTotalAmount: String(round2(notional * rate)),
+      convertedTotalAmount: String(round2(totalAmount * rate)),
       convertedPrice: String(round2(ptx.price * rate)),
       convertedFees: String(round2(feesSettled * rate)),
       convertedRealizedGainLoss:
@@ -955,7 +1036,50 @@ async function insertImportPortfolioTx(
     })
     .returning()
 
+  // §55.1: additive label joins — set the entity's join rows to the
+  // requested id set within the row transaction. Wipe (§23.5) deletes the
+  // entities and the FK cascade cleans the joins, so replace semantics are
+  // idempotent across re-imports.
+  if (positionId && positionLabelIds.length > 0) {
+    await tx.delete(positionLabels).where(eq(positionLabels.positionId, positionId))
+    await tx
+      .insert(positionLabels)
+      .values(positionLabelIds.map((labelId) => ({ positionId, labelId })))
+  }
+  if (transactionLabelIds.length > 0 && inserted) {
+    await tx
+      .delete(transactionLabels)
+      .where(eq(transactionLabels.transactionId, inserted.id))
+    await tx
+      .insert(transactionLabels)
+      .values(transactionLabelIds.map((labelId) => ({ transactionId: inserted.id, labelId })))
+  }
+
   return inserted
+}
+
+/** §55.1: label names → ids for this user; unknown name → row error. */
+async function resolveImportLabelIds(
+  tx: DB,
+  userId: string,
+  names: string[],
+  rowExternalId: string,
+): Promise<Map<string, string>> {
+  if (names.length === 0) return new Map()
+  const rows = await tx
+    .select({ id: labels.id, name: labels.name })
+    .from(labels)
+    .where(and(eq(labels.userId, userId), inArray(labels.name, names)))
+  const byName = new Map(rows.map((r) => [r.name, r.id]))
+  const missing = names.filter((n) => !byName.has(n))
+  if (missing.length > 0) {
+    throw new ImportRowError(
+      "label_not_found",
+      rowExternalId,
+      `Label(s) not found for user: ${missing.join(", ")}`,
+    )
+  }
+  return byName
 }
 
 /**

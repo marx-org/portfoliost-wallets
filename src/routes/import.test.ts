@@ -1,9 +1,9 @@
 import { describe, expect, it } from "vitest"
 import { Hono } from "hono"
 import { and, eq, sql } from "drizzle-orm"
+import { makeHarness, type Harness } from "./test-utils.js"
 import { createImportRoutes } from "./import.js"
 import { createPortfolioRoutes } from "./portfolios.js"
-import { makeHarness, type Harness } from "./test-utils.js"
 import {
   wallets,
   portfolios,
@@ -14,6 +14,9 @@ import {
   valueSnapshots,
   shares,
   portfolioBackfillMetadata,
+  labels,
+  positionLabels,
+  transactionLabels,
 } from "../db/schema.js"
 
 async function boot() {
@@ -870,5 +873,219 @@ describe("POST /api/import/transactions (§23.4)", () => {
     expect(runs).toHaveLength(1)
     expect(runs[0].insertedWtx).toBe(0)
     expect(runs[0].skipped).toBe(2)
+  })
+})
+
+describe("POST /api/import/labels/bootstrap (§55.1)", () => {
+  const post = (h: Awaited<ReturnType<typeof boot>>, names: string[]) =>
+    h.app.request("/api/import/labels/bootstrap", {
+      method: "POST",
+      headers: { ...h.headers, "content-type": "application/json" },
+      body: JSON.stringify({ externalSource: "google-sheets:transakcje", labels: names }),
+    })
+
+  it("creates labels (palette-colored) and re-uses them idempotently", async () => {
+    const h = await boot()
+    const first = await (await post(h, ["OwnSAP", "Crypto"])).json()
+    expect(first.labels).toHaveLength(2)
+    for (const l of first.labels) {
+      expect(l.created).toBe(true)
+      expect(l.id).toBeTypeOf("string")
+      expect(l.name).toMatch(/^(OwnSAP|Crypto)$/)
+    }
+    const [ownsap] = first.labels.filter((l: { name: string }) => l.name === "OwnSAP")
+
+    const second = await (await post(h, ["OwnSAP", "Dividend"])).json()
+    const reuse = second.labels.find((l: { name: string }) => l.name === "OwnSAP")
+    expect(reuse.id).toBe(ownsap.id)
+    expect(reuse.created).toBe(false)
+
+    const rows = await h.db.select().from(labels)
+    expect(rows).toHaveLength(3)
+    expect(rows.every((r) => /^#[0-9a-f]{6}$/.test(r.color))).toBe(true)
+  })
+
+  it("labels are per-user: another user's bootstrap gets fresh ids", async () => {
+    const h = await boot()
+    const first = await (await post(h, ["OwnSAP"])).json()
+    const h2 = await makeHarness("user-2")
+    const app2 = new Hono().route("/api/import", createImportRoutes(h2.db))
+    const second = await (
+      await app2.request("/api/import/labels/bootstrap", {
+        method: "POST",
+        headers: { ...h2.headers, "content-type": "application/json" },
+        body: JSON.stringify({ externalSource: "x", labels: ["OwnSAP"] }),
+      })
+    ).json()
+    expect(second.labels[0].id).not.toBe(first.labels[0].id)
+  })
+
+  it("rejects an empty label list with 422", async () => {
+    const h = await boot()
+    const res = await post(h, [])
+    expect(res.status).toBe(422)
+  })
+})
+
+describe("import labels + dividend tax convention (§55.2)", () => {
+  async function bootstrapLabels(h: Harness, names: string[]) {
+    await h.app.request("/api/import/labels/bootstrap", {
+      method: "POST",
+      headers: { ...h.headers, "content-type": "application/json" },
+      body: JSON.stringify({ externalSource: "google-sheets:transakcje", labels: names }),
+    })
+  }
+
+  function divRow(portfolioId: string, over: Record<string, unknown> = {}, wtxOver: Record<string, unknown> = {}) {
+    return {
+      externalId: `div-${Math.random().toString(36).slice(2, 8)}`,
+      walletName: "IBKR",
+      executedAt: "2024-06-15T10:00:00.000Z",
+      walletTx: { type: "DIVIDEND", amount: 225.48, currency: "EUR", ...wtxOver },
+      portfolioTx: {
+        portfolioId,
+        type: "DIVIDEND",
+        instrumentSymbol: "SAP",
+        quantity: 125,
+        price: 1.81,
+        currency: "EUR",
+        ...over,
+      },
+    }
+  }
+
+  it("positionLabels + transactionLabels attach to the position and the ptx row", async () => {
+    const h = await boot()
+    const { portfolioId } = await seedWalletAndPortfolio(h)
+    await bootstrapLabels(h, ["Narzucone", "Dividend", "OwnSAP"])
+
+    const res = await postTransactions(h, [
+      buyRow(portfolioId, {
+        instrumentSymbol: "SAP",
+        positionLabels: ["Narzucone", "Dividend"],
+        transactionLabels: ["OwnSAP"],
+      }),
+    ])
+    expect((await res.json()).errors).toEqual([])
+
+    const [pos] = await h.db.select().from(positions).where(eq(positions.portfolioId, portfolioId))
+    const posLabels = await h.db.select().from(positionLabels).where(eq(positionLabels.positionId, pos.id))
+    expect(posLabels.map((r) => r.labelId).sort()).toEqual(
+      (await h.db.select({ id: labels.id, name: labels.name }).from(labels).where(eq(labels.userId, "user-1")))
+        .filter((l) => l.name === "Narzucone" || l.name === "Dividend")
+        .map((l) => l.id)
+        .sort(),
+    )
+
+    const [ptx] = await h.db
+      .select()
+      .from(portfolioTransactions)
+      .where(and(eq(portfolioTransactions.portfolioId, portfolioId), eq(portfolioTransactions.type, "BUY")))
+    const tLabels = await h.db.select().from(transactionLabels).where(eq(transactionLabels.transactionId, ptx.id))
+    expect(tLabels).toHaveLength(1)
+    const [ownsap] = await h.db.select().from(labels).where(eq(labels.name, "OwnSAP"))
+    expect(tLabels[0].labelId).toBe(ownsap.id)
+  })
+
+  it("unknown label name fails only that row with label_not_found", async () => {
+    const h = await boot()
+    const { portfolioId } = await seedWalletAndPortfolio(h)
+    await bootstrapLabels(h, ["Known"])
+
+    const res = await postTransactions(h, [
+      buyRow(portfolioId, { instrumentSymbol: "AAPL", transactionLabels: ["Known", "Ghost"] }),
+      buyRow(portfolioId, { instrumentSymbol: "MSFT", transactionLabels: ["Known"] }),
+    ])
+    const body = await res.json()
+    expect(body.inserted).toBe(1)
+    expect(body.errors.map((e: { error: string }) => e.error)).toEqual(["label_not_found"])
+    expect(body.errors[0].message).toContain("Ghost")
+
+    const msftTx = await h.db
+      .select()
+      .from(portfolioTransactions)
+      .where(eq(portfolioTransactions.instrumentSymbol, "MSFT"))
+    const joined = await h.db.select().from(transactionLabels).where(eq(transactionLabels.transactionId, msftTx[0].id))
+    expect(joined).toHaveLength(1)
+  })
+
+  it("DIVIDEND with taxes: ptx totalAmount = gross − taxes (net), wallet amount untouched", async () => {
+    const h = await boot()
+    const { portfolioId } = await seedWalletAndPortfolio(h)
+
+    // SAP 2022-05-23 shape: gross 306.25 EUR, tax 80.77 EUR, net cash 225.48
+    const res = await postTransactions(h, [
+      divRow(portfolioId, {
+        price: 306.25 / 125,
+        taxes: 80.77,
+        exchangeRate: 4.62,
+        rateSource: "manual",
+      }),
+    ])
+    const body = await res.json()
+    expect(body.errors).toEqual([])
+    expect(body.inserted).toBe(1)
+
+    const [ptx] = await h.db.select().from(portfolioTransactions).where(eq(portfolioTransactions.portfolioId, portfolioId))
+    expect(Number(ptx.taxes)).toBe(80.77)
+    expect(Number(ptx.totalAmount)).toBeCloseTo(225.48, 2) // gross − tax
+    expect(Number(ptx.convertedTotalAmount)).toBeCloseTo(225.48 * 4.62, 2)
+
+    const [wtx] = await h.db.select().from(walletTransactions)
+    expect(Number(wtx.amount)).toBe(225.48) // the sheet's net cash, as sent
+  })
+
+  it("DIVIDEND with taxes > gross fails the row with dividend_taxes_exceed_gross", async () => {
+    const h = await boot()
+    const { portfolioId } = await seedWalletAndPortfolio(h)
+
+    const res = await postTransactions(h, [divRow(portfolioId, { taxes: 999 })])
+    const body = await res.json()
+    expect(body.errors.map((e: { error: string }) => e.error)).toEqual(["dividend_taxes_exceed_gross"])
+
+    const ptxCount = await h.db.select().from(portfolioTransactions)
+    expect(ptxCount).toHaveLength(0)
+  })
+
+  it("DIVIDEND without taxes keeps totalAmount = gross (unchanged behavior)", async () => {
+    const h = await boot()
+    const { portfolioId } = await seedWalletAndPortfolio(h)
+
+    const res = await postTransactions(h, [divRow(portfolioId)])
+    expect((await res.json()).errors).toEqual([])
+
+    const [ptx] = await h.db.select().from(portfolioTransactions).where(eq(portfolioTransactions.portfolioId, portfolioId))
+    expect(ptx.taxes).toBeNull()
+    expect(Number(ptx.totalAmount)).toBeCloseTo(125 * 1.81, 2)
+  })
+
+  it("DIVIDEND with positionLabels attaches to the open lot without touching the ledger", async () => {
+    const h = await boot()
+    const { portfolioId } = await seedWalletAndPortfolio(h)
+    await bootstrapLabels(h, ["Moje IKE"])
+
+    // open lot first, then the dividend
+    const r1 = await postTransactions(h, [buyRow(portfolioId, { instrumentSymbol: "MOBR" })])
+    expect((await r1.json()).errors).toEqual([])
+
+    const r2 = await postTransactions(h, [
+      divRow(portfolioId, { instrumentSymbol: "MOBR", quantity: 10, price: 2, positionLabels: ["Moje IKE"] }, { amount: 20, currency: "PLN" }),
+    ])
+    expect((await r2.json()).errors).toEqual([])
+
+    const [pos] = await h.db.select().from(positions).where(eq(positions.portfolioId, portfolioId))
+    expect(Number(pos.quantity)).toBe(10) // untouched by the DIVIDEND row
+    const joined = await h.db.select().from(positionLabels).where(eq(positionLabels.positionId, pos.id))
+    expect(joined).toHaveLength(1)
+
+    // a dividend on a CLOSED position: row still imports, position labels skipped
+    const r3 = await postTransactions(h, [buyRow(portfolioId, { type: "SELL", instrumentSymbol: "MOBR", quantity: 10, price: 3 }, { type: "SELL", amount: 30 })])
+    expect((await r3.json()).errors).toEqual([])
+    const r4 = await postTransactions(h, [
+      divRow(portfolioId, { instrumentSymbol: "MOBR", quantity: 10, price: 1, transactionLabels: ["Moje IKE"], positionLabels: ["Moje IKE"] }, { amount: 10, currency: "PLN" }),
+    ])
+    const b4 = await r4.json()
+    expect(b4.errors).toEqual([])
+    expect(b4.inserted).toBe(1)
   })
 })
