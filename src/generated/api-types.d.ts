@@ -3476,7 +3476,7 @@ export interface components {
             portfolioName: string;
             /** Format: date-time */
             executedAt: string;
-            cashTx: components["schemas"]["ImportPortfolioCashTx"];
+            cashTx?: components["schemas"]["ImportPortfolioCashTx"];
             /** @description Omit for pure-cash events (DEPOSIT/WITHDRAWAL) */
             portfolioTx?: components["schemas"]["ImportPortfolioTx"];
         };
