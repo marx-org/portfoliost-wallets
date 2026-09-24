@@ -56,7 +56,6 @@ async function seedPortfolioAndPosition(
     .values({
       userId,
       name: "Test Portfolio",
-      currency: "USD",
       baseCurrency: "USD",
     })
     .returning()
@@ -343,7 +342,7 @@ describe("refreshQuotes (D58)", () => {
     const { db, user } = await makeHarness("q-user-4")
     const [pf] = await db
       .insert(portfolios)
-      .values({ userId: user.id, name: "P", currency: "USD", baseCurrency: "USD" })
+      .values({ userId: user.id, name: "P", baseCurrency: "USD" })
       .returning()
     await db.insert(positions).values({
       userId: user.id,
@@ -369,7 +368,7 @@ describe("snapshotPortfolioValue (H5)", () => {
     const { db, user } = await makeHarness("snap-user-1")
     const [pf] = await db
       .insert(portfolios)
-      .values({ userId: user.id, name: "Snap PF", currency: "USD", baseCurrency: "USD" })
+      .values({ userId: user.id, name: "Snap PF", baseCurrency: "USD" })
       .returning()
 
     const posRows = [
@@ -393,7 +392,7 @@ describe("snapshotPortfolioValue (H5)", () => {
     const { db, user } = await makeHarness("snap-user-2")
     const [pf] = await db
       .insert(portfolios)
-      .values({ userId: user.id, name: "Snap PF 2", currency: "USD", baseCurrency: "USD" })
+      .values({ userId: user.id, name: "Snap PF 2", baseCurrency: "USD" })
       .returning()
 
     const posRows = [
@@ -421,7 +420,7 @@ describe("snapshotPortfolioValue (H5)", () => {
     _clearQuoteCache()
     const [pf] = await db
       .insert(portfolios)
-      .values({ userId: user.id, name: "Snap PF 3", currency: "USD", baseCurrency: "USD" })
+      .values({ userId: user.id, name: "Snap PF 3", baseCurrency: "USD" })
       .returning()
     await db.insert(positions).values({
       userId: user.id,

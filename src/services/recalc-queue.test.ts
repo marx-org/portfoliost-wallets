@@ -16,7 +16,7 @@ const mockedRecalc = vi.mocked(recalcPortfolioHistory)
 async function seedPortfolio(db: Awaited<ReturnType<typeof makeHarness>>["db"], userId: string, name = "Queue PF") {
   const [pf] = await db
     .insert(portfolios)
-    .values({ userId, name, currency: "USD", baseCurrency: "USD" })
+    .values({ userId, name, baseCurrency: "USD" })
     .returning()
   return pf
 }

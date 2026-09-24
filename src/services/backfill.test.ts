@@ -40,7 +40,7 @@ async function seedPortfolio(
 ) {
   const [pf] = await db
     .insert(portfolios)
-    .values({ userId, name: "BF Test PF", currency: baseCurrency, baseCurrency })
+    .values({ userId, name: "BF Test PF", baseCurrency })
     .returning()
   return pf
 }

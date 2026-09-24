@@ -40,7 +40,7 @@ function mockPriceBars(series: Record<string, { dates: string[]; closes: number[
 async function seedPortfolio(db: DB, userId: string) {
   const [pf] = await db
     .insert(portfolios)
-    .values({ userId, name: "Recompute PF", currency: "USD", baseCurrency: "USD" })
+    .values({ userId, name: "Recompute PF", baseCurrency: "USD" })
     .returning()
   return pf
 }

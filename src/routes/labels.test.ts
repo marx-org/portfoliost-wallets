@@ -3,13 +3,9 @@ import { Hono } from "hono"
 import { createLabelRoutes } from "./labels.js"
 import { createPositionLabelRoutes } from "./position-labels.js"
 import { createTransactionLabelRoutes } from "./transaction-labels.js"
-import { createWalletTransactionLabelRoutes } from "./wallet-transaction-labels.js"
 import { createPortfolioRoutes } from "./portfolios.js"
 import { createCrossPortfolioTransactionsRoute } from "./portfolio-transactions.js"
-import { createWalletRoutes } from "./wallets.js"
-import { createMovementRoutes } from "./movements.js"
-import { createHistoryRoutes } from "./history.js"
-import { makeHarness, type Harness } from "./test-utils.js"
+import { makeHarness } from "./test-utils.js"
 
 const BUY_BODY = {
   type: "BUY",
@@ -27,15 +23,11 @@ async function boot() {
   const h = await makeHarness()
   const a = new Hono()
   // mirror production mount order (src/index.ts)
-  a.route("/api/wallets", createWalletRoutes(h.db))
-  a.route("/api/wallets", createMovementRoutes(h.db))
-  a.route("/api/wallets", createHistoryRoutes(h.db))
   a.route("/api/portfolios/transactions", createCrossPortfolioTransactionsRoute(h.db))
   a.route("/api/portfolios", createPortfolioRoutes(h.db))
   a.route("/api/labels", createLabelRoutes(h.db))
   a.route("/api/positions", createPositionLabelRoutes(h.db))
   a.route("/api/portfolios", createTransactionLabelRoutes(h.db))
-  a.route("/api/wallets", createWalletTransactionLabelRoutes(h.db))
   return { ...h, app: a }
 }
 
@@ -55,7 +47,7 @@ async function portfolio(h: Boot, name = "P") {
   const res = await h.app.request("/api/portfolios", {
     method: "POST",
     headers: { ...h.headers, "content-type": "application/json" },
-    body: JSON.stringify({ name, currency: "USD" }),
+    body: JSON.stringify({ name, baseCurrency: "USD" }),
   })
   expect(res.status).toBe(201)
   return (await res.json()) as { id: string }
@@ -70,26 +62,6 @@ async function buy(h: Boot, portfolioId: string, symbol = "AAPL") {
   expect(res.status).toBe(201)
   const body = (await res.json()) as { id: string; positionId: string | null }
   return { txId: body.id, positionId: body.positionId! }
-}
-
-async function wallet(h: Boot, currency = "USD", name = currency) {
-  const res = await h.app.request("/api/wallets", {
-    method: "POST",
-    headers: { ...h.headers, "content-type": "application/json" },
-    body: JSON.stringify({ name, currency }),
-  })
-  expect(res.status).toBe(201)
-  return (await res.json()) as { id: string }
-}
-
-async function deposit(h: Boot, walletId: string, amount = 100) {
-  const res = await h.app.request(`/api/wallets/${walletId}/deposits`, {
-    method: "POST",
-    headers: { ...h.headers, "content-type": "application/json" },
-    body: JSON.stringify({ amount }),
-  })
-  expect(res.status).toBe(201)
-  return (await res.json()).id as string
 }
 
 function setLabels(path: string, labelIds: string[]) {
@@ -182,9 +154,9 @@ describe("labels CRUD (D65, D66 palette, D24 scoping)", () => {
   it("DELETE removes label and its join rows (cascade); foreign → 404", async () => {
     const h = await boot()
     const l = await label(h, "Cascade")
-    const w = await wallet(h)
-    const txId = await deposit(h, w.id)
-    await setLabels(`/api/wallets/${w.id}/transactions/${txId}/labels`, [l.id])(h)
+    const p = await portfolio(h)
+    const { positionId } = await buy(h, p.id)
+    await setLabels(`/api/positions/${positionId}/labels`, [l.id])(h)
 
     const res = await h.app.request(`/api/labels/${l.id}`, {
       method: "DELETE",
@@ -194,11 +166,13 @@ describe("labels CRUD (D65, D66 palette, D24 scoping)", () => {
     const list = await (await h.app.request("/api/labels", { headers: h.headers })).json()
     expect(list).toEqual([])
 
-    // join rows gone → wallet history shows no labels
-    const hist = await (
-      await h.app.request(`/api/wallets/${w.id}/transactions`, { headers: h.headers })
+    // join rows gone → positions listing shows no labels
+    const lp = await portfolio(h, "P2")
+    const { positionId: p2pos } = await buy(h, lp.id)
+    const list2 = await (
+      await h.app.request(`/api/portfolios/${lp.id}/positions`, { headers: h.headers })
     ).json()
-    expect(hist.items[0].labels).toEqual([])
+    expect(list2.find((x: any) => x.id === p2pos).labels).toEqual([])
 
     const stranger = await h.app.request(`/api/labels/${l.id}`, {
       method: "DELETE",
@@ -309,36 +283,6 @@ describe("set-labels on portfolio transactions", () => {
   })
 })
 
-describe("set-labels on wallet transactions", () => {
-  it("assigns labels; they appear in wallet history and recent-transactions", async () => {
-    const h = await boot()
-    const l = await label(h, "Salary")
-    const w = await wallet(h)
-    const txId = await deposit(h, w.id, 120)
-    const res = await setLabels(`/api/wallets/${w.id}/transactions/${txId}/labels`, [l.id])(h)
-    expect(res.status).toBe(200)
-
-    const hist = await (
-      await h.app.request(`/api/wallets/${w.id}/transactions`, { headers: h.headers })
-    ).json()
-    expect(hist.items[0].labels.map((x: any) => x.name)).toEqual(["Salary"])
-
-    const recent = await (
-      await h.app.request("/api/wallets/recent-transactions?limit=50", { headers: h.headers })
-    ).json()
-    expect(recent.data[0].labels.map((x: any) => x.name)).toEqual(["Salary"])
-  })
-
-  it("foreign wallet tx → 404", async () => {
-    const h = await boot()
-    const res = await h.app.request(
-      "/api/wallets/00000000-0000-0000-0000-000000000000/transactions/00000000-0000-0000-0000-000000000000/labels",
-      { method: "POST", headers: { ...h.headers, "content-type": "application/json" }, body: JSON.stringify({ labelIds: [] }) },
-    )
-    expect(res.status).toBe(404)
-  })
-})
-
 describe("?labels= AND filter (D67)", () => {
   it("positions: entity must carry ALL requested labels", async () => {
     const h = await boot()
@@ -391,27 +335,5 @@ describe("?labels= AND filter (D67)", () => {
     expect(cross.items[0].labels[0].name).toBe("TaxLot")
   })
 
-  it("wallet transactions: wallet-scoped + recent feed", async () => {
-    const h = await boot()
-    const a = await label(h, "Biz")
-    const b = await label(h, "Home")
-    const w1 = await wallet(h, "USD", "USD W1")
-    const w2 = await wallet(h, "USD", "USD W2")
-    const d1 = await deposit(h, w1.id, 100)
-    const d2 = await deposit(h, w2.id, 50)
-    await setLabels(`/api/wallets/${w1.id}/transactions/${d1}/labels`, [a.id, b.id])(h)
-    await setLabels(`/api/wallets/${w2.id}/transactions/${d2}/labels`, [b.id])(h)
 
-    const scoped = await (
-      await h.app.request(`/api/wallets/${w1.id}/transactions?labels=${a.id}`, { headers: h.headers })
-    ).json()
-    expect(scoped.total).toBe(1)
-    expect(scoped.items[0].id).toBe(d1)
-
-    const all = await (
-      await h.app.request(`/api/wallets/recent-transactions?labels=${a.id},${b.id}`, { headers: h.headers })
-    ).json()
-    expect(all.data).toHaveLength(1)
-    expect(all.data[0].id).toBe(d1)
-  })
 })

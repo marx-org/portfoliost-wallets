@@ -19,38 +19,37 @@ function app(db: Parameters<typeof makeHarness>[0] extends string ? never : Para
 }
 
 describe("Portfolio CRUD (§15 Phase B)", () => {
-  it("POST /api/portfolios — creates with mandatory currency", async () => {
+  it("POST /api/portfolios — creates with baseCurrency", async () => {
     const h = await makeHarness()
     const a = app(h.db)
     const res = await a.request("/api/portfolios", {
       method: "POST",
       headers: h.headers,
-      body: JSON.stringify({ name: "Growth", currency: "USD" }),
+      body: JSON.stringify({ name: "Growth", baseCurrency: "USD" }),
     })
     expect(res.status).toBe(201)
     const body = await res.json()
     expect(body.name).toBe("Growth")
-    expect(body.currency).toBe("USD")
     expect(body.baseCurrency).toBe("USD")
     expect(body.strategy).toBe("GROWTH")
     expect(body.totalInvested).toBe(0)
     expect(body.id).toBeDefined()
   })
 
-  it("POST /api/portfolios — missing currency → 422", async () => {
+  it("POST /api/portfolios — invalid baseCurrency → 422", async () => {
     const h = await makeHarness()
     const a = app(h.db)
     const res = await a.request("/api/portfolios", {
       method: "POST",
       headers: h.headers,
-      body: JSON.stringify({ name: "No CCY" }),
+      body: JSON.stringify({ name: "No CCY", baseCurrency: "NOTACCY" }),
     })
     expect(res.status).toBe(422)
     const body = await res.json()
     expect(body.error).toBe("ValidationError")
   })
 
-  it("POST /api/portfolios — invalid walletId → 422", async () => {
+  it("POST /api/portfolios — removed wallet field (walletId) is ignored", async () => {
     const h = await makeHarness()
     const a = app(h.db)
     const res = await a.request("/api/portfolios", {
@@ -62,7 +61,9 @@ describe("Portfolio CRUD (§15 Phase B)", () => {
         walletId: "00000000-0000-0000-0000-000000000000",
       }),
     })
-    expect(res.status).toBe(422)
+    expect(res.status).toBe(201)
+    const body = await res.json()
+    expect(body.walletId).toBeUndefined()
   })
 
   it("GET /api/portfolios — lists only caller's portfolios", async () => {
@@ -97,7 +98,7 @@ describe("Portfolio CRUD (§15 Phase B)", () => {
     await a.request("/api/portfolios", {
       method: "POST",
       headers: h.headers,
-      body: JSON.stringify({ name: "Light", currency: "PLN" }),
+      body: JSON.stringify({ name: "Light", baseCurrency: "PLN" }),
     })
 
     const res = await a.request("/api/portfolios/light", { headers: h.headers })
@@ -105,7 +106,7 @@ describe("Portfolio CRUD (§15 Phase B)", () => {
     const body = await res.json()
     expect(body.length).toBe(1)
     expect(body[0].name).toBe("Light")
-    expect(body[0].currency).toBe("PLN")
+    expect(body[0].baseCurrency).toBe("PLN")
     expect(body[0].positionCount).toBe(0)
     expect(body[0].metrics).toBeUndefined() // light has no metrics
   })
@@ -180,7 +181,7 @@ describe("Portfolio CRUD (§15 Phase B)", () => {
     const createRes = await a.request("/api/portfolios", {
       method: "POST",
       headers: h.headers,
-      body: JSON.stringify({ name: "Old", currency: "USD" }),
+      body: JSON.stringify({ name: "Old", baseCurrency: "USD" }),
     })
     const portfolio = await createRes.json()
 
@@ -192,7 +193,7 @@ describe("Portfolio CRUD (§15 Phase B)", () => {
     expect(patchRes.status).toBe(200)
     const body = await patchRes.json()
     expect(body.name).toBe("New")
-    expect(body.currency).toBe("USD") // unchanged
+    expect(body.baseCurrency).toBe("USD") // unchanged
   })
 
   it("DELETE /api/portfolios/:id — empty portfolio → 204", async () => {
@@ -333,7 +334,7 @@ describe("GET /api/portfolios/merged (§46, §41 follow-up 1)", () => {
   ) {
     const [pf] = await h.db
       .insert(portfolios)
-      .values({ userId: h.user.id, name, currency: baseCurrency, baseCurrency })
+      .values({ userId: h.user.id, name, baseCurrency })
       .returning()
     for (const s of snapshots) {
       await h.db.insert(valueSnapshots).values({

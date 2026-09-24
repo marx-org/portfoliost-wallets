@@ -40,7 +40,7 @@ describe("instrumentsBase", () => {
 describe("getPortfolioSymbols", () => {
   it("returns distinct open symbols with company names, own portfolio only", async () => {
     const h = await makeHarness()
-    const [p] = await h.db.insert(portfolios).values({ name: "Growth", currency: "USD", userId: h.user.id }).returning()
+    const [p] = await h.db.insert(portfolios).values({ name: "Growth", userId: h.user.id }).returning()
     await h.db.insert(positions).values([
       { portfolioId: p.id, userId: h.user.id, symbol: "AAPL", companyName: "Apple Inc.", isOpen: true },
       { portfolioId: p.id, userId: h.user.id, symbol: "MSFT", isOpen: true },
@@ -58,7 +58,7 @@ describe("getPortfolioSymbols", () => {
 describe("getPortfolioCalendar", () => {
   it("fans out per symbol and returns holdings with arrays and instruments currency", async () => {
     const h = await makeHarness()
-    const [p] = await h.db.insert(portfolios).values({ name: "Growth", currency: "PLN", userId: h.user.id }).returning()
+    const [p] = await h.db.insert(portfolios).values({ name: "Growth", userId: h.user.id }).returning()
     await h.db.insert(positions).values([
       { portfolioId: p.id, userId: h.user.id, symbol: "AAPL", companyName: "Apple Inc.", isOpen: true },
       { portfolioId: p.id, userId: h.user.id, symbol: "MSFT", isOpen: true },
@@ -109,7 +109,7 @@ describe("getPortfolioCalendar", () => {
 
   it("omits a symbol whose calendar fetch fails, keeps the others", async () => {
     const h = await makeHarness()
-    const [p] = await h.db.insert(portfolios).values({ name: "Growth", currency: "PLN", userId: h.user.id }).returning()
+    const [p] = await h.db.insert(portfolios).values({ name: "Growth", userId: h.user.id }).returning()
     await h.db.insert(positions).values([
       { portfolioId: p.id, userId: h.user.id, symbol: "AAPL", isOpen: true },
       { portfolioId: p.id, userId: h.user.id, symbol: "MSFT", isOpen: true },
@@ -129,7 +129,7 @@ describe("getPortfolioCalendar", () => {
 
   it("returns no holdings and zero fetches for a portfolio with no open positions", async () => {
     const h = await makeHarness()
-    const [p] = await h.db.insert(portfolios).values({ name: "Growth", currency: "USD", userId: h.user.id }).returning()
+    const [p] = await h.db.insert(portfolios).values({ name: "Growth", userId: h.user.id }).returning()
     const fetchFn = stubFetch(() => Promise.resolve({ ok: true, json: async () => instrumentCalendar({}) }))
     const holdings = await getPortfolioCalendar(h.db, p.id, h.user.id, "Bearer x")
     expect(holdings).toEqual([])
@@ -142,7 +142,7 @@ describe("getPortfolioCalendar", () => {
       env: { ...process.env, INSTRUMENTS_URL: "", API_INSTRUMENTS_URL: "" },
     })
     const h = await makeHarness()
-    const [p] = await h.db.insert(portfolios).values({ name: "Growth", currency: "USD", userId: h.user.id }).returning()
+    const [p] = await h.db.insert(portfolios).values({ name: "Growth", userId: h.user.id }).returning()
     await h.db.insert(positions).values({ portfolioId: p.id, userId: h.user.id, symbol: "AAPL", isOpen: true })
     const fetchFn = stubFetch(() => Promise.resolve({ ok: true, json: async () => instrumentCalendar({}) }))
     const holdings = await getPortfolioCalendar(h.db, p.id, h.user.id, "Bearer x")

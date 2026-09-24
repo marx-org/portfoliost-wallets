@@ -43,7 +43,7 @@ describe("getPortfolioSymbols", () => {
     const h = await makeHarness()
     const [p] = await h.db
       .insert(portfolios)
-      .values({ name: "Growth", currency: "USD", userId: h.user.id })
+      .values({ name: "Growth", userId: h.user.id })
       .returning()
     await h.db.insert(positions).values([
       { portfolioId: p.id, userId: h.user.id, symbol: "AAPL", isOpen: true },
@@ -63,7 +63,7 @@ describe("getPortfolioNews", () => {
     const h = await makeHarness()
     const [p] = await h.db
       .insert(portfolios)
-      .values({ name: "Growth", currency: "USD", userId: h.user.id })
+      .values({ name: "Growth", userId: h.user.id })
       .returning()
     const out = await getPortfolioNews(h.db, p.id, h.user.id, "Bearer x")
     expect(out.data).toEqual([])
@@ -74,7 +74,7 @@ describe("getPortfolioNews", () => {
     const h = await makeHarness()
     const [p] = await h.db
       .insert(portfolios)
-      .values({ name: "Growth", currency: "USD", userId: h.user.id })
+      .values({ name: "Growth", userId: h.user.id })
       .returning()
     await h.db.insert(positions).values([
       { portfolioId: p.id, userId: h.user.id, symbol: "AAPL", isOpen: true },
@@ -116,7 +116,7 @@ describe("getPortfolioNews", () => {
     const h = await makeHarness()
     const [p] = await h.db
       .insert(portfolios)
-      .values({ name: "Growth", currency: "USD", userId: h.user.id })
+      .values({ name: "Growth", userId: h.user.id })
       .returning()
     await h.db.insert(positions).values({ portfolioId: p.id, userId: h.user.id, symbol: "AAPL", isOpen: true })
     vi.stubGlobal("fetch", vi.fn().mockRejectedValue(new Error("down")))

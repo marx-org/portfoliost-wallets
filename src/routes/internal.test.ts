@@ -4,7 +4,7 @@ import { eq } from "drizzle-orm"
 import { createInternalRoutes } from "./internal.js"
 import { createImportRoutes } from "./import.js"
 import { makeHarness, type Harness } from "./test-utils.js"
-import { wallets, portfolios, positions, portfolioTransactions } from "../db/schema.js"
+import { portfolios, positions, portfolioTransactions } from "../db/schema.js"
 
 async function boot() {
   const h = await makeHarness()
@@ -14,27 +14,16 @@ async function boot() {
   return { ...h, app }
 }
 
-async function seedWalletAndPortfolio(h: Harness) {
+async function seedPortfolio(h: Harness) {
   const userId = "user-1"
-  const walletId = crypto.randomUUID()
   const portfolioId = crypto.randomUUID()
-  await h.db.insert(wallets).values({
-    userId,
-    id: walletId,
-    name: "IBKR",
-    currency: "USD",
-    baseCurrency: "USD",
-    balance: "0",
-    availableBalance: "0",
-  })
   await h.db.insert(portfolios).values({
     userId,
     id: portfolioId,
     name: "Transakcje",
-    currency: "PLN",
     baseCurrency: "PLN",
   })
-  return { userId, walletId, portfolioId }
+  return { userId, portfolioId }
 }
 
 async function importBuy(
@@ -50,9 +39,8 @@ async function importBuy(
       transactions: [
         {
           externalId: `buy-${Math.random().toString(36).slice(2, 8)}`,
-          walletName: "IBKR",
+          portfolioName: "Transakcje",
           executedAt: over.rowExecutedAt ?? "2024-01-15T10:00:00.000Z",
-          walletTx: { type: "INVEST", amount: -1000, currency: "USD" },
           portfolioTx: {
             portfolioId,
             type: "BUY",
@@ -91,7 +79,7 @@ async function posOf(h: Harness, portfolioId: string) {
 describe("POST /internal/apply-split (§23.6)", () => {
   it("restates pre-split rows from frozen originals: 2x then 3x => 6x (Amazon-style cumulative)", async () => {
     const h = await boot()
-    const { portfolioId } = await seedWalletAndPortfolio(h)
+    const { portfolioId } = await seedPortfolio(h)
     await importBuy(h, portfolioId)
 
     const first = await (await applySplit(h, { symbol: "AAPL", factor: 2, effectiveDate: "2024-02-01" })).json()
@@ -123,7 +111,7 @@ describe("POST /internal/apply-split (§23.6)", () => {
 
   it("re-applying the same (symbol, effectiveDate) is a no-op (idempotent from frozen originals)", async () => {
     const h = await boot()
-    const { portfolioId } = await seedWalletAndPortfolio(h)
+    const { portfolioId } = await seedPortfolio(h)
     await importBuy(h, portfolioId)
 
     await applySplit(h, { symbol: "AAPL", factor: 2, effectiveDate: "2024-02-01" })
@@ -146,7 +134,7 @@ describe("POST /internal/apply-split (§23.6)", () => {
 
   it("a conflicting factor for the same (symbol, effectiveDate) does not overwrite the first write", async () => {
     const h = await boot()
-    const { portfolioId } = await seedWalletAndPortfolio(h)
+    const { portfolioId } = await seedPortfolio(h)
     await importBuy(h, portfolioId)
 
     await applySplit(h, { symbol: "AAPL", factor: 2, effectiveDate: "2024-02-01" })
@@ -158,7 +146,7 @@ describe("POST /internal/apply-split (§23.6)", () => {
 
   it("rows executed between splits are restated only by later splits", async () => {
     const h = await boot()
-    const { portfolioId } = await seedWalletAndPortfolio(h)
+    const { portfolioId } = await seedPortfolio(h)
     await importBuy(h, portfolioId)
     await applySplit(h, { symbol: "AAPL", factor: 2, effectiveDate: "2024-02-01" })
 
@@ -170,9 +158,8 @@ describe("POST /internal/apply-split (§23.6)", () => {
         transactions: [
           {
             externalId: "sell-1",
-            walletName: "IBKR",
+            portfolioName: "Transakcje",
             executedAt: "2024-02-15T10:00:00.000Z",
-            walletTx: { type: "SELL", amount: 275, currency: "USD" },
             portfolioTx: {
               portfolioId,
               type: "SELL",
@@ -204,7 +191,7 @@ describe("POST /internal/apply-split (§23.6)", () => {
 
   it("rows executed on or after the effective date are untouched", async () => {
     const h = await boot()
-    const { portfolioId } = await seedWalletAndPortfolio(h)
+    const { portfolioId } = await seedPortfolio(h)
     await importBuy(h, portfolioId, { rowExecutedAt: "2024-02-01T10:00:00.000Z" })
 
     const res = await (await applySplit(h, { symbol: "AAPL", factor: 2, effectiveDate: "2024-02-01" })).json()
@@ -216,27 +203,16 @@ describe("POST /internal/apply-split (§23.6)", () => {
 
   it("restates every user's rows for the symbol; other symbols and users' other positions survive", async () => {
     const h = await boot()
-    const { portfolioId } = await seedWalletAndPortfolio(h)
+    const { portfolioId } = await seedPortfolio(h)
     await importBuy(h, portfolioId)
 
-    const user2Wallet = crypto.randomUUID()
     const user2Portfolio = crypto.randomUUID()
     const user2Pos = crypto.randomUUID()
     const user2MsftPos = crypto.randomUUID()
-    await h.db.insert(wallets).values({
-      userId: "user-2",
-      id: user2Wallet,
-      name: "IBKR",
-      currency: "USD",
-      baseCurrency: "USD",
-      balance: "0",
-      availableBalance: "0",
-    })
     await h.db.insert(portfolios).values({
       userId: "user-2",
       id: user2Portfolio,
       name: "P2",
-      currency: "USD",
       baseCurrency: "USD",
     })
     for (const posId of [user2Pos, user2MsftPos]) {
@@ -304,7 +280,7 @@ describe("POST /internal/apply-split (§23.6)", () => {
 
   it("restates position current price and market value with the cumulative factor", async () => {
     const h = await boot()
-    const { portfolioId } = await seedWalletAndPortfolio(h)
+    const { portfolioId } = await seedPortfolio(h)
     await importBuy(h, portfolioId)
     const [pos] = await h.db
       .update(positions)
@@ -343,7 +319,7 @@ describe("POST /internal/apply-split (§23.6)", () => {
 
   it("requires no JWT (internal network only)", async () => {
     const h = await boot()
-    const { portfolioId } = await seedWalletAndPortfolio(h)
+    const { portfolioId } = await seedPortfolio(h)
     await importBuy(h, portfolioId)
 
     const res = await h.app.request("/internal/apply-split", {

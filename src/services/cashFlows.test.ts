@@ -7,7 +7,7 @@ import { dailyNetCashFlows } from "./cashFlows.js"
 async function seedPortfolio(db: Awaited<ReturnType<typeof makeHarness>>["db"], userId: string) {
   const [pf] = await db
     .insert(portfolios)
-    .values({ userId, name: "CF PF", currency: "USD", baseCurrency: "USD" })
+    .values({ userId, name: "CF PF", baseCurrency: "USD" })
     .returning()
   return pf
 }

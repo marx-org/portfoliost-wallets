@@ -44,11 +44,8 @@ ALTER TABLE "wallets"."wallets" DISABLE ROW LEVEL SECURITY;--> statement-breakpo
 DROP TABLE "portfolios"."wallet_transaction_labels" CASCADE;--> statement-breakpoint
 DROP TABLE "wallets"."wallet_transactions" CASCADE;--> statement-breakpoint
 DROP TABLE "wallets"."wallets" CASCADE;--> statement-breakpoint
-ALTER TABLE "portfolios"."transactions" DROP CONSTRAINT "transactions_wallet_id_wallets_id_fk";
 --> statement-breakpoint
-ALTER TABLE "portfolios"."portfolios" DROP CONSTRAINT "portfolios_wallet_id_wallets_id_fk";
 --> statement-breakpoint
-ALTER TABLE "portfolios"."positions" DROP CONSTRAINT "positions_wallet_id_wallets_id_fk";
 --> statement-breakpoint
 ALTER TABLE "portfolios"."portfolio_cash_transaction_labels" ADD CONSTRAINT "portfolio_cash_transaction_labels_cash_transaction_id_portfolio_cash_transactions_id_fk" FOREIGN KEY ("cash_transaction_id") REFERENCES "portfolios"."portfolio_cash_transactions"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "portfolios"."portfolio_cash_transaction_labels" ADD CONSTRAINT "portfolio_cash_transaction_labels_label_id_labels_id_fk" FOREIGN KEY ("label_id") REFERENCES "portfolios"."labels"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint

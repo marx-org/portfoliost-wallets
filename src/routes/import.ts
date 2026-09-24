@@ -136,7 +136,7 @@ const ImportTransactionSchema = z
     externalId: z.string().min(1),
     portfolioName: z.string().min(1),
     executedAt: z.string().min(1),
-    cashTx: ImportPortfolioCashTxSchema,
+    cashTx: ImportPortfolioCashTxSchema.optional(),
     portfolioTx: ImportPortfolioTxSchema.optional(),
   })
   .strict()
@@ -459,6 +459,7 @@ export function createImportRoutes(db?: DB) {
     const affectedPortfolios = new Set<string>()
     let insertedCashTx = 0
     let insertedPtx = 0
+    let inserted = 0
     let skipped = 0
 
     for (const row of transactions) {
@@ -479,12 +480,33 @@ export function createImportRoutes(db?: DB) {
             )
           }
 
-          const ct = await insertImportPortfolioCashTx(tx, identity.id, portfolio.id, {
-            source,
-            row,
-          })
-          if (!ct.inserted) return { inserted: false }
           affectedPortfolios.add(portfolio.id)
+
+          // Idempotency: a re-submitted row's ptx externalId already present
+          // → skip (the old design deduped on the wallet leg's unique externalId;
+          // pure-trade rows have no cash leg, so dedup on the ptx instead).
+          if (ptx) {
+            const [dupPtx] = await tx
+              .select({ id: portfolioTransactions.id })
+              .from(portfolioTransactions)
+              .where(
+                and(
+                  eq(portfolioTransactions.externalSource, source.externalSource),
+                  eq(portfolioTransactions.externalId, row.externalId),
+                ),
+              )
+              .limit(1)
+            if (dupPtx) return { inserted: false }
+          }
+
+          // AU=0 rows carry no cashTx (pure trade): skip the cash leg.
+          if (row.cashTx) {
+            const ct = await insertImportPortfolioCashTx(tx, identity.id, portfolio.id, {
+              source,
+              row,
+            })
+            if (!ct.inserted) return { inserted: false }
+          }
 
           if (ptx) {
             await insertImportPortfolioTx(tx, identity.id, {
@@ -509,8 +531,11 @@ export function createImportRoutes(db?: DB) {
         )
       }
 
-      if (outcome?.inserted) insertedCashTx++
-      else if (outcome?.inserted === false) skipped++
+      if (outcome?.inserted) {
+        inserted++
+        // count only rows that actually carried a cash leg (pure trades → 0)
+        if (row.cashTx) insertedCashTx++
+      } else if (outcome?.inserted === false) skipped++
     }
 
     for (const portfolioId of affectedPortfolios) {
@@ -518,7 +543,7 @@ export function createImportRoutes(db?: DB) {
     }
 
     const status: SyncRun["status"] =
-      insertedCashTx === 0 && insertedPtx === 0 && errors.length > 0 ? "failed" : "done"
+      inserted === 0 && insertedPtx === 0 && errors.length > 0 ? "failed" : "done"
     const now = new Date()
     const fallbackMessage = errors[0]?.message ?? "All rows failed"
     const [syncRunRow] = await database
@@ -551,7 +576,7 @@ export function createImportRoutes(db?: DB) {
       .returning()
 
     return c.json({
-      inserted: insertedCashTx,
+      inserted,
       skipped,
       errors,
       syncRun: syncRunToContract(syncRunRow),
@@ -730,6 +755,7 @@ async function insertImportPortfolioCashTx(
 ): Promise<{ inserted: boolean }> {
   const { source, row } = input
   const c = row.cashTx
+  if (!c) return { inserted: false }
   const ccy = c.currency.toUpperCase()
 
   // sign clamp (§58.3): the importer may send the sheet's signed value.

@@ -31,7 +31,7 @@ async function seedPortfolio(
 ) {
   const [pf] = await db
     .insert(portfolios)
-    .values({ userId, name: "Snap PF", currency: baseCurrency, baseCurrency })
+    .values({ userId, name: "Snap PF", baseCurrency })
     .returning()
   return pf
 }

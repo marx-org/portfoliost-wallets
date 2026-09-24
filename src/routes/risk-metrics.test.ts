@@ -15,7 +15,7 @@ function app(db: Parameters<typeof createPortfolioRoutes>[0]) {
 async function seedPortfolio(db: Awaited<ReturnType<typeof makeHarness>>["db"], userId: string) {
   const [pf] = await db
     .insert(portfolios)
-    .values({ userId, name: "Risk PF", currency: "USD", baseCurrency: "USD" })
+    .values({ userId, name: "Risk PF", baseCurrency: "USD" })
     .returning()
   return pf
 }

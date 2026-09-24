@@ -5,9 +5,8 @@ import { makeHarness, type Harness } from "./test-utils.js"
 import { createImportRoutes } from "./import.js"
 import { createPortfolioRoutes } from "./portfolios.js"
 import {
-  wallets,
   portfolios,
-  walletTransactions,
+  portfolioCashTransactions,
   portfolioTransactions,
   positions,
   syncRuns,
@@ -25,30 +24,16 @@ async function boot() {
   return { ...h, app }
 }
 
-async function seedWalletAndPortfolio(
-  h: Harness,
-  opts: { walletName?: string; walletBalance?: number } = {},
-) {
+async function seedPortfolio(h: Harness) {
   const userId = "user-1"
-  const walletId = crypto.randomUUID()
   const portfolioId = crypto.randomUUID()
-  await h.db.insert(wallets).values({
-    userId,
-    id: walletId,
-    name: opts.walletName ?? "IBKR",
-    currency: "USD",
-    baseCurrency: "USD",
-    balance: String(opts.walletBalance ?? 0),
-    availableBalance: String(opts.walletBalance ?? 0),
-  })
   await h.db.insert(portfolios).values({
     userId,
     id: portfolioId,
     name: "Transakcje",
-    currency: "PLN",
     baseCurrency: "PLN",
   })
-  return { userId, walletId, portfolioId }
+  return { userId, portfolioId }
 }
 
 function postTransactions(h: Harness, transactions: Record<string, unknown>[]) {
@@ -65,13 +50,11 @@ function postTransactions(h: Harness, transactions: Record<string, unknown>[]) {
 function buyRow(
   portfolioId: string,
   over: Record<string, unknown> = {},
-  wtxOver: Record<string, unknown> = {},
 ): Record<string, unknown> {
   return {
     externalId: `buy-${Math.random().toString(36).slice(2, 8)}`,
-    walletName: "IBKR",
+    portfolioName: "Transakcje",
     executedAt: "2024-01-15T10:00:00.000Z",
-    walletTx: { type: "INVEST", amount: -1000, currency: "USD", ...wtxOver },
     portfolioTx: {
       portfolioId,
       type: "BUY",
@@ -84,94 +67,6 @@ function buyRow(
     },
   }
 }
-
-describe("POST /api/import/wallets/bootstrap (§23.3)", () => {
-  it("creates wallets tagged with externalSource on first call (created=true)", async () => {
-    const h = await boot()
-    const res = await h.app.request("/api/import/wallets/bootstrap", {
-      method: "POST",
-      headers: { ...h.headers, "content-type": "application/json" },
-      body: JSON.stringify({
-        externalSource: "google-sheets:transakcje",
-        wallets: [
-          { name: "IBKR", currency: "usd", baseCurrency: "pln" },
-          { name: "IKE Marek", currency: "PLN" },
-        ],
-      }),
-    })
-    expect(res.status).toBe(200)
-    const body = await res.json()
-    expect(body.wallets).toEqual([
-      { id: expect.any(String), name: "IBKR", currency: "USD", baseCurrency: "PLN", created: true },
-      { id: expect.any(String), name: "IKE Marek", currency: "PLN", baseCurrency: "USD", created: true },
-    ])
-
-    const rows = await h.db
-      .select({ externalSource: wallets.externalSource, name: wallets.name })
-      .from(wallets)
-    expect(rows).toEqual([
-      { externalSource: "google-sheets:transakcje", name: "IBKR" },
-      { externalSource: "google-sheets:transakcje", name: "IKE Marek" },
-    ])
-  })
-
-  it("second call returns same ids, created=false, and does not re-tag", async () => {
-    const h = await boot()
-    const call = () =>
-      h.app.request("/api/import/wallets/bootstrap", {
-        method: "POST",
-        headers: { ...h.headers, "content-type": "application/json" },
-        body: JSON.stringify({
-          externalSource: "google-sheets:transakcje",
-          wallets: [{ name: "IBKR", currency: "USD" }],
-        }),
-      })
-
-    const first = await (await call()).json()
-    expect(first.wallets[0].created).toBe(true)
-
-    const second = await (await call()).json()
-    expect(second.wallets[0]).toMatchObject({ id: first.wallets[0].id, created: false })
-    expect(first.wallets[0].id).toBe(second.wallets[0].id)
-  })
-
-  it("never re-tags a pre-existing manual wallet with the same name", async () => {
-    const h = await boot()
-    await h.db.insert(wallets).values({ userId: "user-1", name: "IBKR", currency: "USD" })
-
-    const res = await h.app.request("/api/import/wallets/bootstrap", {
-      method: "POST",
-      headers: { ...h.headers, "content-type": "application/json" },
-      body: JSON.stringify({
-        externalSource: "google-sheets:transakcje",
-        wallets: [{ name: "IBKR", currency: "USD" }],
-      }),
-    })
-    expect(res.status).toBe(200)
-    const body = await res.json()
-    expect(body.wallets[0].created).toBe(false)
-
-    const [tagged] = await h.db
-      .select({ externalSource: wallets.externalSource })
-      .from(wallets)
-      .where(eq(wallets.name, "IBKR"))
-    expect(tagged.externalSource).toBeNull()
-  })
-
-  it("unknown fields → 422", async () => {
-    const h = await boot()
-    const res = await h.app.request("/api/import/wallets/bootstrap", {
-      method: "POST",
-      headers: { ...h.headers, "content-type": "application/json" },
-      body: JSON.stringify({
-        externalSource: "google-sheets:transakcje",
-        wallets: [{ name: "IBKR", currency: "USD", surprise: true }],
-      }),
-    })
-    expect(res.status).toBe(422)
-    expect((await res.json()).error).toBe("ValidationError")
-  })
-})
 
 describe("POST /api/import/portfolios/bootstrap (§23.3)", () => {
   it("creates a portfolio tagged with externalSource; second call is idempotent", async () => {
@@ -220,7 +115,7 @@ describe("POST /api/import/portfolios/bootstrap (§23.3)", () => {
 describe("GET /api/import/sync-runs (§23.5)", () => {
   it("lists runs for the user, most recent first, with total", async () => {
     const h = await boot()
-    const { portfolioId } = await seedWalletAndPortfolio(h)
+    const { portfolioId } = await seedPortfolio(h)
     await postTransactions(h, [buyRow(portfolioId)])
 
     const res = await h.app.request("/api/import/sync-runs", { headers: h.headers })
@@ -237,7 +132,7 @@ describe("GET /api/import/sync-runs (§23.5)", () => {
 
   it("filters by externalSource and paginates with limit/offset", async () => {
     const h = await boot()
-    const { portfolioId } = await seedWalletAndPortfolio(h)
+    const { portfolioId } = await seedPortfolio(h)
     await postTransactions(h, [buyRow(portfolioId)])
     await h.db.insert(syncRuns).values({
       userId: "user-1",
@@ -260,14 +155,14 @@ describe("GET /api/import/sync-runs (§23.5)", () => {
 describe("DELETE /api/import/sync-runs/:id (§23.5)", () => {
   it("deletes the run and returns 204; keeps imported data", async () => {
     const h = await boot()
-    const { portfolioId } = await seedWalletAndPortfolio(h)
+    const { portfolioId } = await seedPortfolio(h)
     await postTransactions(h, [buyRow(portfolioId)])
     const [run] = await h.db.select().from(syncRuns)
 
     const res = await h.app.request(`/api/import/sync-runs/${run.id}`, { method: "DELETE", headers: h.headers })
     expect(res.status).toBe(204)
     expect(await h.db.select().from(syncRuns)).toHaveLength(0)
-    expect(await h.db.select().from(walletTransactions)).toHaveLength(1)
+    expect(await h.db.select().from(portfolioTransactions)).toHaveLength(1)
   })
 
   it("returns 404 for a run owned by another user", async () => {
@@ -282,10 +177,21 @@ describe("DELETE /api/import/sync-runs/:id (§23.5)", () => {
   })
 })
 
+const ZERO_DELETED = {
+  cashTransactions: 0,
+  portfolios: 0,
+  syncRuns: 0,
+  positions: 0,
+  portfolioTransactions: 0,
+  valueSnapshots: 0,
+  shares: 0,
+  portfolioBackfillMetadata: 0,
+}
+
 describe("DELETE /api/import/source/:externalSource (§23.5)", () => {
-  it("wipes only rows tagged with the source; manual wallet/portfolio survive", async () => {
+  it("wipes only rows tagged with the source; the portfolio (not source-tagged) survives", async () => {
     const h = await boot()
-    const { walletId, portfolioId } = await seedWalletAndPortfolio(h)
+    const { portfolioId } = await seedPortfolio(h)
     await postTransactions(h, [buyRow(portfolioId)])
 
     const res = await h.app.request("/api/import/source/google-sheets%3Atransakcje", {
@@ -295,191 +201,103 @@ describe("DELETE /api/import/source/:externalSource (§23.5)", () => {
     expect(res.status).toBe(200)
     expect(await res.json()).toEqual({
       deleted: {
-        walletTransactions: 1,
-        portfolios: 0,
-        wallets: 0,
+        ...ZERO_DELETED,
         syncRuns: 1,
-        positions: 0,
-        portfolioTransactions: 0,
-        valueSnapshots: 0,
-        shares: 0,
-        portfolioBackfillMetadata: 0,
-        nulledWalletRefs: 0,
       },
     })
 
-    expect(await h.db.select().from(walletTransactions)).toHaveLength(0)
     expect(await h.db.select().from(syncRuns)).toHaveLength(0)
-    const [wallet] = await h.db.select().from(wallets).where(eq(wallets.id, walletId))
     const [portfolio] = await h.db.select().from(portfolios).where(eq(portfolios.id, portfolioId))
-    expect(wallet).toBeDefined()
     expect(portfolio).toBeDefined()
   })
 
-  it("cascades positions with the tagged portfolio; other-source rows survive; empty source → zero counts", async () => {
+  it("cascades positions with the source-tagged portfolio; a non-tagged portfolio's cash tx survive; empty source → zero counts", async () => {
     const h = await boot()
-    const { walletId, portfolioId } = await seedWalletAndPortfolio(h)
+    const { portfolioId } = await seedPortfolio(h)
     await h.db.update(portfolios).set({ externalSource: "imp:src" }).where(eq(portfolios.id, portfolioId))
     await postTransactions(h, [buyRow(portfolioId)])
-    await h.db.insert(walletTransactions).values({
+    // a SECOND, non-source-tagged portfolio holds a cash row that must survive
+    const keepPortfolioId = crypto.randomUUID()
+    await h.db.insert(portfolios).values({ userId: "user-1", id: keepPortfolioId, name: "Manual", baseCurrency: "USD" })
+    await h.db.insert(portfolioCashTransactions).values({
       userId: "user-1",
-      walletId,
-      externalSource: "imp:src",
-      externalId: "w-imp-1",
+      portfolioId: keepPortfolioId,
+      externalSource: "other:src",
+      externalId: "keep-1",
       type: "DEPOSIT",
       amount: "50",
       currency: "USD",
-      executedAt: new Date("2024-01-01T00:00:00.000Z"),
+      status: "completed",
+      transactionDate: "2024-01-01",
     })
 
     const res = await h.app.request("/api/import/source/imp%3Asrc", { method: "DELETE", headers: h.headers })
     expect(res.status).toBe(200)
     expect(await res.json()).toEqual({
-      deleted: {
-        walletTransactions: 1,
-        portfolios: 1,
-        wallets: 0,
-        syncRuns: 0,
-        positions: 1,
-        portfolioTransactions: 1,
-        valueSnapshots: 0,
-        shares: 0,
-        portfolioBackfillMetadata: 0,
-        nulledWalletRefs: 0,
-      },
+      deleted: { ...ZERO_DELETED, portfolios: 1, positions: 1, portfolioTransactions: 1 },
     })
     expect(await h.db.select().from(positions)).toHaveLength(0)
     expect(await h.db.select().from(portfolioTransactions)).toHaveLength(0)
-    const wtxs = await h.db.select().from(walletTransactions)
-    expect(wtxs).toHaveLength(1)
-    expect(wtxs[0].externalSource).toBe("google-sheets:transakcje")
+    const remainingPortfolios = await h.db.select({ id: portfolios.id }).from(portfolios)
+    expect(remainingPortfolios).toHaveLength(1)
+    expect(remainingPortfolios[0].id).toBe(keepPortfolioId)
+    const survivors = await h.db.select().from(portfolioCashTransactions)
+    expect(survivors).toHaveLength(1)
+    expect(survivors[0].externalSource).toBe("other:src")
     expect(await h.db.select().from(syncRuns)).toHaveLength(1)
 
     const empty = await (await h.app.request("/api/import/source/nobody", { method: "DELETE", headers: h.headers })).json()
-    expect(empty.deleted).toEqual({
-      walletTransactions: 0,
-      portfolios: 0,
-      wallets: 0,
-      syncRuns: 0,
-      positions: 0,
-      portfolioTransactions: 0,
-      valueSnapshots: 0,
-      shares: 0,
-      portfolioBackfillMetadata: 0,
-      nulledWalletRefs: 0,
-    })
+    expect(empty.deleted).toEqual(ZERO_DELETED)
   })
 
-  it("wipes derived data of the source portfolio and nulls non-source wallet refs", async () => {
+  it("wipes derived data of a source-tagged portfolio (snapshots/shares/backfill cascade)", async () => {
     const h = await boot()
-    const sourceWalletId = crypto.randomUUID()
     const sourcePortfolioId = crypto.randomUUID()
-    await h.db.insert(wallets).values({
-      userId: "user-1",
-      id: sourceWalletId,
-      name: "IBKR",
-      currency: "USD",
-      baseCurrency: "USD",
-      balance: "0",
-      availableBalance: "0",
-      externalSource: "imp:src",
-    })
     await h.db.insert(portfolios).values({
       userId: "user-1",
       id: sourcePortfolioId,
       name: "Transakcje",
-      currency: "PLN",
       baseCurrency: "PLN",
       externalSource: "imp:src",
-      walletId: sourceWalletId,
     })
-    await h.db.insert(positions).values({
-      userId: "user-1",
-      portfolioId: sourcePortfolioId,
-      symbol: "AAPL",
-      walletId: sourceWalletId,
-    })
+    await h.db.insert(positions).values({ userId: "user-1", portfolioId: sourcePortfolioId, symbol: "AAPL" })
     await h.db.insert(valueSnapshots).values({
       portfolioId: sourcePortfolioId,
       snapshotDate: "2024-01-15",
       value: "1000",
       invested: "1000",
     })
-    await h.db.insert(shares).values({
-      userId: "user-1",
-      portfolioId: sourcePortfolioId,
-      privacySettings: {},
-    })
-    await h.db.insert(portfolioBackfillMetadata).values({
-      portfolioId: sourcePortfolioId,
-      status: "complete",
-    })
-
-    // Non-source portfolio whose position uses the source wallet as cash leg.
-    const otherPortfolioId = crypto.randomUUID()
-    await h.db.insert(portfolios).values({
-      userId: "user-1",
-      id: otherPortfolioId,
-      name: "Manual",
-      currency: "USD",
-      baseCurrency: "USD",
-      walletId: sourceWalletId,
-    })
-    await h.db.insert(positions).values({
-      userId: "user-1",
-      portfolioId: otherPortfolioId,
-      symbol: "MSFT",
-      walletId: sourceWalletId,
-    })
+    await h.db.insert(shares).values({ userId: "user-1", portfolioId: sourcePortfolioId, privacySettings: {} })
+    await h.db.insert(portfolioBackfillMetadata).values({ portfolioId: sourcePortfolioId, status: "complete" })
 
     const res = await h.app.request("/api/import/source/imp%3Asrc", { method: "DELETE", headers: h.headers })
     expect(res.status).toBe(200)
     expect(await res.json()).toEqual({
-      deleted: {
-        walletTransactions: 0,
-        portfolios: 1,
-        wallets: 1,
-        syncRuns: 0,
-        positions: 1,
-        portfolioTransactions: 0,
-        valueSnapshots: 1,
-        shares: 1,
-        portfolioBackfillMetadata: 1,
-        nulledWalletRefs: 2,
-      },
+      deleted: { ...ZERO_DELETED, portfolios: 1, positions: 1, valueSnapshots: 1, shares: 1, portfolioBackfillMetadata: 1 },
     })
-
     expect(await h.db.select().from(valueSnapshots)).toHaveLength(0)
     expect(await h.db.select().from(shares)).toHaveLength(0)
     expect(await h.db.select().from(portfolioBackfillMetadata)).toHaveLength(0)
-    expect(await h.db.select().from(wallets)).toHaveLength(0)
-    expect(await h.db.select().from(portfolios)).toHaveLength(1)
-    const [survivor] = await h.db.select().from(positions)
-    expect(survivor.portfolioId).toBe(otherPortfolioId)
-    expect(survivor.walletId).toBeNull()
-    const [otherPortfolio] = await h.db.select().from(portfolios).where(eq(portfolios.id, otherPortfolioId))
-    expect(otherPortfolio.walletId).toBeNull()
+    expect(await h.db.select().from(portfolios)).toHaveLength(0)
   })
 })
 
 describe("POST /api/import/transactions (§23.4)", () => {
   it("BUY then SELL restates the position (avg cost, qty, realizedGainLoss)", async () => {
     const h = await boot()
-    const { portfolioId } = await seedWalletAndPortfolio(h)
+    const { portfolioId } = await seedPortfolio(h)
 
     const res = await postTransactions(h, [
       {
         externalId: "e-buy-1",
-        walletName: "IBKR",
+        portfolioName: "Transakcje",
         executedAt: "2024-01-15T10:00:00.000Z",
-        walletTx: { type: "INVEST", amount: -1000, currency: "USD" },
         portfolioTx: { portfolioId, type: "BUY", instrumentSymbol: "AAPL", quantity: 10, price: 100, currency: "USD" },
       },
       {
         externalId: "e-sell-1",
-        walletName: "IBKR",
+        portfolioName: "Transakcje",
         executedAt: "2024-02-15T10:00:00.000Z",
-        walletTx: { type: "SELL", amount: 480, currency: "USD" },
         portfolioTx: { portfolioId, type: "SELL", instrumentSymbol: "AAPL", quantity: 4, price: 120, currency: "USD" },
       },
     ])
@@ -506,14 +324,13 @@ describe("POST /api/import/transactions (§23.4)", () => {
 
   it("persists catalog sector/industry/country and keeps stored values on later buys (plan §28.5)", async () => {
     const h = await boot()
-    const { portfolioId } = await seedWalletAndPortfolio(h)
+    const { portfolioId } = await seedPortfolio(h)
 
     const res = await postTransactions(h, [
       {
         externalId: "e-buy-snt",
-        walletName: "IBKR",
+        portfolioName: "Transakcje",
         executedAt: "2024-01-15T10:00:00.000Z",
-        walletTx: { type: "INVEST", amount: -1200, currency: "PLN" },
         portfolioTx: {
           portfolioId,
           type: "BUY",
@@ -537,9 +354,8 @@ describe("POST /api/import/transactions (§23.4)", () => {
     const res2 = await postTransactions(h, [
       {
         externalId: "e-buy-snt2",
-        walletName: "IBKR",
+        portfolioName: "Transakcje",
         executedAt: "2024-02-15T10:00:00.000Z",
-        walletTx: { type: "INVEST", amount: -1200, currency: "PLN" },
         portfolioTx: { portfolioId, type: "BUY", instrumentSymbol: "SNT.WA", quantity: 10, price: 120, currency: "PLN" },
       },
     ])
@@ -551,14 +367,13 @@ describe("POST /api/import/transactions (§23.4)", () => {
 
   it("keeps the 'Other' sentinel for assets the catalog does not cover (plan §28.5)", async () => {
     const h = await boot()
-    const { portfolioId } = await seedWalletAndPortfolio(h)
+    const { portfolioId } = await seedPortfolio(h)
 
     const res = await postTransactions(h, [
       {
         externalId: "e-buy-fund",
-        walletName: "IBKR",
+        portfolioName: "Transakcje",
         executedAt: "2024-01-15T10:00:00.000Z",
-        walletTx: { type: "INVEST", amount: -100, currency: "PLN" },
         portfolioTx: { portfolioId, type: "BUY", instrumentSymbol: "GSAK.TFI", quantity: 1, price: 100, currency: "PLN" },
       },
     ])
@@ -571,14 +386,13 @@ describe("POST /api/import/transactions (§23.4)", () => {
 
   it("BUY with price=0 imports a zero-cost position (free allotment, plan §24.8)", async () => {
     const h = await boot()
-    const { portfolioId } = await seedWalletAndPortfolio(h)
+    const { portfolioId } = await seedPortfolio(h)
 
     const res = await postTransactions(h, [
       {
         externalId: "e-free-1",
-        walletName: "IBKR",
+        portfolioName: "Transakcje",
         executedAt: "2024-01-15T10:00:00.000Z",
-        walletTx: { type: "ADJUSTMENT", amount: 0, currency: "PLN" },
         portfolioTx: { portfolioId, type: "BUY", instrumentSymbol: "SYN2BIO", quantity: 21, price: 0, currency: "PLN" },
       },
     ])
@@ -595,21 +409,19 @@ describe("POST /api/import/transactions (§23.4)", () => {
 
   it("clamps a full-position sell within display-precision drift (plan §24.8)", async () => {
     const h = await boot()
-    const { portfolioId } = await seedWalletAndPortfolio(h)
+    const { portfolioId } = await seedPortfolio(h)
 
     const res = await postTransactions(h, [
       {
         externalId: "e-drift-buy",
-        walletName: "IBKR",
+        portfolioName: "Transakcje",
         executedAt: "2021-08-12T10:00:00.000Z",
-        walletTx: { type: "INVEST", amount: -591.39, currency: "PLN" },
         portfolioTx: { portfolioId, type: "BUY", instrumentSymbol: "GSEM60", quantity: 995.290673, price: 0.594, currency: "PLN" },
       },
       {
         externalId: "e-drift-sell",
-        walletName: "IBKR",
+        portfolioName: "Transakcje",
         executedAt: "2021-09-01T10:00:00.000Z",
-        walletTx: { type: "SELL", amount: 13187.6, currency: "PLN" },
         portfolioTx: { portfolioId, type: "SELL", instrumentSymbol: "GSEM60", quantity: 995.290675, price: 13.25, currency: "PLN" },
       },
     ])
@@ -624,11 +436,11 @@ describe("POST /api/import/transactions (§23.4)", () => {
 
   it("still rejects a sell exceeding the position beyond drift tolerance", async () => {
     const h = await boot()
-    const { portfolioId } = await seedWalletAndPortfolio(h)
+    const { portfolioId } = await seedPortfolio(h)
 
     const res = await postTransactions(h, [
       buyRow(portfolioId, { quantity: 1, price: 10 }),
-      buyRow(portfolioId, { type: "SELL", quantity: 1.001, price: 12 }, { type: "SELL", amount: 12.01 }),
+      buyRow(portfolioId, { type: "SELL", quantity: 1.001, price: 12 }),
     ])
     const body = await res.json()
     expect(body.errors.map((e: { error: string }) => e.error)).toEqual(["insufficient_quantity"])
@@ -636,13 +448,12 @@ describe("POST /api/import/transactions (§23.4)", () => {
 
   it("SELL + direction=SHORT opens a short option lot distinct from the same-symbol equity lot", async () => {
     const h = await boot()
-    const { portfolioId } = await seedWalletAndPortfolio(h)
+    const { portfolioId } = await seedPortfolio(h)
 
     const optRow = (id: string, price: number): Record<string, unknown> => ({
       externalId: id,
-      walletName: "IBKR",
+      portfolioName: "Transakcje",
       executedAt: "2024-03-15T10:00:00.000Z",
-      walletTx: { type: "SELL", amount: 50, currency: "USD" },
       portfolioTx: {
         portfolioId,
         type: "SELL",
@@ -689,7 +500,7 @@ describe("POST /api/import/transactions (§23.4)", () => {
 
   it("stores pre-restatement originalQuantity/originalPrice independently from restated values", async () => {
     const h = await boot()
-    const { portfolioId } = await seedWalletAndPortfolio(h)
+    const { portfolioId } = await seedPortfolio(h)
 
     const res = await postTransactions(h, [
       buyRow(portfolioId, { quantity: 10, price: 100, originalQuantity: 20, originalPrice: 50 }),
@@ -713,7 +524,7 @@ describe("POST /api/import/transactions (§23.4)", () => {
 
   it("manual BUY via the interactive route auto-sets original_quantity/original_price", async () => {
     const h = await boot()
-    const { portfolioId } = await seedWalletAndPortfolio(h)
+    const { portfolioId } = await seedPortfolio(h)
     const app = new Hono().route("/api/portfolios", createPortfolioRoutes(h.db))
 
     const res = await app.request(`/api/portfolios/${portfolioId}/transactions`, {
@@ -733,7 +544,7 @@ describe("POST /api/import/transactions (§23.4)", () => {
 
   it("re-submitting the same externalId array is a no-op (inserted=0, skipped=N)", async () => {
     const h = await boot()
-    const { portfolioId } = await seedWalletAndPortfolio(h)
+    const { portfolioId } = await seedPortfolio(h)
     const payload = [buyRow(portfolioId), { ...buyRow(portfolioId, { instrumentSymbol: "MSFT" }), externalId: "dup-2" }]
 
     const first = await (await postTransactions(h, payload)).json()
@@ -746,16 +557,16 @@ describe("POST /api/import/transactions (§23.4)", () => {
     expect(second.errors).toEqual([])
   })
 
-  it("unknown walletName collects an error while the rest of the batch succeeds", async () => {
+  it("unknown portfolioName on a cash row collects an error while the rest of the batch succeeds", async () => {
     const h = await boot()
-    const { portfolioId } = await seedWalletAndPortfolio(h)
+    const { portfolioId } = await seedPortfolio(h)
 
     const res = await postTransactions(h, [
       {
         externalId: "e-bad",
-        walletName: "NOPE",
+        portfolioName: "NOPE",
         executedAt: "2024-01-15T10:00:00.000Z",
-        walletTx: { type: "DEPOSIT", amount: 100, currency: "USD" },
+        cashTx: { type: "DEPOSIT", amount: 100, currency: "USD" },
       },
       buyRow(portfolioId),
     ])
@@ -763,13 +574,13 @@ describe("POST /api/import/transactions (§23.4)", () => {
     const body = await res.json()
     expect(body.inserted).toBe(1)
     expect(body.errors).toEqual([
-      { externalId: "e-bad", error: "wallet_not_found", message: expect.stringContaining("NOPE") },
+      { externalId: "e-bad", error: "portfolio_not_found", message: expect.stringContaining("NOPE") },
     ])
     expect(body.syncRun.status).toBe("done")
 
-    const wtxs = await h.db.select().from(walletTransactions)
-    expect(wtxs).toHaveLength(1)
-    expect(wtxs[0].externalId).not.toBe("e-bad")
+    const cashTxs = await h.db.select().from(portfolioCashTransactions)
+    expect(cashTxs).toHaveLength(0) // the cash row was not inserted
+    expect((await h.db.select().from(portfolioTransactions))).toHaveLength(1)
   })
 
   it("all rows failing marks the sync_run as failed", async () => {
@@ -777,81 +588,75 @@ describe("POST /api/import/transactions (§23.4)", () => {
     const res = await postTransactions(h, [
       {
         externalId: "e-fail",
-        walletName: "NOPE",
+        portfolioName: "NOPE",
         executedAt: "2024-01-15T10:00:00.000Z",
-        walletTx: { type: "DEPOSIT", amount: 100, currency: "USD" },
+        cashTx: { type: "DEPOSIT", amount: 100, currency: "USD" },
       },
     ])
     const body = await res.json()
     expect(body.inserted).toBe(0)
-    expect(body.errors[0].error).toBe("wallet_not_found")
+    expect(body.errors[0].error).toBe("portfolio_not_found")
     expect(body.syncRun.status).toBe("failed")
     expect(body.syncRun.error).toBeTruthy()
   })
 
-  it("DEPOSIT without portfolioTx creates a wallet row only", async () => {
+  it("a cash-only row (no portfolioTx) creates an external cash tx only", async () => {
     const h = await boot()
-    await seedWalletAndPortfolio(h)
+    const { portfolioId } = await seedPortfolio(h)
 
     const res = await postTransactions(h, [
       {
         externalId: "e-dep",
-        walletName: "IBKR",
+        portfolioName: "Transakcje",
         executedAt: "2024-01-15T10:00:00.000Z",
-        walletTx: { type: "DEPOSIT", amount: 500, currency: "USD", description: "disbursement" },
+        cashTx: { type: "DEPOSIT", amount: 500, currency: "USD", description: "disbursement" },
       },
     ])
     expect(res.status).toBe(200)
     expect((await res.json()).inserted).toBe(1)
 
-    const [wtx] = await h.db.select().from(walletTransactions)
-    expect(wtx.type).toBe("DEPOSIT")
-    expect(wtx.portfolioId).toBeNull()
+    const [c] = await h.db.select().from(portfolioCashTransactions)
+    expect(c.type).toBe("DEPOSIT")
+    expect(c.portfolioId).toBe(portfolioId)
+    expect(Number(c.amount)).toBe(500)
 
-    const ptxCount = await h.db.select().from(portfolioTransactions)
-    const posCount = await h.db.select().from(positions)
-    expect(ptxCount).toHaveLength(0)
-    expect(posCount).toHaveLength(0)
+    expect(await h.db.select().from(portfolioTransactions)).toHaveLength(0)
+    expect(await h.db.select().from(positions)).toHaveLength(0)
   })
 
-  it("recalculates wallet balance as SUM(amount) across the whole batch", async () => {
+  it("external cash balance is the sum of external rows (derived, never stored)", async () => {
     const h = await boot()
-    const { walletId } = await seedWalletAndPortfolio(h)
+    const { portfolioId } = await seedPortfolio(h)
 
     const res = await postTransactions(h, [
-      { externalId: "b1", walletName: "IBKR", executedAt: "2024-01-01T00:00:00.000Z", walletTx: { type: "DEPOSIT", amount: 500, currency: "USD" } },
-      { externalId: "b2", walletName: "IBKR", executedAt: "2024-01-02T00:00:00.000Z", walletTx: { type: "DEPOSIT", amount: 300, currency: "USD" } },
-      { externalId: "b3", walletName: "IBKR", executedAt: "2024-01-03T00:00:00.000Z", walletTx: { type: "WITHDRAWAL", amount: -100, currency: "USD" } },
+      { externalId: "b1", portfolioName: "Transakcje", executedAt: "2024-01-01T00:00:00.000Z", cashTx: { type: "DEPOSIT", amount: 500, currency: "USD" } },
+      { externalId: "b2", portfolioName: "Transakcje", executedAt: "2024-01-02T00:00:00.000Z", cashTx: { type: "DEPOSIT", amount: 300, currency: "USD" } },
+      { externalId: "b3", portfolioName: "Transakcje", executedAt: "2024-01-03T00:00:00.000Z", cashTx: { type: "WITHDRAWAL", amount: -100, currency: "USD" } },
     ])
     expect(res.status).toBe(200)
     expect((await res.json()).inserted).toBe(3)
 
-    const [wallet] = await h.db.select().from(wallets).where(eq(wallets.id, walletId))
-    expect(Number(wallet.balance)).toBe(700)
-    expect(Number(wallet.availableBalance)).toBe(700)
-
-    const [agg] = await h.db.select({ sum: sql<string>`coalesce(sum(${walletTransactions.amount}), 0)` })
-      .from(walletTransactions)
-      .where(eq(walletTransactions.walletId, walletId))
+    const [agg] = await h.db.select({ sum: sql<string>`coalesce(sum(${portfolioCashTransactions.amount}), 0)` })
+      .from(portfolioCashTransactions)
+      .where(eq(portfolioCashTransactions.portfolioId, portfolioId))
     expect(Number(agg.sum)).toBe(700)
   })
 
   it("upserts a sync_runs row with correct counters and reuses it across batches", async () => {
     const h = await boot()
-    const { portfolioId } = await seedWalletAndPortfolio(h)
+    const { portfolioId } = await seedPortfolio(h)
     const payload = [
       {
         externalId: "e-buy-1",
-        walletName: "IBKR",
+        portfolioName: "Transakcje",
         executedAt: "2024-01-15T10:00:00.000Z",
-        walletTx: { type: "INVEST", amount: -1000, currency: "USD" },
         portfolioTx: { portfolioId, type: "BUY", instrumentSymbol: "AAPL", quantity: 10, price: 100, currency: "USD" },
       },
       {
         externalId: "e-dep",
-        walletName: "IBKR",
+        portfolioName: "Transakcje",
         executedAt: "2024-01-16T10:00:00.000Z",
-        walletTx: { type: "DEPOSIT", amount: 500, currency: "USD" },
+        cashTx: { type: "DEPOSIT", amount: 500, currency: "USD" }
       },
     ]
 
@@ -861,13 +666,13 @@ describe("POST /api/import/transactions (§23.4)", () => {
       spreadsheetId: "spr-1",
       sheet: "tx",
       status: "done",
-      insertedWtx: 2,
+      insertedCashTx: 1,
       insertedPtx: 1,
       skipped: 0,
     })
 
     const second = await (await postTransactions(h, payload)).json()
-    expect(second.syncRun).toMatchObject({ insertedWtx: 0, insertedPtx: 0, skipped: 2, status: "done" })
+    expect(second.syncRun).toMatchObject({ insertedCashTx: 0, insertedPtx: 0, skipped: 2, status: "done" })
 
     const runs = await h.db.select().from(syncRuns)
     expect(runs).toHaveLength(1)
@@ -936,12 +741,11 @@ describe("import labels + dividend tax convention (§55.2)", () => {
     })
   }
 
-  function divRow(portfolioId: string, over: Record<string, unknown> = {}, wtxOver: Record<string, unknown> = {}) {
+  function divRow(portfolioId: string, over: Record<string, unknown> = {}) {
     return {
       externalId: `div-${Math.random().toString(36).slice(2, 8)}`,
-      walletName: "IBKR",
+      portfolioName: "Transakcje",
       executedAt: "2024-06-15T10:00:00.000Z",
-      walletTx: { type: "DIVIDEND", amount: 225.48, currency: "EUR", ...wtxOver },
       portfolioTx: {
         portfolioId,
         type: "DIVIDEND",
@@ -956,7 +760,7 @@ describe("import labels + dividend tax convention (§55.2)", () => {
 
   it("positionLabels + transactionLabels attach to the position and the ptx row", async () => {
     const h = await boot()
-    const { portfolioId } = await seedWalletAndPortfolio(h)
+    const { portfolioId } = await seedPortfolio(h)
     await bootstrapLabels(h, ["Narzucone", "Dividend", "OwnSAP"])
 
     const res = await postTransactions(h, [
@@ -989,7 +793,7 @@ describe("import labels + dividend tax convention (§55.2)", () => {
 
   it("unknown label name fails only that row with label_not_found", async () => {
     const h = await boot()
-    const { portfolioId } = await seedWalletAndPortfolio(h)
+    const { portfolioId } = await seedPortfolio(h)
     await bootstrapLabels(h, ["Known"])
 
     const res = await postTransactions(h, [
@@ -1009,9 +813,9 @@ describe("import labels + dividend tax convention (§55.2)", () => {
     expect(joined).toHaveLength(1)
   })
 
-  it("DIVIDEND with taxes: ptx totalAmount = gross − taxes (net), wallet amount untouched", async () => {
+  it("DIVIDEND with taxes: ptx totalAmount = gross − taxes (net)", async () => {
     const h = await boot()
-    const { portfolioId } = await seedWalletAndPortfolio(h)
+    const { portfolioId } = await seedPortfolio(h)
 
     // SAP 2022-05-23 shape: gross 306.25 EUR, tax 80.77 EUR, net cash 225.48
     const res = await postTransactions(h, [
@@ -1031,13 +835,15 @@ describe("import labels + dividend tax convention (§55.2)", () => {
     expect(Number(ptx.totalAmount)).toBeCloseTo(225.48, 2) // gross − tax
     expect(Number(ptx.convertedTotalAmount)).toBeCloseTo(225.48 * 4.62, 2)
 
-    const [wtx] = await h.db.select().from(walletTransactions)
-    expect(Number(wtx.amount)).toBe(225.48) // the sheet's net cash, as sent
+    // the net dividend cash is derived by replay (no stored cash row)
+    const { cashBalances } = await import("../services/cashLedger.js")
+    const balances = await cashBalances(h.db, null, portfolioId)
+    expect(balances.get("EUR")).toBeCloseTo(225.48, 2)
   })
 
   it("DIVIDEND with taxes > gross fails the row with dividend_taxes_exceed_gross", async () => {
     const h = await boot()
-    const { portfolioId } = await seedWalletAndPortfolio(h)
+    const { portfolioId } = await seedPortfolio(h)
 
     const res = await postTransactions(h, [divRow(portfolioId, { taxes: 999 })])
     const body = await res.json()
@@ -1049,7 +855,7 @@ describe("import labels + dividend tax convention (§55.2)", () => {
 
   it("DIVIDEND without taxes keeps totalAmount = gross (unchanged behavior)", async () => {
     const h = await boot()
-    const { portfolioId } = await seedWalletAndPortfolio(h)
+    const { portfolioId } = await seedPortfolio(h)
 
     const res = await postTransactions(h, [divRow(portfolioId)])
     expect((await res.json()).errors).toEqual([])
@@ -1061,7 +867,7 @@ describe("import labels + dividend tax convention (§55.2)", () => {
 
   it("DIVIDEND with positionLabels attaches to the open lot without touching the ledger", async () => {
     const h = await boot()
-    const { portfolioId } = await seedWalletAndPortfolio(h)
+    const { portfolioId } = await seedPortfolio(h)
     await bootstrapLabels(h, ["Moje IKE"])
 
     // open lot first, then the dividend
@@ -1069,7 +875,7 @@ describe("import labels + dividend tax convention (§55.2)", () => {
     expect((await r1.json()).errors).toEqual([])
 
     const r2 = await postTransactions(h, [
-      divRow(portfolioId, { instrumentSymbol: "MOBR", quantity: 10, price: 2, positionLabels: ["Moje IKE"] }, { amount: 20, currency: "PLN" }),
+      divRow(portfolioId, { instrumentSymbol: "MOBR", quantity: 10, price: 2, positionLabels: ["Moje IKE"] }),
     ])
     expect((await r2.json()).errors).toEqual([])
 
@@ -1079,10 +885,10 @@ describe("import labels + dividend tax convention (§55.2)", () => {
     expect(joined).toHaveLength(1)
 
     // a dividend on a CLOSED position: row still imports, position labels skipped
-    const r3 = await postTransactions(h, [buyRow(portfolioId, { type: "SELL", instrumentSymbol: "MOBR", quantity: 10, price: 3 }, { type: "SELL", amount: 30 })])
+    const r3 = await postTransactions(h, [buyRow(portfolioId, { type: "SELL", instrumentSymbol: "MOBR", quantity: 10, price: 3 })])
     expect((await r3.json()).errors).toEqual([])
     const r4 = await postTransactions(h, [
-      divRow(portfolioId, { instrumentSymbol: "MOBR", quantity: 10, price: 1, transactionLabels: ["Moje IKE"], positionLabels: ["Moje IKE"] }, { amount: 10, currency: "PLN" }),
+      divRow(portfolioId, { instrumentSymbol: "MOBR", quantity: 10, price: 1, transactionLabels: ["Moje IKE"], positionLabels: ["Moje IKE"] }),
     ])
     const b4 = await r4.json()
     expect(b4.errors).toEqual([])

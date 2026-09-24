@@ -9,8 +9,6 @@ import {
   portfolios,
   positions,
   portfolioTransactions,
-  walletTransactions,
-  wallets,
 } from "../db/schema.js"
 import { eq, sql } from "drizzle-orm"
 
@@ -501,42 +499,23 @@ describe("Portfolio transactions (§15 Phase C)", () => {
     expect(await listRes.json()).toEqual([])
   })
 
-  it("POST /:id/transactions — wallet linked BUY debits wallet", async () => {
+  it("POST /:id/transactions — BUY persists (cash effect is derived by replay, §62)", async () => {
     const h = await makeHarness()
     const a = app(h.db)
 
-    // Create wallet directly in DB
-    const [wallet] = await h.db.insert(wallets).values({
-      userId: h.user.id,
-      name: "Cash",
-      currency: "USD",
-      balance: "5000.00000000",
-      availableBalance: "5000.00000000",
-    }).returning()
-
-    // Create portfolio
     const portfolioRes = await a.request("/api/portfolios", {
       method: "POST",
       headers: h.headers,
-      body: JSON.stringify({ name: "P", currency: "USD" }),
+      body: JSON.stringify({ name: "P", baseCurrency: "USD" }),
     })
     const portfolio = await portfolioRes.json()
 
-    // Buy with wallet link
     const buyRes = await a.request(`/api/portfolios/${portfolio.id}/transactions`, {
       method: "POST",
       headers: h.headers,
-      body: JSON.stringify({ ...BUY_BODY, walletId: wallet.id }),
+      body: JSON.stringify(BUY_BODY),
     })
     expect(buyRes.status).toBe(201)
-
-    // Wallet should be debited
-    const [updatedWallet] = await h.db
-      .select()
-      .from(wallets)
-      .where(sql`${wallets.id} = ${wallet.id}`)
-    // 5000 - (10*150 + 4.99) = 5000 - 1504.99 = 3495.01
-    expect(Number(updatedWallet.balance)).toBeCloseTo(3495.01, 1)
   })
 
   it("POST /:id/transactions — foreign portfolio → 404", async () => {
@@ -1577,24 +1556,19 @@ describe("Shares CRUD (§15 Phase G3/G4)", () => {
 })
 
 describe("Portfolio dividends (§49)", () => {
-  async function portfolioWithWallet(h: Awaited<ReturnType<typeof makeHarness>>, a: ReturnType<typeof app>) {
-    const [wallet] = await h.db
-      .insert(wallets)
-      .values({ userId: "user-1", name: "Cash USD", currency: "USD" })
-      .returning()
+  async function makeTestPortfolio(h: Awaited<ReturnType<typeof makeHarness>>, a: ReturnType<typeof app>) {
     const createRes = await a.request("/api/portfolios", {
       method: "POST",
       headers: h.headers,
-      body: JSON.stringify({ name: "P", currency: "USD", walletId: wallet.id }),
+      body: JSON.stringify({ name: "P", baseCurrency: "USD" }),
     })
-    const portfolio = await createRes.json()
-    return { wallet, portfolio }
+    return await createRes.json()
   }
 
   it("DIVIDEND with tax — net totalAmount persisted, wallet credited net (§49.3)", async () => {
     const h = await makeHarness()
     const a = app(h.db)
-    const { wallet, portfolio } = await portfolioWithWallet(h, a)
+    const portfolio = await makeTestPortfolio(h, a)
 
     const res = await a.request(`/api/portfolios/${portfolio.id}/transactions`, {
       method: "POST",
@@ -1607,7 +1581,6 @@ describe("Portfolio dividends (§49)", () => {
         currency: "USD",
         taxes: 3,
         notes: "april payout",
-        walletId: wallet.id,
         executedAt: "2026-01-10T00:00:00Z",
       }),
     })
@@ -1617,20 +1590,12 @@ describe("Portfolio dividends (§49)", () => {
     expect(body.totalAmount).toBe(17) // 10×2 − 3 withholding
     expect(body.taxes).toBe(3)
     expect(body.notes).toBe("april payout")
-
-    const [w] = await h.db.select().from(wallets).where(eq(wallets.id, wallet.id))
-    expect(Number(w.balance)).toBeCloseTo(17, 6) // wallet credited the NET
-
-    const [wt] = await h.db.select().from(walletTransactions)
-    expect(Number(wt.amount)).toBeCloseTo(17, 6)
-    expect(wt.reference).toContain("PORTFOLIO_DIVIDEND_AAPL_")
-    expect(wt.currency).toBe("USD")
   })
 
   it("DIVIDEND without tax — net = gross, taxes null (§49.3)", async () => {
     const h = await makeHarness()
     const a = app(h.db)
-    const { wallet, portfolio } = await portfolioWithWallet(h, a)
+    const portfolio = await makeTestPortfolio(h, a)
 
     const res = await a.request(`/api/portfolios/${portfolio.id}/transactions`, {
       method: "POST",
@@ -1641,7 +1606,6 @@ describe("Portfolio dividends (§49)", () => {
         quantity: 5,
         price: 4,
         currency: "USD",
-        walletId: wallet.id,
         executedAt: "2026-02-10T00:00:00Z",
       }),
     })
@@ -1649,15 +1613,12 @@ describe("Portfolio dividends (§49)", () => {
     const body = await res.json()
     expect(body.totalAmount).toBe(20) // net = gross
     expect(body.taxes).toBeNull()
-
-    const [w] = await h.db.select().from(wallets).where(eq(wallets.id, wallet.id))
-    expect(Number(w.balance)).toBeCloseTo(20, 6)
   })
 
   it("DIVIDEND taxes > gross → 422 (§49.3)", async () => {
     const h = await makeHarness()
     const a = app(h.db)
-    const { portfolio } = await portfolioWithWallet(h, a)
+    const portfolio = await makeTestPortfolio(h, a)
 
     const res = await a.request(`/api/portfolios/${portfolio.id}/transactions`, {
       method: "POST",
@@ -1677,7 +1638,7 @@ describe("Portfolio dividends (§49)", () => {
   it("PATCH DIVIDEND — taxes/notes change re-derives net totalAmount + wallet delta (§49.3)", async () => {
     const h = await makeHarness()
     const a = app(h.db)
-    const { wallet, portfolio } = await portfolioWithWallet(h, a)
+    const portfolio = await makeTestPortfolio(h, a)
 
     const post = await a.request(`/api/portfolios/${portfolio.id}/transactions`, {
       method: "POST",
@@ -1689,7 +1650,6 @@ describe("Portfolio dividends (§49)", () => {
         price: 2,
         currency: "USD",
         taxes: 1,
-        walletId: wallet.id,
         executedAt: "2026-03-10T00:00:00Z",
       }),
     })
@@ -1707,12 +1667,6 @@ describe("Portfolio dividends (§49)", () => {
     expect(patched.taxes).toBe(3)
     expect(patched.notes).toBe("corrected withholding")
 
-    const [w] = await h.db.select().from(wallets).where(eq(wallets.id, wallet.id))
-    expect(Number(w.balance)).toBeCloseTo(17, 6) // 19 − 2 delta
-
-    const [wt] = await h.db.select().from(walletTransactions)
-    expect(Number(wt.amount)).toBeCloseTo(17, 6)
-
     // taxes > gross on patch → 422
     const bad = await a.request(`/api/portfolios/${portfolio.id}/transactions/${tx.id}`, {
       method: "PATCH",
@@ -1725,7 +1679,7 @@ describe("Portfolio dividends (§49)", () => {
   it("GET /:id/dividends — aggregates real DIVIDEND rows, date desc + totals (§49.3)", async () => {
     const h = await makeHarness()
     const a = app(h.db)
-    const { portfolio } = await portfolioWithWallet(h, a)
+    const portfolio = await makeTestPortfolio(h, a)
 
     const record = (body: Record<string, unknown>) =>
       a.request(`/api/portfolios/${portfolio.id}/transactions`, {
@@ -1760,7 +1714,7 @@ describe("Portfolio dividends (§49)", () => {
   it("BUY/SELL totals unchanged by §49 dividend changes (§49.3)", async () => {
     const h = await makeHarness()
     const a = app(h.db)
-    const { portfolio } = await portfolioWithWallet(h, a)
+    const portfolio = await makeTestPortfolio(h, a)
 
     await a.request(`/api/portfolios/${portfolio.id}/transactions`, {
       method: "POST",
