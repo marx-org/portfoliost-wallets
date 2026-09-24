@@ -2,17 +2,12 @@ import { Hono } from "hono"
 import { pino } from "pino"
 
 import { validateJwt } from "./auth.js"
-import { createWalletRoutes } from "./routes/wallets.js"
-import { createMovementRoutes } from "./routes/movements.js"
-import { createTransactionRoutes } from "./routes/transactions.js"
-import { createHistoryRoutes } from "./routes/history.js"
 import { createPortfolioRoutes } from "./routes/portfolios.js"
 import { createPublicShareRoutes } from "./routes/portfolios.js"
 import { createCrossPortfolioTransactionsRoute } from "./routes/portfolio-transactions.js"
 import { createLabelRoutes } from "./routes/labels.js"
 import { createPositionLabelRoutes } from "./routes/position-labels.js"
 import { createTransactionLabelRoutes } from "./routes/transaction-labels.js"
-import { createWalletTransactionLabelRoutes } from "./routes/wallet-transaction-labels.js"
 import { createImportRoutes } from "./routes/import.js"
 import { createInternalRoutes } from "./routes/internal.js"
 import { moduleMeta } from "./meta.js"
@@ -46,11 +41,6 @@ app.get("/internal/verify", validateJwt, (c) => c.body(null, 204))
 app.route("/internal", createInternalRoutes())
 
 const api = new Hono()
-const walletsApi = createWalletRoutes()
-api.route("/wallets", walletsApi)
-api.route("/wallets", createMovementRoutes())
-api.route("/wallets/transactions", createTransactionRoutes())
-api.route("/wallets", createHistoryRoutes())
 
 // §15 — portfolio management (D53–D64)
 // D2: cross-portfolio transaction feed (must be mounted before portfolio routes to avoid /:id collision)
@@ -63,9 +53,8 @@ api.route("/portfolios/public", createPublicShareRoutes())
 api.route("/labels", createLabelRoutes())
 api.route("/positions", createPositionLabelRoutes())
 api.route("/portfolios", createTransactionLabelRoutes())
-api.route("/wallets", createWalletTransactionLabelRoutes())
 
-// §23 — import API (wallets/portfolios bootstrap, later: transactions, sync-runs, wipe)
+// §23 — import API (portfolios/labels bootstrap, transactions, sync-runs, wipe)
 api.route("/import", createImportRoutes())
 
 app.route("/api", api)

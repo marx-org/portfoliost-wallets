@@ -4,9 +4,9 @@ import { z } from "zod"
 import { userIdentityMiddleware } from "../auth.js"
 import { getDb, type DB } from "../db/index.js"
 import {
-  wallets,
   portfolios,
-  walletTransactions,
+  portfolioCashTransactions,
+  portfolioCashTransactionLabels,
   portfolioTransactions,
   positions,
   syncRuns,
@@ -19,10 +19,9 @@ import {
 } from "../db/schema.js"
 import { preferredBaseCurrency } from "../services/preferences.js"
 import { nextPaletteColor } from "./labels.js"
-import { ISO_CURRENCY } from "./wallets.js"
+import { ISO_CURRENCY } from "../services/currency.js"
 import type { components } from "../generated/api-types.js"
 
-type ImportWalletBootstrapResponse = components["schemas"]["ImportWalletBootstrapResponse"]
 type ImportPortfolioBootstrapResponse = components["schemas"]["ImportPortfolioBootstrapResponse"]
 type ImportLabelBootstrapResponse = components["schemas"]["ImportLabelBootstrapResponse"]
 type ImportTransactionsResponse = components["schemas"]["ImportTransactionsResponse"]
@@ -57,18 +56,6 @@ class ImportRowError extends Error {
 
 const ExternalSourceSchema = z.object({ externalSource: z.string().min(1) })
 
-const ImportWalletSchema = z
-  .object({
-    name: z.string().min(1),
-    currency: z.string().regex(ISO_CURRENCY, "currency must be an ISO 4217 code"),
-    baseCurrency: z.string().regex(ISO_CURRENCY).optional(),
-  })
-  .strict()
-
-export const ImportWalletBootstrapRequestSchema = ExternalSourceSchema.extend({
-  wallets: z.array(ImportWalletSchema).min(1),
-}).strict()
-
 export const ImportPortfolioBootstrapRequestSchema = ExternalSourceSchema.extend({
   name: z.string().min(1),
   currency: z.string().regex(ISO_CURRENCY, "currency must be an ISO 4217 code"),
@@ -79,21 +66,11 @@ export const ImportLabelBootstrapRequestSchema = ExternalSourceSchema.extend({
   labels: z.array(z.string().trim().min(1).max(40)).min(1).max(200),
 }).strict()
 
-const TX_TYPES = [
-  "DEPOSIT",
-  "WITHDRAWAL",
-  "TRANSFER",
-  "INVEST",
-  "SELL",
-  "DIVIDEND",
-  "FEE",
-  "INTEREST",
-  "ADJUSTMENT",
-] as const
+const CASH_TX_TYPES = ["DEPOSIT", "WITHDRAWAL", "TRANSFER"] as const
 
-const ImportWalletTxSchema = z
+const ImportPortfolioCashTxSchema = z
   .object({
-    type: z.enum(TX_TYPES),
+    type: z.enum(CASH_TX_TYPES),
     amount: z.number(),
     currency: z.string().regex(ISO_CURRENCY, "currency must be an ISO 4217 code"),
     description: z.string().nullable().optional(),
@@ -102,9 +79,10 @@ const ImportWalletTxSchema = z
     paymentMethod: z.string().nullable().optional(),
     fees: z.number().nonnegative().nullable().optional(),
     feesType: z.enum(["fixed", "pct"]).nullable().optional(),
-    taxes: z.number().nullable().optional(),
     reference: z.string().nullable().optional(),
-    portfolioId: z.string().uuid().nullable().optional(),
+    toPortfolioName: z.string().nullable().optional(),
+    targetAmount: z.number().nullable().optional(),
+    labels: z.array(z.string().min(1).max(40)).max(20).optional(),
     exchangeRate: z.number().positive().nullable().optional(),
     rateSource: z.enum(["automatic", "manual"]).nullable().optional(),
     feeCurrency: z.string().regex(ISO_CURRENCY, "currency must be an ISO 4217 code").nullable().optional(),
@@ -156,9 +134,9 @@ const ImportPortfolioTxSchema = z
 const ImportTransactionSchema = z
   .object({
     externalId: z.string().min(1),
-    walletName: z.string().min(1),
+    portfolioName: z.string().min(1),
     executedAt: z.string().min(1),
-    walletTx: ImportWalletTxSchema,
+    cashTx: ImportPortfolioCashTxSchema,
     portfolioTx: ImportPortfolioTxSchema.optional(),
   })
   .strict()
@@ -374,7 +352,7 @@ function syncRunToContract(r: typeof syncRuns.$inferSelect): SyncRun {
     startedAt: r.startedAt ? r.startedAt.toISOString() : null,
     completedAt: r.completedAt ? r.completedAt.toISOString() : null,
     error: r.error ?? null,
-    insertedWtx: r.insertedWtx,
+    insertedCashTx: r.insertedWtx,
     insertedPtx: r.insertedPtx,
     skipped: r.skipped,
   }
@@ -391,55 +369,6 @@ export function createImportRoutes(db?: DB) {
   routes.use("*", userIdentityMiddleware)
 
   const getDbInstance = () => db ?? getDb()
-
-  routes.post("/wallets/bootstrap", async (c) => {
-    const parsed = ImportWalletBootstrapRequestSchema.safeParse(
-      await c.req.json().catch(() => ({})))
-    if (!parsed.success) return validationError(c, parsed)
-    const identity = c.get("userIdentity")
-    const database = getDbInstance()
-
-    const forwardedHeaders: Record<string, string> = {}
-    for (const k of ["authorization", "x-user-id", "x-user-email"]) {
-      const v = c.req.header(k)
-      if (v) forwardedHeaders[k] = v
-    }
-    const defaultBase = await preferredBaseCurrency(forwardedHeaders)
-
-    const items: NonNullable<ImportWalletBootstrapResponse["wallets"]> = []
-    for (const w of parsed.data.wallets) {
-      const baseCurrency = (w.baseCurrency ?? defaultBase).toUpperCase()
-      const [inserted] = await database
-        .insert(wallets)
-        .values({
-          userId: identity.id,
-          name: w.name,
-          currency: w.currency.toUpperCase(),
-          baseCurrency,
-          externalSource: parsed.data.externalSource,
-        })
-        .onConflictDoNothing({ target: [wallets.userId, wallets.name] })
-        .returning()
-
-      const [row] = inserted
-        ? [inserted]
-        : await database
-            .select()
-            .from(wallets)
-            .where(and(eq(wallets.userId, identity.id), eq(wallets.name, w.name)))
-            .limit(1)
-
-      items.push({
-        id: row.id,
-        name: row.name,
-        currency: row.currency,
-        baseCurrency: row.baseCurrency,
-        created: Boolean(inserted),
-      })
-    }
-
-    return c.json({ wallets: items } satisfies ImportWalletBootstrapResponse)
-  })
 
   routes.post("/portfolios/bootstrap", async (c) => {
     const parsed = ImportPortfolioBootstrapRequestSchema.safeParse(
@@ -461,7 +390,6 @@ export function createImportRoutes(db?: DB) {
       .values({
         userId: identity.id,
         name: parsed.data.name,
-        currency: parsed.data.currency.toUpperCase(),
         baseCurrency,
         externalSource: parsed.data.externalSource,
       })
@@ -479,7 +407,9 @@ export function createImportRoutes(db?: DB) {
     return c.json({
       id: row.id,
       name: row.name,
-      currency: row.currency,
+      // §62: portfolio.currency is dropped; the contract still exposes a
+      // single-currency field — report the (sole) base currency.
+      currency: row.baseCurrency,
       baseCurrency: row.baseCurrency,
       created: Boolean(inserted),
     } satisfies ImportPortfolioBootstrapResponse)
@@ -526,9 +456,8 @@ export function createImportRoutes(db?: DB) {
 
     const { source, transactions } = parsed.data
     const errors: NonNullable<ImportTransactionsResponse["errors"]> = []
-    const affectedWallets = new Set<string>()
     const affectedPortfolios = new Set<string>()
-    let insertedWtx = 0
+    let insertedCashTx = 0
     let insertedPtx = 0
     let skipped = 0
 
@@ -536,48 +465,32 @@ export function createImportRoutes(db?: DB) {
       let outcome: { inserted: boolean } | null = null
       try {
         outcome = await database.transaction(async (tx) => {
-          const wallet = await resolveWallet(tx, identity.id, row.walletName)
-          if (!wallet) {
+          // The row's source portfolio: the ptx's id, or resolved by name via
+          // uq_portfolios_user_name (bootstrapped earlier in the batch run).
+          const ptx = row.portfolioTx
+          const portfolio = ptx
+            ? await portfolioOwnedById(tx, identity.id, ptx.portfolioId)
+            : await resolvePortfolioByName(tx, identity.id, row.portfolioName)
+          if (!portfolio) {
             throw new ImportRowError(
-              "wallet_not_found",
+              "portfolio_not_found",
               row.externalId,
-              `Unknown wallet "${row.walletName}"`,
+              `Unknown portfolio "${ptx ? ptx.portfolioId : row.portfolioName}"`,
             )
           }
 
-          const ptx = row.portfolioTx
-          if (ptx) {
-            const owned = await portfolioOwnedBy(tx, identity.id, ptx.portfolioId)
-            if (!owned) {
-              throw new ImportRowError(
-                "portfolio_not_found",
-                row.externalId,
-                `Portfolio ${ptx.portfolioId} not found for user`,
-              )
-            }
-          }
-
-          const wt = row.walletTx
-          const executedAt = new Date(row.executedAt)
-          if (Number.isNaN(executedAt.getTime())) {
-            throw new ImportRowError("invalid_executed_at", row.externalId, "executedAt is not a valid date")
-          }
-
-          const wtx = await insertImportWalletTx(tx, identity.id, wallet.id, {
+          const ct = await insertImportPortfolioCashTx(tx, identity.id, portfolio.id, {
             source,
             row,
-            ptx,
           })
-
-          if (!wtx.inserted) return { inserted: false }
-          affectedWallets.add(wallet.id)
+          if (!ct.inserted) return { inserted: false }
+          affectedPortfolios.add(portfolio.id)
 
           if (ptx) {
-            await insertImportPortfolioTx(tx, identity.id, wallet.id, {
+            await insertImportPortfolioTx(tx, identity.id, {
               source,
               row,
               ptx,
-              executedAt,
             })
             affectedPortfolios.add(ptx.portfolioId)
             insertedPtx++
@@ -596,17 +509,16 @@ export function createImportRoutes(db?: DB) {
         )
       }
 
-      if (outcome?.inserted) insertedWtx++
+      if (outcome?.inserted) insertedCashTx++
       else if (outcome?.inserted === false) skipped++
     }
 
-    await recalcWalletBalances(database, affectedWallets)
     for (const portfolioId of affectedPortfolios) {
       await recomputeImportPortfolioTotals(database, identity.id, portfolioId)
     }
 
     const status: SyncRun["status"] =
-      insertedWtx === 0 && errors.length > 0 ? "failed" : "done"
+      insertedCashTx === 0 && insertedPtx === 0 && errors.length > 0 ? "failed" : "done"
     const now = new Date()
     const fallbackMessage = errors[0]?.message ?? "All rows failed"
     const [syncRunRow] = await database
@@ -620,7 +532,7 @@ export function createImportRoutes(db?: DB) {
         startedAt: now,
         completedAt: now,
         error: status === "failed" ? fallbackMessage : null,
-        insertedWtx,
+        insertedWtx: insertedCashTx,
         insertedPtx,
         skipped,
       })
@@ -631,7 +543,7 @@ export function createImportRoutes(db?: DB) {
           startedAt: now,
           completedAt: now,
           error: status === "failed" ? fallbackMessage : null,
-          insertedWtx,
+          insertedWtx: insertedCashTx,
           insertedPtx,
           skipped,
         },
@@ -639,7 +551,7 @@ export function createImportRoutes(db?: DB) {
       .returning()
 
     return c.json({
-      inserted: insertedWtx,
+      inserted: insertedCashTx,
       skipped,
       errors,
       syncRun: syncRunToContract(syncRunRow),
@@ -698,9 +610,9 @@ export function createImportRoutes(db?: DB) {
 
   // DELETE /import/source/{externalSource} — wipe all data tagged with this
   // external source for the authenticated user, in one transaction. Derived
-  // data (positions, ledger, value snapshots, shares, backfill metadata) is
-  // deleted explicitly so the wipe leaves the DB clean, and lingering wallet
-  // refs from NON-source rows are nulled so the source wallets can be deleted.
+  // data (positions, portfolio transactions, value snapshots, shares, backfill
+  // metadata) is deleted explicitly so the wipe leaves the DB clean; cash
+  // transactions are deleted by source tag (their labels cascade).
   // split_events is global and never touched.
   routes.delete("/source/:externalSource", async (c) => {
     const identity = c.get("userIdentity")
@@ -708,18 +620,11 @@ export function createImportRoutes(db?: DB) {
     const database = getDbInstance()
     const externalSource = c.req.param("externalSource")
     const deleted = await database.transaction(async (tx) => {
-      const [sourcePortfolios, sourceWallets] = await Promise.all([
-        tx
-          .select({ id: portfolios.id })
-          .from(portfolios)
-          .where(and(eq(portfolios.externalSource, externalSource), eq(portfolios.userId, identity.id))),
-        tx
-          .select({ id: wallets.id })
-          .from(wallets)
-          .where(and(eq(wallets.externalSource, externalSource), eq(wallets.userId, identity.id))),
-      ])
+      const sourcePortfolios = await tx
+        .select({ id: portfolios.id })
+        .from(portfolios)
+        .where(and(eq(portfolios.externalSource, externalSource), eq(portfolios.userId, identity.id)))
       const sourcePortfolioIds = sourcePortfolios.map((row) => row.id)
-      const sourceWalletIds = sourceWallets.map((row) => row.id)
 
       // Derived data scoped to source portfolios. ptx before positions (the
       // ptx→position FK is NO ACTION). Empty id lists → inArray renders false.
@@ -749,69 +654,19 @@ export function createImportRoutes(db?: DB) {
         .where(inArray(portfolioBackfillMetadata.portfolioId, sourcePortfolioIds))
         .returning({ portfolioId: portfolioBackfillMetadata.portfolioId })
 
-      const walletTransactionsRows = await tx
-        .delete(walletTransactions)
+      // Portfolio cash transactions tagged with this source (both transfer
+      // legs carry the tag; labels cascade via the FK).
+      const cashTransactionsRows = await tx
+        .delete(portfolioCashTransactions)
         .where(
-          and(eq(walletTransactions.externalSource, externalSource), eq(walletTransactions.userId, identity.id)),
+          and(eq(portfolioCashTransactions.externalSource, externalSource), eq(portfolioCashTransactions.userId, identity.id)),
         )
-        .returning({ id: walletTransactions.id })
-
-      // Null lingering refs to source wallets from NON-source rows (source rows
-      // are already gone) — the wallet_id/to_wallet_id FKs are NO ACTION, so
-      // the source wallets cannot be deleted while these point at them.
-      let nulledWalletRefs = 0
-      if (sourceWalletIds.length > 0) {
-        nulledWalletRefs += (
-          await tx
-            .update(positions)
-            .set({ walletId: null })
-            .where(
-              and(
-                inArray(positions.walletId, sourceWalletIds),
-                notInArray(positions.portfolioId, sourcePortfolioIds),
-              ),
-            )
-            .returning({ id: positions.id })
-        ).length
-        nulledWalletRefs += (
-          await tx
-            .update(portfolioTransactions)
-            .set({ walletId: null })
-            .where(
-              and(
-                inArray(portfolioTransactions.walletId, sourceWalletIds),
-                notInArray(portfolioTransactions.portfolioId, sourcePortfolioIds),
-              ),
-            )
-            .returning({ id: portfolioTransactions.id })
-        ).length
-        nulledWalletRefs += (
-          await tx
-            .update(walletTransactions)
-            .set({ toWalletId: null })
-            .where(inArray(walletTransactions.toWalletId, sourceWalletIds))
-            .returning({ id: walletTransactions.id })
-        ).length
-        nulledWalletRefs += (
-          await tx
-            .update(portfolios)
-            .set({ walletId: null })
-            .where(
-              and(inArray(portfolios.walletId, sourceWalletIds), notInArray(portfolios.id, sourcePortfolioIds)),
-            )
-            .returning({ id: portfolios.id })
-        ).length
-      }
+        .returning({ id: portfolioCashTransactions.id })
 
       const portfoliosRows = await tx
         .delete(portfolios)
         .where(and(eq(portfolios.externalSource, externalSource), eq(portfolios.userId, identity.id)))
         .returning({ id: portfolios.id })
-
-      const walletsRows = await tx
-        .delete(wallets)
-        .where(and(eq(wallets.externalSource, externalSource), eq(wallets.userId, identity.id)))
-        .returning({ id: wallets.id })
 
       const syncRunsRows = await tx
         .delete(syncRuns)
@@ -819,16 +674,14 @@ export function createImportRoutes(db?: DB) {
         .returning({ id: syncRuns.id })
 
       return {
-        walletTransactions: walletTransactionsRows.length,
+        cashTransactions: cashTransactionsRows.length,
         portfolios: portfoliosRows.length,
-        wallets: walletsRows.length,
         syncRuns: syncRunsRows.length,
         positions: positionsRows.length,
         portfolioTransactions: portfolioTransactionsRows.length,
         valueSnapshots: valueSnapshotsRows.length,
         shares: sharesRows.length,
         portfolioBackfillMetadata: portfolioBackfillMetadataRows.length,
-        nulledWalletRefs,
       }
     })
     return c.json({ deleted } satisfies SourceWipeResponse)
@@ -838,79 +691,177 @@ export function createImportRoutes(db?: DB) {
   return routes
 }
 
-async function resolveWallet(tx: DB, userId: string, name: string) {
-  const [wallet] = await tx
-    .select()
-    .from(wallets)
-    .where(and(eq(wallets.userId, userId), eq(wallets.name, name)))
+async function resolvePortfolioByName(tx: DB, userId: string, name: string) {
+  const [portfolio] = await tx
+    .select({ id: portfolios.id, baseCurrency: portfolios.baseCurrency })
+    .from(portfolios)
+    .where(and(eq(portfolios.userId, userId), eq(portfolios.name, name)))
     .limit(1)
-  return wallet
+  return portfolio
 }
 
-async function portfolioOwnedBy(tx: DB, userId: string, portfolioId: string) {
+async function portfolioOwnedById(tx: DB, userId: string, portfolioId: string) {
   const [portfolio] = await tx
-    .select({ id: portfolios.id })
+    .select({ id: portfolios.id, baseCurrency: portfolios.baseCurrency })
     .from(portfolios)
     .where(and(eq(portfolios.id, portfolioId), eq(portfolios.userId, userId)))
     .limit(1)
-  return Boolean(portfolio)
+  return portfolio
 }
 
-async function insertImportWalletTx(
+/**
+ * Imported portfolio cash leg (§62, plan 62.5). The stored amount is the
+ * row's SIGNED own-currency effect: DEPOSIT +|amount|, WITHDRAWAL −|amount|
+ * (sign clamp, §58.3), TRANSFER as sent. A TRANSFER resolves
+ * `toPortfolioName` (must exist, ≠ source) and inserts the paired
+ * counterpart leg with `linkedTxId` both ways (`#t` externalId suffix for
+ * the server-created credit leg); `targetAmount` is server-computed
+ * (same-ccy = −amount, cross = amount × exchangeRate). `labels` names are
+ * bootstrapped + attached (unknown name → row error).
+ */
+async function insertImportPortfolioCashTx(
   tx: DB,
   userId: string,
-  walletId: string,
+  portfolioId: string,
   input: {
     source: { externalSource: string }
     row: z.infer<typeof ImportTransactionSchema>
-    ptx?: z.infer<typeof ImportPortfolioTxSchema>
   },
-) {
-  const { source, row, ptx } = input
-  const wt = row.walletTx
-  const [inserted] = await tx
-    .insert(walletTransactions)
+): Promise<{ inserted: boolean }> {
+  const { source, row } = input
+  const c = row.cashTx
+  const ccy = c.currency.toUpperCase()
+
+  // sign clamp (§58.3): the importer may send the sheet's signed value.
+  const amount =
+    c.type === "DEPOSIT"
+      ? Math.abs(c.amount)
+      : c.type === "WITHDRAWAL"
+        ? -Math.abs(c.amount)
+        : c.amount
+
+  // labels → ids (unknown name → row error, §58.3)
+  const labelIds = await resolveImportLabelIds(tx, userId, c.labels ?? [], row.externalId)
+
+  const baseRow = {
+    userId,
+    type: c.type,
+    currency: ccy,
+    status: c.status ?? "completed",
+    description: c.description ?? null,
+    transactionDate: c.transactionDate ?? null,
+    paymentMethod: c.paymentMethod ?? null,
+    fees: c.fees != null ? scale8(c.fees) : null,
+    feesType: c.feesType ?? null,
+    feeCurrency: c.feeCurrency?.toUpperCase() ?? null,
+    exchangeRate: c.exchangeRate != null ? String(c.exchangeRate) : null,
+    rateSource: c.rateSource ?? "automatic",
+    feeRateSource: c.feeRateSource ?? "automatic",
+    feeExchangeRate: c.feeExchangeRate != null ? String(c.feeExchangeRate) : null,
+    reference: c.reference ?? null,
+    externalSource: source.externalSource,
+  }
+
+  if (c.type !== "TRANSFER") {
+    const [inserted] = await tx
+      .insert(portfolioCashTransactions)
+      .values({
+        ...baseRow,
+        portfolioId,
+        amount: scale8(amount),
+        externalId: row.externalId,
+      })
+      .onConflictDoNothing()
+      .returning()
+    if (inserted && labelIds.size > 0) {
+      await tx
+        .insert(portfolioCashTransactionLabels)
+        .values(
+          [...labelIds.values()].map((labelId) => ({ cashTransactionId: inserted.id, labelId })),
+        )
+    }
+    return { inserted: Boolean(inserted) }
+  }
+
+  // TRANSFER — resolve the target portfolio (must exist, ≠ source)
+  const toName = (c.toPortfolioName ?? "").trim()
+  if (!toName) {
+    throw new ImportRowError(
+      "transfer_target_missing",
+      row.externalId,
+      "TRANSFER requires toPortfolioName",
+    )
+  }
+  const to = await resolvePortfolioByName(tx, userId, toName)
+  if (!to) {
+    throw new ImportRowError(
+      "transfer_target_not_found",
+      row.externalId,
+      `Unknown transfer target "${toName}"`,
+    )
+  }
+  if (to.id === portfolioId) {
+    throw new ImportRowError(
+      "transfer_to_self",
+      row.externalId,
+      "Transfer target must differ from the source portfolio",
+    )
+  }
+
+  // server-computed target leg (same-ccy = −amount, cross = amount × rate);
+  // target currency = the row's currency (both legs store it, §62).
+  const rate = c.exchangeRate ?? 1
+  const targetAmount =
+    c.targetAmount != null ? c.targetAmount : rate === 1 ? -amount : -(Math.abs(amount) * rate)
+
+  const [debit] = await tx
+    .insert(portfolioCashTransactions)
     .values({
-      userId,
-      walletId,
-      type: wt.type,
-      amount: scale8(wt.amount),
-      currency: wt.currency.toUpperCase(),
-      status: wt.status ?? "completed",
-      description: wt.description ?? null,
-      transactionDate: wt.transactionDate ?? null,
-      executedAt: new Date(row.executedAt),
-      paymentMethod: wt.paymentMethod ?? null,
-      fees: wt.fees != null ? scale8(wt.fees) : null,
-      feesType: wt.feesType ?? null,
-      feeCurrency: wt.feeCurrency?.toUpperCase() ?? null,
-      taxes: wt.taxes != null ? scale8(wt.taxes) : null,
-      reference: wt.reference ?? null,
-      portfolioId: ptx ? ptx.portfolioId : wt.portfolioId ?? null,
-      exchangeRate: wt.exchangeRate != null ? String(wt.exchangeRate) : null,
-      rateSource: wt.rateSource ?? "automatic",
-      feeRateSource: wt.feeRateSource ?? "automatic",
-      feeExchangeRate: wt.feeExchangeRate != null ? String(wt.feeExchangeRate) : null,
-      externalSource: source.externalSource,
+      ...baseRow,
+      portfolioId,
+      toPortfolioId: to.id,
+      amount: scale8(amount),
+      transferFxRate: rate != null && rate !== 1 ? String(rate) : null,
+      targetAmount: scale8(targetAmount),
       externalId: row.externalId,
     })
     .onConflictDoNothing()
     .returning()
-  return { inserted: Boolean(inserted) }
+
+  const [credit] = await tx
+    .insert(portfolioCashTransactions)
+    .values({
+      ...baseRow,
+      portfolioId: to.id,
+      toPortfolioId: portfolioId,
+      amount: scale8(targetAmount),
+      transferFxRate: rate != null && rate !== 1 ? String(rate) : null,
+      targetAmount: scale8(amount),
+      reference: c.reference ? `${c.reference} (→ ${toName})` : `→ ${toName}`,
+      externalId: `${row.externalId}#t`,
+    })
+    .onConflictDoNothing()
+    .returning()
+
+  if (debit && labelIds.size > 0) {
+    await tx
+      .insert(portfolioCashTransactionLabels)
+      .values([...labelIds.values()].map((labelId) => ({ cashTransactionId: debit.id, labelId })))
+  }
+  return { inserted: Boolean(debit && credit) }
 }
 
 async function insertImportPortfolioTx(
   tx: DB,
   userId: string,
-  walletId: string,
   input: {
     source: { externalSource: string }
     row: z.infer<typeof ImportTransactionSchema>
     ptx: z.infer<typeof ImportPortfolioTxSchema>
-    executedAt: Date
   },
 ) {
-  const { source, row, ptx, executedAt } = input
+  const { source, row, ptx } = input
+  const executedAt = ptx.executedAt ? new Date(ptx.executedAt) : new Date(row.executedAt)
   const symbol = ptx.instrumentSymbol.toUpperCase()
   const txCcy = ptx.currency.toUpperCase()
   const notional = ptx.quantity * ptx.price
@@ -998,7 +949,6 @@ async function insertImportPortfolioTx(
       userId,
       portfolioId: ptx.portfolioId,
       positionId,
-      walletId,
       type: ptx.type,
       instrumentSymbol: symbol,
       instrumentName: ptx.instrumentName ?? null,
@@ -1082,26 +1032,3 @@ async function resolveImportLabelIds(
   return byName
 }
 
-/**
- * Ledger-first balances (D17): recompute each affected wallet as the exact
- * signed SUM(amount) over its rows (§23.4, after the batch).
- */
-async function recalcWalletBalances(database: DB, ids: Set<string>) {
-  for (const walletId of ids) {
-    const [agg] = await database
-      .select({
-        total: sql<string>`COALESCE(SUM(${walletTransactions.amount}), 0)::text`,
-      })
-      .from(walletTransactions)
-      .where(eq(walletTransactions.walletId, walletId))
-
-    await database
-      .update(wallets)
-      .set({
-        balance: agg.total,
-        availableBalance: agg.total,
-        updatedAt: new Date(),
-      })
-      .where(eq(wallets.id, walletId))
-  }
-}

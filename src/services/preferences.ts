@@ -1,12 +1,12 @@
-import { ISO_CURRENCY } from "../routes/wallets.js"
+import { ISO_CURRENCY } from "./currency.js"
 
 const USERS_AUTH_URL = process.env.USERS_AUTH_URL ?? "http://users-auth:3000"
 
 /**
  * D21b: the display/base currency default comes from the user's preferences
  * (users_auth.user_preferences.ui_preferences.baseCurrency). Best-effort:
- * any failure falls back to USD so wallet creation never breaks because of
- * the preference service.
+ * any failure falls back to USD so portfolio creation never breaks because
+ * of the preference service.
  */
 export async function preferredBaseCurrency(
   authHeaders: Record<string, string>,

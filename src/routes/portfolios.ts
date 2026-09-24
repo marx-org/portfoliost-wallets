@@ -9,7 +9,6 @@ import {
   portfolioTransactions,
   shares,
   valueSnapshots,
-  wallets,
 } from "../db/schema.js"
 import { preferredBaseCurrency } from "../services/preferences.js"
 import { refreshQuotes } from "../services/quotes.js"
@@ -39,9 +38,7 @@ export const CreatePortfolioSchema = z.object({
   description: z.string().optional(),
   strategy: z.string().optional(),
   type: z.string().optional(),
-  currency: z.string().regex(ISO_CURRENCY, "currency must be an ISO 4217 code"),
   baseCurrency: z.string().regex(ISO_CURRENCY).optional(),
-  walletId: z.string().uuid().optional(),
   isPublic: z.boolean().optional(),
   isMarginEnabled: z.boolean().optional(),
   marginRate: z.number().optional(),
@@ -54,7 +51,6 @@ export const UpdatePortfolioSchema = z.object({
   strategy: z.string().optional(),
   type: z.string().optional(),
   baseCurrency: z.string().regex(ISO_CURRENCY).optional(),
-  walletId: z.string().uuid().nullable().optional(),
   isPublic: z.boolean().optional(),
   isMarginEnabled: z.boolean().optional(),
   marginRate: z.number().nullable().optional(),
@@ -71,9 +67,7 @@ function serializePortfolio(p: typeof portfolios.$inferSelect) {
     description: p.description,
     strategy: p.strategy,
     type: p.type,
-    currency: p.currency,
     baseCurrency: p.baseCurrency,
-    walletId: p.walletId ?? "",
     totalInvested: Number(p.totalInvested),
     currentValue: Number(p.currentValue),
     isPublic: p.isPublic,
@@ -527,22 +521,6 @@ export function createPortfolioRoutes(db?: DB) {
     const defaultBase =
       parsed.data.baseCurrency ?? (await preferredBaseCurrency(forwardedHeaders))
 
-    // Validate walletId belongs to this user
-    if (parsed.data.walletId) {
-      const [w] = await database
-        .select()
-        .from(wallets)
-        .where(
-          and(
-            sql`${wallets.id} = ${parsed.data.walletId}`,
-            sql`${wallets.userId} = ${identity.id}`,
-          ),
-        )
-      if (!w) {
-        return c.json({ error: "ValidationError", message: "wallet not found" }, 422)
-      }
-    }
-
     try {
       const [created] = await database
         .insert(portfolios)
@@ -552,9 +530,7 @@ export function createPortfolioRoutes(db?: DB) {
           description: parsed.data.description ?? null,
           strategy: parsed.data.strategy ?? "GROWTH",
           type: parsed.data.type ?? "regular",
-          currency: parsed.data.currency.toUpperCase(),
           baseCurrency: defaultBase.toUpperCase(),
-          walletId: parsed.data.walletId ?? null,
           isPublic: parsed.data.isPublic ?? false,
           isMarginEnabled: parsed.data.isMarginEnabled ?? false,
           marginRate: parsed.data.marginRate != null ? String(parsed.data.marginRate) : null,
@@ -770,7 +746,6 @@ export function createPortfolioRoutes(db?: DB) {
     if (data.strategy !== undefined) updates.strategy = data.strategy
     if (data.type !== undefined) updates.type = data.type
     if (data.baseCurrency !== undefined) updates.baseCurrency = data.baseCurrency.toUpperCase()
-    if (data.walletId !== undefined) updates.walletId = data.walletId
     if (data.isPublic !== undefined) updates.isPublic = data.isPublic
     if (data.isMarginEnabled !== undefined) updates.isMarginEnabled = data.isMarginEnabled
     if (data.marginRate !== undefined) updates.marginRate = data.marginRate != null ? String(data.marginRate) : null
@@ -1262,7 +1237,7 @@ export function createPublicShareRoutes(db?: DB) {
         name: portfolio.name,
         description: portfolio.description,
         strategy: portfolio.strategy,
-        currency: portfolio.currency,
+        currency: portfolio.baseCurrency,
       },
     })
   })

@@ -17,115 +17,12 @@ import {
 import { sql } from "drizzle-orm"
 import { check } from "drizzle-orm/pg-core"
 
+const TX_TYPES = ["DEPOSIT", "WITHDRAWAL", "TRANSFER"] as const
+
 // D16/D24 — schema-per-module
+// §62 — the wallets schema is kept for sync_runs only; cash moved to
+// portfolios.portfolio_cash_transactions (derived-by-replay, no stored balances).
 export const walletsSchema = pgSchema("wallets")
-
-/**
- * Cash wallet (D17). `currency` is the settlement denomination and mandatory;
- * `baseCurrency` is the display/valuation currency defaulted from user prefs
- * at creation time (D21b). Balances are denormalized ledger-maintained values.
- * `externalSource` tags wallets created by an import source (NULL = manual).
- */
-export const wallets = walletsSchema.table(
-  "wallets",
-  {
-    id: uuid("id").primaryKey().default(sql`gen_random_uuid()`),
-    userId: text("user_id").notNull(),
-    name: text("name").notNull(),
-    currency: char("currency", { length: 3 }).notNull(),
-    baseCurrency: char("base_currency", { length: 3 }).notNull().default("USD"),
-    externalSource: text("external_source"),
-    balance: numeric("balance", { precision: 20, scale: 8 }).notNull().default("0"),
-    availableBalance: numeric("available_balance", { precision: 20, scale: 8 })
-      .notNull()
-      .default("0"),
-    reserved: numeric("reserved", { precision: 20, scale: 8 }).notNull().default("0"),
-    isDefault: boolean("is_default").notNull().default(false),
-    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
-    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
-  },
-  (t) => [
-    index("idx_wallets_user").on(t.userId),
-    // natural key for import bootstrap idempotency (import API §23.3)
-    uniqueIndex("uq_wallets_user_name").on(t.userId, t.name),
-  ],
-)
-
-const TX_TYPES = [
-  "DEPOSIT",
-  "WITHDRAWAL",
-  "TRANSFER",
-  "INVEST",
-  "SELL",
-  "DIVIDEND",
-  "FEE",
-  "INTEREST",
-  "ADJUSTMENT",
-] as const
-
-/**
- * Signed cash ledger (D17): the source of truth for balances. Amounts are in
- * the WALLET's currency; inflows positive, outflows negative. FX snapshots
- * (`exchangeRate`/`rateSource`, fee equivalents) follow fees-and-custom-fx
- * D28/D29; cross-currency transfers store both legs plus `transferFxRate`
- * linked via `linkedTxId` (D22).
- */
-export const walletTransactions = walletsSchema.table(
-  "wallet_transactions",
-  {
-    id: uuid("id").primaryKey().default(sql`gen_random_uuid()`),
-    // denormalized owner (D24): direct authorization on every tx operation
-    userId: text("user_id").notNull(),
-    walletId: uuid("wallet_id")
-      .notNull()
-      .references(() => wallets.id),
-    type: text("type", { enum: TX_TYPES }).notNull(),
-    amount: numeric("amount", { precision: 20, scale: 8 }).notNull(),
-    currency: char("currency", { length: 3 }).notNull(),
-    status: text("status").notNull().default("completed"),
-    description: text("description"),
-    transactionDate: date("transaction_date"),
-    executedAt: timestamp("executed_at", { withTimezone: true }).notNull().defaultNow(),
-    paymentMethod: text("payment_method"),
-    fees: numeric("fees", { precision: 20, scale: 8 }),
-    feesType: text("fees_type", { enum: ["fixed", "pct"] }),
-    feeCurrency: char("fee_currency", { length: 3 }),
-    taxes: numeric("taxes", { precision: 20, scale: 8 }),
-    toWalletId: uuid("to_wallet_id").references(() => wallets.id),
-    linkedTxId: uuid("linked_tx_id"),
-    reference: text("reference"),
-    portfolioId: uuid("portfolio_id"),
-    exchangeRate: numeric("exchange_rate", { precision: 20, scale: 10 }),
-    rateSource: text("rate_source", { enum: ["automatic", "manual"] })
-      .notNull()
-      .default("automatic"),
-    feeRateSource: text("fee_rate_source", { enum: ["automatic", "manual"] })
-      .notNull()
-      .default("automatic"),
-    feeExchangeRate: numeric("fee_exchange_rate", { precision: 20, scale: 10 }),
-    transferFxRate: numeric("transfer_fx_rate", { precision: 20, scale: 10 }),
-    targetAmount: numeric("target_amount", { precision: 20, scale: 8 }),
-    externalSource: text("external_source"),
-    externalId: text("external_id"),
-    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
-    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
-  },
-  (t) => [
-    index("idx_wtx_wallet").on(t.walletId, t.executedAt.desc()),
-    index("idx_wtx_user_recent").on(t.userId, t.executedAt.desc()),
-    uniqueIndex("uq_wtx_reference").on(t.reference).where(sql`reference is not null`),
-    uniqueIndex("uq_wtx_external").on(t.externalSource, t.externalId).where(sql`${t.externalId} is not null`),
-    // DB-level guards (D17): extensible via new migrations, not enum churn
-    check(
-      "ck_wtx_type",
-      sql`${t.type} in ('DEPOSIT','WITHDRAWAL','TRANSFER','INVEST','SELL','DIVIDEND','FEE','INTEREST','ADJUSTMENT')`,
-    ),
-    check("ck_wtx_fees_type", sql`${t.feesType} in ('fixed','pct')`),
-    check("ck_wtx_rate_source", sql`${t.rateSource} in ('automatic','manual')`),
-    check("ck_wtx_fee_rate_source", sql`${t.feeRateSource} in ('automatic','manual')`),
-    check("ck_wtx_amount_nonzero", sql`${t.amount} <> 0 or ${t.type} = 'ADJUSTMENT'`),
-  ],
-)
 
 /**
  * Import sync-run tracking (import API). One row per (user, externalSource,
@@ -161,11 +58,11 @@ export const syncRuns = walletsSchema.table(
 export const portfoliosSchema = pgSchema("portfolios")
 
 /**
- * Portfolio container (D54). Currency is mandatory (422 when missing, D17
- * wallets precedent). base_currency is the display/valuation currency,
- * defaulted from user prefs at creation time (D21b). wallet_id links to the
- * wallets module for cash-movement integration (D57). `externalSource` tags
- * portfolios created by an import source (NULL = manual).
+ * Portfolio container (D54). base_currency is the display/valuation currency,
+ * defaulted from user prefs at creation time (D21b). §62: `currency` and
+ * `wallet_id` are dropped — a portfolio owns its cash natively (see
+ * portfolio_cash_transactions); baseCurrency is the single portfolio currency.
+ * `externalSource` tags portfolios created by an import source (NULL = manual).
  */
 export const portfolios = portfoliosSchema.table(
   "portfolios",
@@ -176,10 +73,8 @@ export const portfolios = portfoliosSchema.table(
     description: text("description"),
     strategy: text("strategy").notNull().default("GROWTH"),
     type: text("type").notNull().default("regular"),
-    currency: char("currency", { length: 3 }).notNull(),
     baseCurrency: char("base_currency", { length: 3 }).notNull().default("USD"),
     externalSource: text("external_source"),
-    walletId: uuid("wallet_id").references(() => wallets.id),
     totalInvested: numeric("total_invested", { precision: 20, scale: 8 }).notNull().default("0"),
     currentValue: numeric("current_value", { precision: 20, scale: 8 }).notNull().default("0"),
     isPublic: boolean("is_public").notNull().default(false),
@@ -193,6 +88,63 @@ export const portfolios = portfoliosSchema.table(
     index("idx_portfolios_user").on(t.userId),
     // natural key for import bootstrap idempotency (import API §23.3)
     uniqueIndex("uq_portfolios_user_name").on(t.userId, t.name),
+  ],
+)
+
+/**
+ * Portfolio-scoped cash transactions (plan §62). The portfolio owns its cash
+ * as a per-currency ledger; balances are DERIVED by replay of portfolio
+ * trade rows (BUY/SELL/DIVIDEND effects) + these external rows — nothing is
+ * stored. Amounts are signed in the ROW's currency (DEPOSIT +, WITHDRAWAL −,
+ * TRANSFER as sent). Cross-currency transfers store both legs plus
+ * `transferFxRate` linked via `linkedTxId` (D22, portfolio-scoped).
+ */
+export const portfolioCashTransactions = portfoliosSchema.table(
+  "portfolio_cash_transactions",
+  {
+    id: uuid("id").primaryKey().default(sql`gen_random_uuid()`),
+    // denormalized owner (D24): direct authorization on every tx operation
+    userId: text("user_id").notNull(),
+    portfolioId: uuid("portfolio_id")
+      .notNull()
+      .references(() => portfolios.id, { onDelete: "cascade" }),
+    type: text("type", { enum: TX_TYPES }).notNull(),
+    amount: numeric("amount", { precision: 28, scale: 8 }).notNull(),
+    currency: char("currency", { length: 3 }).notNull(),
+    status: text("status").notNull().default("completed"),
+    description: text("description"),
+    transactionDate: date("transaction_date"),
+    paymentMethod: text("payment_method"),
+    fees: numeric("fees", { precision: 20, scale: 8 }),
+    feesType: text("fees_type", { enum: ["fixed", "pct"] }),
+    feeCurrency: char("fee_currency", { length: 3 }),
+    toPortfolioId: uuid("to_portfolio_id").references(() => portfolios.id, { onDelete: "cascade" }),
+    linkedTxId: uuid("linked_tx_id"),
+    reference: text("reference"),
+    exchangeRate: numeric("exchange_rate", { precision: 20, scale: 10 }),
+    rateSource: text("rate_source", { enum: ["automatic", "manual"] })
+      .notNull()
+      .default("automatic"),
+    feeRateSource: text("fee_rate_source", { enum: ["automatic", "manual"] })
+      .notNull()
+      .default("automatic"),
+    feeExchangeRate: numeric("fee_exchange_rate", { precision: 20, scale: 10 }),
+    transferFxRate: numeric("transfer_fx_rate", { precision: 20, scale: 10 }),
+    targetAmount: numeric("target_amount", { precision: 20, scale: 8 }),
+    externalSource: text("external_source"),
+    externalId: text("external_id"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    index("idx_pctx_portfolio").on(t.portfolioId, t.transactionDate),
+    index("idx_pctx_user_recent").on(t.userId, t.createdAt.desc()),
+    uniqueIndex("uq_pctx_external").on(t.externalSource, t.externalId).where(sql`${t.externalId} is not null`),
+    check("ck_pctx_type", sql`${t.type} in ('DEPOSIT','WITHDRAWAL','TRANSFER')`),
+    check("ck_pctx_fees_type", sql`${t.feesType} in ('fixed','pct')`),
+    check("ck_pctx_rate_source", sql`${t.rateSource} in ('automatic','manual')`),
+    check("ck_pctx_fee_rate_source", sql`${t.feeRateSource} in ('automatic','manual')`),
+    check("ck_pctx_amount_nonzero", sql`${t.amount} <> 0`),
   ],
 )
 
@@ -224,7 +176,6 @@ export const positions = portfoliosSchema.table(
     sector: text("sector"),
     industry: text("industry"),
     country: text("country"),
-    walletId: uuid("wallet_id").references(() => wallets.id),
     fees: numeric("fees", { precision: 20, scale: 8 }),
     feesType: text("fees_type", { enum: ["fixed", "pct"] }),
     feeCurrency: char("fee_currency", { length: 3 }),
@@ -252,8 +203,9 @@ export const positions = portfoliosSchema.table(
 
 /**
  * Ledger-first portfolio transactions (D54/D56). Source of truth for position
- * quantities, cost basis, and realized P/L. Denormalized user_id for direct
- * authorization (D24). Wallet integration columns for paired cash rows (D57).
+ * quantities, cost basis, realized P/L, and (via cashLedger.tradeCashEffects)
+ * the portfolio's cash history. Denormalized user_id for direct authorization
+ * (D24).
  */
 export const portfolioTransactions = portfoliosSchema.table(
   "transactions",
@@ -264,7 +216,6 @@ export const portfolioTransactions = portfoliosSchema.table(
       .notNull()
       .references(() => portfolios.id, { onDelete: "cascade" }),
     positionId: uuid("position_id").references(() => positions.id),
-    walletId: uuid("wallet_id").references(() => wallets.id),
     type: text("type").notNull(),
     instrumentSymbol: text("instrument_symbol"),
     instrumentName: text("instrument_name"),
@@ -459,19 +410,19 @@ export const transactionLabels = portfoliosSchema.table(
   ],
 )
 
-/** Many-to-many: label -> wallet transaction (D65). */
-export const walletTransactionLabels = portfoliosSchema.table(
-  "wallet_transaction_labels",
+/** Many-to-many: label -> portfolio cash transaction (§62, D65). */
+export const portfolioCashTransactionLabels = portfoliosSchema.table(
+  "portfolio_cash_transaction_labels",
   {
-    walletTransactionId: uuid("wallet_transaction_id")
+    cashTransactionId: uuid("cash_transaction_id")
       .notNull()
-      .references(() => walletTransactions.id, { onDelete: "cascade" }),
+      .references(() => portfolioCashTransactions.id, { onDelete: "cascade" }),
     labelId: uuid("label_id")
       .notNull()
       .references(() => labels.id, { onDelete: "cascade" }),
   },
   (t) => [
-    primaryKey({ columns: [t.walletTransactionId, t.labelId] }),
-    index("idx_wallet_transaction_labels_label").on(t.labelId),
+    primaryKey({ columns: [t.cashTransactionId, t.labelId] }),
+    index("idx_cash_transaction_labels_label").on(t.labelId),
   ],
 )

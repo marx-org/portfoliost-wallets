@@ -5,7 +5,7 @@ import {
   labels,
   positionLabels,
   transactionLabels,
-  walletTransactionLabels,
+  portfolioCashTransactionLabels,
 } from "../db/schema.js"
 import type { components } from "../generated/api-types.js"
 
@@ -72,19 +72,19 @@ export async function setTransactionLabels(
   })
 }
 
-export async function setWalletTransactionLabels(
+export async function setCashTransactionLabels(
   db: DB,
-  walletTransactionId: string,
+  cashTransactionId: string,
   labelIds: string[],
 ): Promise<void> {
   await db.transaction(async (tx) => {
     await tx
-      .delete(walletTransactionLabels)
-      .where(eq(walletTransactionLabels.walletTransactionId, walletTransactionId))
+      .delete(portfolioCashTransactionLabels)
+      .where(eq(portfolioCashTransactionLabels.cashTransactionId, cashTransactionId))
     if (labelIds.length > 0) {
       await tx
-        .insert(walletTransactionLabels)
-        .values(labelIds.map((labelId) => ({ walletTransactionId, labelId })))
+        .insert(portfolioCashTransactionLabels)
+        .values(labelIds.map((labelId) => ({ cashTransactionId, labelId })))
     }
   })
 }
@@ -144,18 +144,18 @@ export async function labelsForTransactions(
   return labelsGroupedByEntity(db, joinRows)
 }
 
-export async function labelsForWalletTransactions(
+export async function labelsForCashTransactions(
   db: DB,
-  walletTransactionIds: string[],
+  cashTransactionIds: string[],
 ): Promise<Map<string, Label[]>> {
-  if (walletTransactionIds.length === 0) return new Map()
+  if (cashTransactionIds.length === 0) return new Map()
   const joinRows = await db
     .select({
-      entityId: walletTransactionLabels.walletTransactionId,
-      labelId: walletTransactionLabels.labelId,
+      entityId: portfolioCashTransactionLabels.cashTransactionId,
+      labelId: portfolioCashTransactionLabels.labelId,
     })
-    .from(walletTransactionLabels)
-    .where(inArray(walletTransactionLabels.walletTransactionId, walletTransactionIds))
+    .from(portfolioCashTransactionLabels)
+    .where(inArray(portfolioCashTransactionLabels.cashTransactionId, cashTransactionIds))
   return labelsGroupedByEntity(db, joinRows)
 }
 

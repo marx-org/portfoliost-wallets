@@ -2,46 +2,62 @@ import { describe, expect, it } from "vitest"
 import { sql } from "drizzle-orm"
 import { createTestDb } from "./test-db.js"
 import {
-  walletsSchema, wallets, walletTransactions, syncRuns,
-  portfoliosSchema, portfolios, positions, portfolioTransactions, shares, valueSnapshots,
+  walletsSchema, syncRuns,
+  portfoliosSchema, portfolios, positions, portfolioTransactions,
+  portfolioCashTransactions, portfolioCashTransactionLabels, shares, valueSnapshots,
+  labels,
 } from "./schema.js"
 
-describe("wallets schema (D17/D24)", () => {
-  it("creates the dedicated pg schema via migrations", async () => {
+describe("wallets schema (sync_runs only, §62)", () => {
+  it("keeps the dedicated pg schema via migrations (sync_runs home)", async () => {
     const { db } = await createTestDb()
     const rows = await db.execute(sql`select nspname from pg_namespace where nspname = 'wallets'`)
     expect(rows.rows.length).toBe(1)
+    const names = await db.execute(
+      sql`select table_name from information_schema.tables where table_schema = 'wallets'`,
+    )
+    expect(names.rows.map((r: any) => r.table_name)).toContain("sync_runs")
+    // §62: the wallet tables are gone
+    expect(names.rows.map((r: any) => r.table_name)).not.toContain("wallets")
+    expect(names.rows.map((r: any) => r.table_name)).not.toContain("wallet_transactions")
   })
 
-  it("inserts a wallet with defaults and mandatory currency", async () => {
+  it("sync_runs enforces the (user, source, spreadsheetId, sheet) unique key", async () => {
     const { db } = await createTestDb()
-    const [w] = await db
-      .insert(wallets)
-      .values({ userId: "user-a", name: "Cash PLN", currency: "PLN" })
-      .returning()
-    expect(w.currency).toBe("PLN")
-    expect(w.baseCurrency).toBe("USD")
-    expect(Number(w.balance)).toBe(0)
-    expect(w.isDefault).toBe(false)
+    const run = {
+      userId: "u",
+      externalSource: "google-sheets:transakcje",
+      spreadsheetId: "1id",
+      sheet: "Transakcje",
+    }
+    await db.insert(syncRuns).values(run)
+    await expect(db.insert(syncRuns).values(run)).rejects.toThrow(/duplicate key|Failed query/u)
+  })
+})
 
-    // currency is NOT NULL (D18: 422 handled at API level, DB enforces too)
-    await expect(
-      db.insert(wallets).values({ userId: "user-a", name: "bad", currency: null as never }),
-    ).rejects.toThrow()
+describe("portfolios cash schema (§62)", () => {
+  it("inserts a portfolio with defaults (baseCurrency only)", async () => {
+    const { db } = await createTestDb()
+    const [p] = await db
+      .insert(portfolios)
+      .values({ userId: "user-a", name: "Top10", baseCurrency: "USD" })
+      .returning()
+    expect(p.name).toBe("Top10")
+    expect(p.baseCurrency).toBe("USD")
+    expect(p.strategy).toBe("GROWTH")
+    expect(p.type).toBe("regular")
+    expect(Number(p.totalInvested)).toBe(0)
+    expect(p.isPublic).toBe(false)
   })
 
-  it("stores signed ledger rows with fx snapshot columns", async () => {
+  it("inserts a portfolio cash transaction with fx columns", async () => {
     const { db } = await createTestDb()
-    const [w] = await db
-      .insert(wallets)
-      .values({ userId: "user-a", name: "W", currency: "USD" })
-      .returning()
-
+    const [p] = await db.insert(portfolios).values({ userId: "u", name: "P", baseCurrency: "USD" }).returning()
     const [tx] = await db
-      .insert(walletTransactions)
+      .insert(portfolioCashTransactions)
       .values({
-        userId: "user-a",
-        walletId: w.id,
+        userId: "u",
+        portfolioId: p.id,
         type: "TRANSFER",
         amount: "-43.00000000",
         currency: "EUR",
@@ -55,56 +71,86 @@ describe("wallets schema (D17/D24)", () => {
         targetAmount: "46.58000000",
       })
       .returning()
-
     expect(tx.rateSource).toBe("manual")
-    expect(tx.feeRateSource).toBe("automatic") // column default
+    expect(tx.feeRateSource).toBe("automatic")
     expect(Number(tx.amount)).toBe(-43)
     expect(Number(tx.targetAmount)).toBeCloseTo(46.58, 6)
   })
 
   it("rejects unknown transaction types and fee types", async () => {
     const { db } = await createTestDb()
-    const [w] = await db
-      .insert(wallets)
-      .values({ userId: "u", name: "W", currency: "USD" })
-      .returning()
+    const [p] = await db.insert(portfolios).values({ userId: "u", name: "P", baseCurrency: "USD" }).returning()
     await expect(
-      db.insert(walletTransactions).values({
+      db.insert(portfolioCashTransactions).values({
         userId: "u",
-        walletId: w.id,
+        portfolioId: p.id,
         type: "ROBBERY" as never,
         amount: "1",
         currency: "USD",
       }),
     ).rejects.toThrow()
     await expect(
-      db.insert(walletTransactions).values({
+      db.insert(portfolioCashTransactions).values({
         userId: "u",
-        walletId: w.id,
+        portfolioId: p.id,
         type: "DEPOSIT",
         amount: "1",
         currency: "USD",
-        feesType: "percent" as never, // contract enum is fixed|pct (D28)
+        feesType: "percent" as never,
       }),
     ).rejects.toThrow()
   })
 
-  it("enforces the unique reference index for idempotent pushes (D19)", async () => {
+  it("requires a non-zero amount", async () => {
     const { db } = await createTestDb()
-    const [w] = await db
-      .insert(wallets)
-      .values({ userId: "u", name: "W", currency: "USD" })
-      .returning()
+    const [p] = await db.insert(portfolios).values({ userId: "u", name: "P", baseCurrency: "USD" }).returning()
+    await expect(
+      db.insert(portfolioCashTransactions).values({
+        userId: "u",
+        portfolioId: p.id,
+        type: "DEPOSIT",
+        amount: "0",
+        currency: "PLN",
+      }),
+    ).rejects.toThrow()
+  })
+
+  it("partial unique index rejects duplicate external_id but allows NULL duplicates", async () => {
+    const { db } = await createTestDb()
+    const [p] = await db.insert(portfolios).values({ userId: "u", name: "P", baseCurrency: "USD", externalSource: "src" }).returning()
     const base = {
       userId: "u",
-      walletId: w.id,
-      type: "INVEST" as const,
+      portfolioId: p.id,
+      type: "DEPOSIT" as const,
       amount: "-100",
       currency: "USD",
-      reference: "PORTFOLIO_BUY_AAPL.US_abc",
+      externalSource: "google-sheets:transakcje",
+      externalId: "sha-1",
     }
-    await db.insert(walletTransactions).values(base)
-    await expect(db.insert(walletTransactions).values(base)).rejects.toThrow(/duplicate key|Failed query/u)
+    await db.insert(portfolioCashTransactions).values(base)
+    await expect(db.insert(portfolioCashTransactions).values(base)).rejects.toThrow(/duplicate key|Failed query/u)
+    await db.insert(portfolioCashTransactions).values({ ...base, externalId: "sha-2" })
+    await db.insert(portfolioCashTransactions).values({ ...base, externalId: null })
+    await db.insert(portfolioCashTransactions).values({ ...base, externalId: null })
+  })
+
+  it("cascades labels when a cash transaction is deleted", async () => {
+    const { db } = await createTestDb()
+    const [p] = await db.insert(portfolios).values({ userId: "u", name: "P", baseCurrency: "USD" }).returning()
+    const [label] = await db
+      .insert(labels)
+      .values({ userId: "u", name: "L", color: "#000000" })
+      .returning()
+    const [tx] = await db
+      .insert(portfolioCashTransactions)
+      .values({ userId: "u", portfolioId: p.id, type: "DEPOSIT", amount: "10", currency: "USD" })
+      .returning()
+    await db.insert(portfolioCashTransactionLabels).values({ cashTransactionId: tx.id, labelId: label.id })
+
+    await db.delete(portfolioCashTransactions).where(sql`${portfolioCashTransactions.id} = ${tx.id}`)
+
+    const rows = await db.select().from(portfolioCashTransactionLabels)
+    expect(rows.length).toBe(0)
   })
 })
 
@@ -115,177 +161,11 @@ describe("portfolios schema (§15, D54)", () => {
     expect(rows.rows.length).toBe(1)
   })
 
-  it("inserts a portfolio with defaults and mandatory currency", async () => {
+  it("cascades delete from portfolio to positions, transactions, cash txs, shares, snapshots", async () => {
     const { db } = await createTestDb()
     const [p] = await db
       .insert(portfolios)
-      .values({ userId: "user-a", name: "Top10", currency: "USD" })
-      .returning()
-    expect(p.name).toBe("Top10")
-    expect(p.currency).toBe("USD")
-    expect(p.baseCurrency).toBe("USD")
-    expect(p.strategy).toBe("GROWTH")
-    expect(p.type).toBe("regular")
-    expect(Number(p.totalInvested)).toBe(0)
-    expect(p.isPublic).toBe(false)
-
-    await expect(
-      db.insert(portfolios).values({ userId: "user-a", name: "bad", currency: null as never }),
-    ).rejects.toThrow()
-  })
-
-  it("inserts a position with FK to portfolio and CHECK constraints", async () => {
-    const { db } = await createTestDb()
-    const [p] = await db
-      .insert(portfolios)
-      .values({ userId: "user-a", name: "P", currency: "USD" })
-      .returning()
-    const [pos] = await db
-      .insert(positions)
-      .values({
-        userId: "user-a",
-        portfolioId: p.id,
-        symbol: "AAPL",
-        assetType: "STOCK",
-        quantity: "10",
-        averageCostBasis: "150.00000000",
-        instrumentCurrency: "USD",
-      })
-      .returning()
-    expect(pos.symbol).toBe("AAPL")
-    expect(Number(pos.quantity)).toBe(10)
-    expect(pos.isOpen).toBe(true)
-
-    // direction CHECK constraint
-    await expect(
-      db.insert(positions).values({
-        userId: "user-a",
-        portfolioId: p.id,
-        symbol: "X",
-        direction: "NEUTRAL" as never,
-      }),
-    ).rejects.toThrow()
-  })
-
-  it("inserts a portfolio transaction with CHECK constraints", async () => {
-    const { db } = await createTestDb()
-    const [p] = await db
-      .insert(portfolios)
-      .values({ userId: "user-a", name: "P", currency: "USD" })
-      .returning()
-    const [pos] = await db
-      .insert(positions)
-      .values({
-        userId: "user-a",
-        portfolioId: p.id,
-        symbol: "AAPL",
-        quantity: "10",
-        averageCostBasis: "150",
-        instrumentCurrency: "USD",
-      })
-      .returning()
-    const [tx] = await db
-      .insert(portfolioTransactions)
-      .values({
-        userId: "user-a",
-        portfolioId: p.id,
-        positionId: pos.id,
-        type: "BUY",
-        instrumentSymbol: "AAPL",
-        quantity: "10",
-        price: "150.00000000",
-        currency: "USD",
-        totalAmount: "1500.00000000",
-        rateSource: "automatic",
-        feeRateSource: "automatic",
-        taxes: "30.00000000",
-        notes: "dividend remittance note",
-      })
-      .returning()
-    expect(tx.type).toBe("BUY")
-    expect(tx.rateSource).toBe("automatic")
-    expect(Number(tx.totalAmount)).toBe(1500)
-    expect(Number(tx.taxes)).toBe(30)
-    expect(tx.notes).toBe("dividend remittance note")
-
-    // type CHECK constraint
-    await expect(
-      db.insert(portfolioTransactions).values({
-        userId: "user-a",
-        portfolioId: p.id,
-        type: "SWAP" as never,
-        quantity: "1",
-        price: "1",
-        currency: "USD",
-        totalAmount: "1",
-      }),
-    ).rejects.toThrow()
-  })
-
-  it("inserts a share with jsonb privacy_settings and enforces FK cascade", async () => {
-    const { db } = await createTestDb()
-    const [p] = await db
-      .insert(portfolios)
-      .values({ userId: "user-a", name: "P", currency: "USD" })
-      .returning()
-    const [s] = await db
-      .insert(shares)
-      .values({
-        userId: "user-a",
-        portfolioId: p.id,
-        displayName: "My portfolio",
-        privacySettings: { benchmarks: "SPY", showReturns: true },
-      })
-      .returning()
-    expect(s.displayName).toBe("My portfolio")
-    expect(s.viewCount).toBe(0)
-    expect((s.privacySettings as Record<string, unknown>).benchmarks).toBe("SPY")
-
-    // privacy_settings is NOT NULL
-    await expect(
-      db.insert(shares).values({
-        userId: "user-a",
-        portfolioId: p.id,
-        privacySettings: null as never,
-      }),
-    ).rejects.toThrow()
-  })
-
-  it("inserts a value snapshot with composite PK", async () => {
-    const { db } = await createTestDb()
-    const [p] = await db
-      .insert(portfolios)
-      .values({ userId: "user-a", name: "P", currency: "USD" })
-      .returning()
-    const [snap] = await db
-      .insert(valueSnapshots)
-      .values({
-        portfolioId: p.id,
-        snapshotDate: "2026-08-01",
-        value: "10000.00000000",
-        invested: "9000.00000000",
-        netFlow: "0",
-      })
-      .returning()
-    expect(Number(snap.value)).toBe(10000)
-    expect(Number(snap.netFlow)).toBe(0)
-
-    // composite PK: duplicate (portfolioId, snapshotDate) fails
-    await expect(
-      db.insert(valueSnapshots).values({
-        portfolioId: p.id,
-        snapshotDate: "2026-08-01",
-        value: "11000",
-        invested: "9000",
-      }),
-    ).rejects.toThrow()
-  })
-
-  it("cascades delete from portfolio to positions, transactions, shares, snapshots", async () => {
-    const { db } = await createTestDb()
-    const [p] = await db
-      .insert(portfolios)
-      .values({ userId: "user-a", name: "P", currency: "USD" })
+      .values({ userId: "user-a", name: "P", baseCurrency: "USD" })
       .returning()
     await db.insert(positions).values({
       userId: "user-a", portfolioId: p.id, symbol: "X",
@@ -293,6 +173,10 @@ describe("portfolios schema (§15, D54)", () => {
     await db.insert(portfolioTransactions).values({
       userId: "user-a", portfolioId: p.id, type: "BUY",
       quantity: "1", price: "1", currency: "USD", totalAmount: "1",
+    })
+    await db.insert(portfolioCashTransactions).values({
+      userId: "user-a", portfolioId: p.id, type: "DEPOSIT",
+      amount: "10", currency: "USD",
     })
     await db.insert(shares).values({
       userId: "user-a", portfolioId: p.id,
@@ -307,6 +191,7 @@ describe("portfolios schema (§15, D54)", () => {
 
     expect((await db.select().from(positions).where(sql`${positions.portfolioId} = ${p.id}`)).length).toBe(0)
     expect((await db.select().from(portfolioTransactions).where(sql`${portfolioTransactions.portfolioId} = ${p.id}`)).length).toBe(0)
+    expect((await db.select().from(portfolioCashTransactions).where(sql`${portfolioCashTransactions.portfolioId} = ${p.id}`)).length).toBe(0)
     expect((await db.select().from(shares).where(sql`${shares.portfolioId} = ${p.id}`)).length).toBe(0)
     expect((await db.select().from(valueSnapshots).where(sql`${valueSnapshots.portfolioId} = ${p.id}`)).length).toBe(0)
   })
@@ -315,165 +200,14 @@ describe("portfolios schema (§15, D54)", () => {
     const { db } = await createTestDb()
     const [p] = await db
       .insert(portfolios)
-      .values({ userId: "user-a", name: "A", currency: "USD" })
+      .values({ userId: "user-a", name: "A", baseCurrency: "USD" })
       .returning()
     await db.insert(positions).values({
       userId: "user-a", portfolioId: p.id, symbol: "AAPL",
     })
-
-    // Query only user-a's positions
-    const rows = await db
-      .select()
-      .from(positions)
-      .where(sql`${positions.userId} = 'user-a'`)
+    const rows = await db.select().from(positions).where(sql`${positions.userId} = 'user-a'`)
     expect(rows.length).toBe(1)
-
-    // Query user-b sees nothing (D24 pattern)
-    const empty = await db
-      .select()
-      .from(positions)
-      .where(sql`${positions.userId} = 'user-b'`)
+    const empty = await db.select().from(positions).where(sql`${positions.userId} = 'user-b'`)
     expect(empty.length).toBe(0)
-  })
-})
-
-describe("import API migration (provenance + split columns)", () => {
-  it("creates all provenance objects — sync_runs + external_source/external_id/original columns", async () => {
-    const { db } = await createTestDb()
-
-    const names = await db.execute(
-      sql`select table_name from information_schema.tables where table_schema = 'wallets' and table_name = 'sync_runs'`,
-    )
-    expect(names.rows.length).toBe(1)
-
-    const cols = (table: string, schema: string) =>
-      db.execute(
-        sql`select column_name from information_schema.columns where table_schema = ${schema} and table_name = ${table}`,
-      ).then((r) => r.rows.map((row: any) => row.column_name))
-
-    expect(await cols("wallets", "wallets")).toContain("external_source")
-    expect(await cols("portfolios", "portfolios")).toContain("external_source")
-    expect(await cols("wallet_transactions", "wallets")).toContain("external_source")
-    expect(await cols("wallet_transactions", "wallets")).toContain("external_id")
-    expect(await cols("transactions", "portfolios")).toContain("external_source")
-    expect(await cols("transactions", "portfolios")).toContain("external_id")
-    expect(await cols("transactions", "portfolios")).toContain("original_quantity")
-    expect(await cols("transactions", "portfolios")).toContain("original_price")
-    expect(await cols("transactions", "portfolios")).toContain("notes")
-  })
-
-  it("partial unique index rejects duplicate external_id but allows NULL duplicates", async () => {
-    const { db } = await createTestDb()
-    const [w] = await db
-      .insert(wallets)
-      .values({ userId: "u", name: "W", currency: "USD", externalSource: "src" })
-      .returning()
-
-    const base = {
-      userId: "u",
-      walletId: w.id,
-      type: "INVEST" as const,
-      amount: "-100",
-      currency: "USD",
-      externalSource: "google-sheets:transakcje",
-      externalId: "sha-1",
-    }
-    await db.insert(walletTransactions).values(base)
-
-    // duplicate (external_source, external_id) is rejected
-    await expect(db.insert(walletTransactions).values(base)).rejects.toThrow(/duplicate key|Failed query/u)
-
-    // same source, different external_id is fine, and NULL external_id duplicates are allowed
-    await db.insert(walletTransactions).values({ ...base, externalId: "sha-2" })
-    await db.insert(walletTransactions).values({ ...base, externalId: null })
-    await db.insert(walletTransactions).values({ ...base, externalId: null })
-  })
-
-  it("original_quantity and original_price are independent of quantity/price (no constraint)", async () => {
-    const { db } = await createTestDb()
-    const [p] = await db
-      .insert(portfolios)
-      .values({ userId: "u", name: "P", currency: "USD", externalSource: "src" })
-      .returning()
-
-    const [tx] = await db
-      .insert(portfolioTransactions)
-      .values({
-        userId: "u",
-        portfolioId: p.id,
-        type: "BUY",
-        instrumentSymbol: "AMZN",
-        quantity: "0.42000000",
-        price: "160.00000000",
-        originalQuantity: "0.02100000",
-        originalPrice: "3200.00000000",
-        currency: "USD",
-        totalAmount: "67.20000000",
-        externalSource: "google-sheets:transakcje",
-        externalId: "px-1",
-      })
-      .returning()
-    expect(Number(tx.originalQuantity)).toBe(0.021)
-    expect(Number(tx.originalPrice)).toBe(3200)
-
-    await expect(
-      db.insert(portfolioTransactions).values({
-        userId: "u",
-        portfolioId: p.id,
-        type: "BUY",
-        instrumentSymbol: "AMZN",
-        quantity: "1",
-        price: "1",
-        originalQuantity: "2",
-        originalPrice: "3",
-        currency: "USD",
-        totalAmount: "1",
-        externalSource: "google-sheets:transakcje",
-        externalId: "px-2",
-      }),
-    ).resolves.toBeDefined()
-  })
-
-  it("sync_runs enforces the (user, source, spreadsheetId, sheet) unique key", async () => {
-    const { db } = await createTestDb()
-    const run = {
-      userId: "u",
-      externalSource: "google-sheets:transakcje",
-      spreadsheetId: "1id",
-      sheet: "Transakcje",
-    }
-    await db.insert(syncRuns).values(run)
-    await expect(db.insert(syncRuns).values(run)).rejects.toThrow(/duplicate key|Failed query/u)
-  })
-
-  it("relaxed amount check allows split markers (ADJUSTMENT with amount 0)", async () => {
-    const { db } = await createTestDb()
-    const [w] = await db
-      .insert(wallets)
-      .values({ userId: "u", name: "W", currency: "PLN" })
-      .returning()
-
-    const [split] = await db
-      .insert(walletTransactions)
-      .values({
-        userId: "u",
-        walletId: w.id,
-        type: "ADJUSTMENT",
-        amount: "0",
-        currency: "PLN",
-      })
-      .returning()
-    expect(split.type).toBe("ADJUSTMENT")
-
-    // non-ADJUSTMENT rows still require a non-zero amount
-    await expect(
-      db.insert(walletTransactions).values({
-        userId: "u",
-        walletId: w.id,
-        type: "DEPOSIT",
-        amount: "0",
-        currency: "PLN",
-      }),
-    ).rejects.toThrow()
   })
 })

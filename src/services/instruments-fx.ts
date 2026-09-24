@@ -90,3 +90,29 @@ export async function fxTo(
     return amount * rate
   }
 }
+
+/**
+ * Async convert-into-`to` callback for a SPECIFIC day: the pair rate is
+ * resolved at that date (instruments' weekend/holiday carry-forward) and
+ * memoized on `cache` keyed by (from, to, day). Same 1:1 degrade as `fxTo`.
+ */
+export async function fxToOnDay(
+  authToken: string | null | undefined,
+  to: string,
+  day: string,
+  cache: Map<string, number> = new Map(),
+): Promise<(from: string, amount?: number) => Promise<number>> {
+  const target = to.toUpperCase()
+  return async (from: string, amount = 1): Promise<number> => {
+    const f = (from ?? "").toUpperCase()
+    if (!f || f === target) return amount
+    const key = `${f}>${target}@${day}`
+    let rate = cache.get(key)
+    if (rate === undefined) {
+      const r = await resolvedFxRate(authToken, f, target, day)
+      rate = r?.rate ?? 1
+      cache.set(key, rate)
+    }
+    return amount * rate
+  }
+}

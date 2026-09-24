@@ -7,8 +7,6 @@ import {
   portfolios,
   positions,
   portfolioTransactions,
-  walletTransactions,
-  wallets,
   positionLabels,
   transactionLabels,
 } from "../db/schema.js"
@@ -51,7 +49,6 @@ const TransactionCreateSchema = z.object({
   feeExchangeRate: z.number().positive().optional(),
   taxes: z.number().nonnegative().nullable().optional(),
   notes: z.string().max(2000).nullable().optional(),
-  walletId: z.string().uuid().optional(),
   positionId: z.string().uuid().optional(),
   executedAt: z.string().optional(),
   isGift: z.boolean().optional(),
@@ -122,7 +119,6 @@ async function upsertPositionOnBuy(
     industry?: string
     country?: string
     positionId?: string
-    walletId?: string
     feesSettled: number
     contractSize?: number
     direction?: "LONG" | "SHORT"
@@ -185,7 +181,6 @@ async function upsertPositionOnBuy(
         sector: body.sector ?? pos.sector,
         industry: body.industry ?? pos.industry,
         country: body.country ?? pos.country,
-        walletId: body.walletId ?? pos.walletId,
         fees: String(Number(pos.fees ?? "0") + body.feesSettled),
         updatedAt: new Date(),
       })
@@ -213,7 +208,6 @@ async function upsertPositionOnBuy(
       sector: body.sector ?? "Other",
       industry: body.industry ?? "Other",
       country: body.country ?? "Other",
-      walletId: body.walletId ?? null,
       fees: String(body.feesSettled),
       isOpen: true,
       openedAt: body.openedAt ?? new Date(),
@@ -298,120 +292,6 @@ async function processSell(
   return { position: updated, realizedGainLoss }
 }
 
-async function createWalletLink(
-  tx: DB,
-  userId: string,
-  body: {
-    walletId?: string
-    symbol: string
-    type: "BUY" | "SELL" | "DIVIDEND"
-    quantity: number
-    price: number
-    currency: string
-    feesSettled: number
-    taxes?: number
-    exchangeRate: number
-    transactionId: string
-    portfolioId: string
-  },
-) {
-  if (!body.walletId) return null
-
-  const [wallet] = await tx
-    .select()
-    .from(wallets)
-    .where(and(eq(wallets.id, body.walletId), eq(wallets.userId, userId)))
-  if (!wallet) return null
-
-  const symbol = body.symbol.toUpperCase()
-  const reference = `PORTFOLIO_${body.type}_${symbol}_${body.transactionId.slice(0, 8)}`
-  const amount = body.type === "BUY"
-    ? -(body.quantity * body.price + body.feesSettled)
-    : body.type === "SELL"
-      ? body.quantity * body.price - body.feesSettled
-      : body.quantity * body.price - (body.taxes ?? 0) // DIVIDEND credits the NET (gross − withholding tax)
-
-  const [fresh] = await tx
-    .select()
-    .from(wallets)
-    .where(eq(wallets.id, wallet.id))
-    .for("update")
-
-  const newBalance = Math.round((Number(fresh.balance) + amount) * 1e8) / 1e8
-  const newAvailable = Math.round((Number(fresh.availableBalance) + amount) * 1e8) / 1e8
-
-  if (newAvailable < -1e-9) {
-    return { error: "Insufficient wallet funds" }
-  }
-
-  await tx
-    .update(wallets)
-    .set({ balance: scale8(newBalance), availableBalance: scale8(newAvailable), updatedAt: new Date() })
-    .where(eq(wallets.id, wallet.id))
-
-  const [wt] = await tx
-    .insert(walletTransactions)
-    .values({
-      userId,
-      walletId: wallet.id,
-      type: "INVEST",
-      amount: scale8(amount),
-      currency: fresh.currency,
-      reference,
-      portfolioId: body.portfolioId,
-      executedAt: new Date(),
-    })
-    .returning()
-
-  return { walletTx: wt, newBalance, newAvailable }
-}
-
-/**
- * Rewrite the paired wallet ledger row + balance after a PATCH changes the
- * transaction's quantity/price/taxes. Applies the signed delta between the new
- * wallet effect and the previously credited amount (§49.3).
- */
-async function applyWalletDelta(
-  tx: DB,
-  existing: typeof portfolioTransactions.$inferSelect,
-  txId: string,
-  newSigned: number,
-) {
-  if (!existing.walletId) return
-  const reference = `PORTFOLIO_${existing.type}_${existing.instrumentSymbol}_${txId.slice(0, 8)}`
-  const [wt] = await tx
-    .select()
-    .from(walletTransactions)
-    .where(and(eq(walletTransactions.reference, reference), eq(walletTransactions.walletId, existing.walletId)))
-    .limit(1)
-  if (!wt) return
-
-  const oldSigned = Number(wt.amount)
-  const delta = Math.round((newSigned - oldSigned) * 1e8) / 1e8
-  if (delta === 0) return
-
-  const [wallet] = await tx
-    .select()
-    .from(wallets)
-    .where(eq(wallets.id, existing.walletId))
-    .limit(1)
-  if (!wallet) return
-
-  await tx
-    .update(wallets)
-    .set({
-      balance: scale8(Math.round((Number(wallet.balance) + delta) * 1e8) / 1e8),
-      availableBalance: scale8(Math.round((Number(wallet.availableBalance) + delta) * 1e8) / 1e8),
-      updatedAt: new Date(),
-    })
-    .where(eq(wallets.id, wallet.id))
-
-  await tx
-    .update(walletTransactions)
-    .set({ amount: scale8(newSigned), updatedAt: new Date() })
-    .where(eq(walletTransactions.id, wt.id))
-}
-
 const PositionCreateSchema = z.object({
   symbol: z.string().min(1).max(20),
   quantity: z.number().positive(),
@@ -428,7 +308,6 @@ const PositionCreateSchema = z.object({
   sector: z.string().optional(),
   country: z.string().optional(),
   instrumentName: z.string().optional(),
-  walletId: z.string().uuid().optional(),
   fees: z.number().nonnegative().optional(),
   feesType: z.enum(["fixed", "pct"]).optional(),
   feeCurrency: z.string().length(3).optional(),
@@ -581,7 +460,6 @@ export function createTransactionRoutes(db?: DB) {
           userId: identity.id,
           portfolioId,
           positionId: body.positionId ?? null,
-          walletId: body.walletId ?? null,
           type: body.type,
           instrumentSymbol: symbol,
           instrumentName: body.instrumentName ?? null,
@@ -653,20 +531,6 @@ export function createTransactionRoutes(db?: DB) {
 
       await recomputePortfolioTotals(tx, identity.id, portfolioId)
 
-      let walletLink = null
-      if (body.walletId) {
-        walletLink = await createWalletLink(tx, identity.id, {
-          ...body,
-          symbol,
-          taxes: taxes ?? 0,
-          feesSettled: fx.feesSettled,
-          exchangeRate: fx.fields.exchangeRate,
-          transactionId: inserted.id,
-          portfolioId,
-        })
-        if (walletLink && "error" in walletLink) return { error: walletLink.error }
-      }
-
       const convertedFees =
         body.fees != null
           ? round2(
@@ -694,7 +558,6 @@ export function createTransactionRoutes(db?: DB) {
           realizedGainLoss,
         },
         position,
-        walletLink,
       }
     })
 
@@ -783,13 +646,6 @@ export function createTransactionRoutes(db?: DB) {
         })
         .where(eq(portfolioTransactions.id, txId))
         .returning()
-
-      // Re-derive the wallet delta (taxes/quantity/price changes) — §49.3
-      const feesSettled = fx.feesSettled
-      const newSigned = existing.type === "BUY"
-        ? -(netAmount + feesSettled)
-        : netAmount - feesSettled
-      await applyWalletDelta(tx, existing, txId, newSigned)
 
       await recomputePortfolioTotals(tx, identity.id, portfolioId)
 
@@ -900,37 +756,6 @@ export function createTransactionRoutes(db?: DB) {
         .delete(portfolioTransactions)
         .where(eq(portfolioTransactions.id, txId))
 
-      if (existing.walletId) {
-        const ref = `PORTFOLIO_${existing.type}_${existing.instrumentSymbol}_${txId.slice(0, 8)}`
-        await tx
-          .delete(walletTransactions)
-          .where(
-            and(
-              eq(walletTransactions.portfolioId, portfolioId),
-              eq(walletTransactions.reference, ref),
-            ),
-          )
-
-        const [wallet] = await tx
-          .select()
-          .from(wallets)
-          .where(eq(wallets.id, existing.walletId))
-          .then((rows) => rows.slice(0, 1))
-        if (wallet) {
-          const notional = Number(existing.totalAmount)
-          const feesSettled = Number(existing.feesSettled)
-          const reversal = existing.type === "BUY"
-            ? notional + feesSettled
-            : -(notional - feesSettled)
-          const newBal = Math.round((Number(wallet.balance) + reversal) * 1e8) / 1e8
-          const newAvail = Math.round((Number(wallet.availableBalance) + reversal) * 1e8) / 1e8
-          await tx
-            .update(wallets)
-            .set({ balance: scale8(newBal), availableBalance: scale8(newAvail), updatedAt: new Date() })
-            .where(eq(wallets.id, wallet.id))
-        }
-      }
-
       await recomputePortfolioTotals(tx, identity.id, portfolioId)
     })
 
@@ -1026,7 +851,7 @@ export function createTransactionRoutes(db?: DB) {
   })
 
   // DELETE /:id/positions/:positionId — remove position + its transactions
-  // (D4.8: cash from trades returned to linked wallets), mock parity:
+  // (cash effect is derived by replay, plan §62), mock parity:
   // returns the closed position
   routes.delete("/:id/positions/:positionId", async (c) => {
     const identity = c.get("userIdentity")
@@ -1051,51 +876,7 @@ export function createTransactionRoutes(db?: DB) {
 
     const closed = { ...pos, isOpen: false, closedAt: new Date() } as PositionRow
 
-    const linked = await database
-      .select()
-      .from(portfolioTransactions)
-      .where(
-        and(
-          eq(portfolioTransactions.userId, identity.id),
-          eq(portfolioTransactions.portfolioId, portfolioId),
-          eq(portfolioTransactions.positionId, positionId),
-        ),
-      )
-
     await database.transaction(async (tx) => {
-      for (const existing of linked) {
-        if (existing.walletId) {
-          const ref = `PORTFOLIO_${existing.type}_${existing.instrumentSymbol}_${existing.id.slice(0, 8)}`
-          await tx
-            .delete(walletTransactions)
-            .where(
-              and(
-                eq(walletTransactions.portfolioId, portfolioId),
-                eq(walletTransactions.reference, ref),
-              ),
-            )
-
-          const [wallet] = await tx
-            .select()
-            .from(wallets)
-            .where(eq(wallets.id, existing.walletId))
-            .then((rows) => rows.slice(0, 1))
-          if (wallet) {
-            const notional = Number(existing.totalAmount)
-            const feesSettled = Number(existing.feesSettled)
-            const reversal = existing.type === "BUY"
-              ? notional + feesSettled
-              : -(notional - feesSettled)
-            const newBal = Math.round((Number(wallet.balance) + reversal) * 1e8) / 1e8
-            const newAvail = Math.round((Number(wallet.availableBalance) + reversal) * 1e8) / 1e8
-            await tx
-              .update(wallets)
-              .set({ balance: scale8(newBal), availableBalance: scale8(newAvail), updatedAt: new Date() })
-              .where(eq(wallets.id, wallet.id))
-          }
-        }
-      }
-
       await tx
         .delete(portfolioTransactions)
         .where(
@@ -1327,7 +1108,6 @@ export function createTransactionRoutes(db?: DB) {
           userId: identity.id,
           portfolioId,
           positionId: null,
-          walletId: body.walletId ?? null,
           type: "BUY",
           instrumentSymbol: symbol,
           instrumentName: body.instrumentName ?? null,
@@ -1369,7 +1149,6 @@ export function createTransactionRoutes(db?: DB) {
         assetType: body.assetType,
         sector: body.sector,
         country: body.country,
-        walletId: body.walletId,
         feesSettled: fx.feesSettled,
         contractSize: body.contractSize,
         direction: body.direction,
@@ -1388,24 +1167,7 @@ export function createTransactionRoutes(db?: DB) {
 
       await recomputePortfolioTotals(tx, identity.id, portfolioId)
 
-      let walletLink = null
-      if (body.walletId) {
-        walletLink = await createWalletLink(tx, identity.id, {
-          walletId: body.walletId,
-          symbol,
-          type: "BUY",
-          quantity: body.quantity,
-          price,
-          currency,
-          feesSettled: fx.feesSettled,
-          exchangeRate: fx.fields.exchangeRate,
-          transactionId: inserted.id,
-          portfolioId,
-        })
-        if (walletLink && "error" in walletLink) return { error: walletLink.error }
-      }
-
-      return { transaction: inserted, position, walletLink }
+      return { transaction: inserted, position }
     })
 
     if ("error" in result) {
@@ -1622,7 +1384,6 @@ function serializeTx(r: typeof portfolioTransactions.$inferSelect, labels: Label
     id: r.id,
     portfolioId: r.portfolioId,
     positionId: r.positionId,
-    walletId: r.walletId,
     type: r.type,
     instrumentSymbol: r.instrumentSymbol,
     instrumentName: r.instrumentName,
