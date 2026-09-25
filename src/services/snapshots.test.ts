@@ -16,6 +16,7 @@ import {
   portfolioTransactions,
   positions,
   valueSnapshots,
+  portfolioCashTransactions,
 } from "../db/schema.js"
 import { snapshotPortfolioValue } from "./quotes.js"
 import { runBackfill, calendarDays } from "./backfill.js"
@@ -57,6 +58,15 @@ async function seedBuy(
     instrumentCurrency: ccy,
     totalAmount: String(qty * price),
     executedAt: new Date(`${date}T10:00:00Z`),
+  })
+  // §62.4 — pair a funding DEPOSIT so the position's cash nets to 0.
+  await db.insert(portfolioCashTransactions).values({
+    userId,
+    portfolioId,
+    type: "DEPOSIT",
+    amount: String(qty * price),
+    currency: ccy,
+    transactionDate: date,
   })
 }
 

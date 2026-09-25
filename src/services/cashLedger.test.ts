@@ -60,17 +60,17 @@ async function ext(row: {
 }
 
 describe("tradeCashEffects (pure)", () => {
-  it("BUY debits the principal and credits the fee leg", () => {
+  it("BUY debits both the principal and the fee (a fee is a cost)", () => {
     const m = tradeCashEffects({ type: "BUY", totalAmount: 1000, feesSettled: 10, currency: "USD" })
-    // principal −1000, fee paid +10, same ccy → net −990
-    expect(m.get("USD")).toBeCloseTo(-990)
+    // principal −1000 + fee −10, same ccy → net −1010
+    expect(m.get("USD")).toBeCloseTo(-1010)
     expect(m.size).toBe(1)
   })
 
   it("BUY with a fee in a different currency keeps both legs", () => {
     const m = tradeCashEffects({ type: "BUY", totalAmount: 1000, feesSettled: 10, currency: "USD", feeCurrency: "EUR" })
     expect(m.get("USD")).toBeCloseTo(-1000)
-    expect(m.get("EUR")).toBeCloseTo(10)
+    expect(m.get("EUR")).toBeCloseTo(-10)
   })
 
   it("SELL credits the principal and debits the fee leg", () => {
@@ -100,8 +100,8 @@ describe("cashBalances", () => {
     await ext({ type: "DEPOSIT", amount: 500, currency: "USD", transactionDate: "2024-01-01" })
 
     const b = await cashBalances(h.db, null, portfolioId)
-    // BUY −990 + SELL +476 + DEPOSIT +500 = −14
-    expect(b.get("USD")).toBeCloseTo(-14)
+    // BUY −1010 + SELL +476 + DEPOSIT +500 = −34
+    expect(b.get("USD")).toBeCloseTo(-34)
   })
 
   it("isolate: no rows → empty map", async () => {

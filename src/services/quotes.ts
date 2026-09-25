@@ -16,7 +16,7 @@ import { and, eq, sql } from "drizzle-orm"
 import type { DB } from "../db/index.js"
 import { positions, portfolios, valueSnapshots } from "../db/schema.js"
 import { fxTo } from "./instruments-fx.js"
-import { dailyNetCashFlows } from "./cashFlows.js"
+import { cashBalances, dailyExternalFlows } from "./cashLedger.js"
 import { recomputeReturnColumns, syncCurrentValueFromSnapshots } from "./returnColumns.js"
 
 // ── Types ─────────────────────────────────────────────────────────────────
@@ -359,7 +359,13 @@ export async function refreshQuotes(
   }
 
   const snapshotDate = now.toISOString().slice(0, 10)
-  const todayFlows = await dailyNetCashFlows(db, authToken, portfolioId, snapshotDate, snapshotDate, base)
+  // §62.4 — value includes the current cash total (base currency); netFlow is
+  // EXTERNAL flows only (a same-day deposit/withdrawal shows up here).
+  const cashBal = await cashBalances(db, authToken, portfolioId)
+  let totalCash = 0
+  for (const [ccy, bal] of cashBal) totalCash += bal * (await toBase(ccy, 1))
+  totalValue += totalCash
+  const todayFlows = await dailyExternalFlows(db, authToken, portfolioId, snapshotDate, snapshotDate, base)
   await db
     .insert(valueSnapshots)
     .values({

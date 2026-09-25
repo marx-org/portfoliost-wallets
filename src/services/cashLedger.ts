@@ -38,10 +38,13 @@ export function toDateStr(v: unknown): string | null {
  *
  *   principal leg (tx.currency):      BUY −|totalAmount|, SELL +|totalAmount|,
  *                                     DIVIDEND +|totalAmount| (net, §49)
- *   fee leg (feeCurrency ?? currency): BUY +|fee|, SELL −|fee|, DIVIDEND −|fee|
+ *   fee leg (feeCurrency ?? currency): −|fee| for every type (a fee is always
+ *       a cost the account pays)
  *
  * `feesSettled` is already materialized in the fee currency at write time
- * (D28/D29 `pct` → |notional| resolution), so replay uses it directly.
+ * (D28/D29 `pct` → |notional| resolution), so replay uses it directly. A BUY
+ * thus draws |notional| + |fee| from the account — matching the old wallet
+ * debit — so a position funded by an equal deposit nets its currency to 0.
  * Non-trade types (SPLIT/ADJUSTMENT markers) → empty map.
  */
 export function tradeCashEffects(tx: {
@@ -55,13 +58,12 @@ export function tradeCashEffects(tx: {
   const notional = Number(tx.totalAmount ?? 0)
   const fee = Number(tx.feesSettled ?? 0)
   const principalSign = tx.type === "BUY" ? -1 : 1 // SELL / DIVIDEND credit
-  const feeSign = tx.type === "BUY" ? 1 : -1 // BUY pays the fee, SELL/DIVIDEND receive net
   if (notional !== 0 && tx.currency) {
     out.set(tx.currency.toUpperCase(), (out.get(tx.currency.toUpperCase()) ?? 0) + principalSign * Math.abs(notional))
   }
   if (fee !== 0) {
     const feeCcy = (tx.feeCurrency ?? tx.currency ?? "").toUpperCase()
-    if (feeCcy) out.set(feeCcy, (out.get(feeCcy) ?? 0) + feeSign * Math.abs(fee))
+    if (feeCcy) out.set(feeCcy, (out.get(feeCcy) ?? 0) - Math.abs(fee))
   }
   return out
 }
@@ -191,6 +193,9 @@ export async function cashBalanceSeries(
     if (!day || !(r.currency ?? "")) continue
     events.push({ day, ccy: (r.currency ?? "").toUpperCase(), delta: Number(r.amount ?? 0) })
   }
+
+  // the running-balance sweep assumes events are ordered by day
+  events.sort((a, b) => (a.day < b.day ? -1 : a.day > b.day ? 1 : 0))
 
   // running per-currency balances at each day's close
   const running = new Map<string, number>()

@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import { crossRate } from "@marx2/contracts/fx"
 import { makeHarness } from "../routes/test-utils.js"
-import { portfolios, portfolioTransactions, positions, valueSnapshots } from "../db/schema.js"
+import { portfolios, portfolioTransactions, positions, valueSnapshots, portfolioCashTransactions } from "../db/schema.js"
 import { eq, and } from "drizzle-orm"
 import {
   buildPriceMap,
@@ -66,6 +66,16 @@ async function seedBuy(
     instrumentCurrency: ccy,
     totalAmount: String(qty * price),
     executedAt: new Date(`${date}T12:00:00Z`),
+  })
+  // §62.4 — fund the BUY with a same-day DEPOSIT so the position's cash nets
+  // to 0 (real imports pair a deposit with the buy); value = position value.
+  await db.insert(portfolioCashTransactions).values({
+    userId,
+    portfolioId,
+    type: "DEPOSIT",
+    amount: String(qty * price),
+    currency: ccy,
+    transactionDate: date,
   })
 }
 
@@ -340,7 +350,10 @@ describe("recalcPortfolioHistory (background recalc on transaction changes)", ()
     expect((await db.select().from(valueSnapshots).where(eq(valueSnapshots.portfolioId, pf.id))).length).toBeGreaterThan(0)
 
     // The user deleted every transaction → the old series must disappear.
+    // (§62.4 — a leftover funding deposit would be real cash value, so a full
+    // clear removes the cash rows too.)
     await db.delete(portfolioTransactions).where(eq(portfolioTransactions.portfolioId, pf.id))
+    await db.delete(portfolioCashTransactions).where(eq(portfolioCashTransactions.portfolioId, pf.id))
     await recalcPortfolioHistory(db, pf.id, "Bearer test", now)
 
     const snaps = await db.select().from(valueSnapshots).where(eq(valueSnapshots.portfolioId, pf.id))
@@ -560,5 +573,117 @@ describe("§53.6 — snapshot-on-read agrees with the backfill pipeline", () => 
       )
 
     expect(Number(snap.value)).toBeCloseTo(Number(backfillDay2!.value), 6)
+  })
+})
+
+describe("§62.4 — snapshots include cash; netFlow is external-only", () => {
+  beforeEach(() => {
+    process.env.INSTRUMENTS_URL = "http://instruments:3000"
+  })
+  afterEach(() => {
+    vi.unstubAllGlobals()
+    delete process.env.INSTRUMENTS_URL
+    __resetBackfillRunnerForTests()
+  })
+
+  it("a BUY/SELL day with no deposit/withdraw has netFlow 0, but the cash balance carries in value", async () => {
+    const { db, user } = await makeHarness("624-a")
+    const pf = await seedPortfolio(db, user.id)
+    // Fund 1500, buy 10×150 same day (nets to 0), then a SELL on day 2.
+    await seedBuy(db, user.id, pf.id, "AAPL", 10, 150, "2026-07-01") // +1500 dep, -1500 buy
+    await seedPosition(db, user.id, pf.id, "AAPL", 10, 150)
+    await db.insert(portfolioTransactions).values({
+      userId: user.id,
+      portfolioId: pf.id,
+      type: "SELL",
+      instrumentSymbol: "AAPL",
+      quantity: "10",
+      price: "160",
+      currency: "USD",
+      instrumentCurrency: "USD",
+      totalAmount: "1600",
+      executedAt: new Date("2026-07-02T12:00:00Z"),
+    })
+    mockPriceBars({ AAPL: { dates: ["2026-07-01", "2026-07-02"], closes: [150, 160] } })
+
+    const now = new Date("2026-07-03T00:00:00Z")
+    await runBackfill(db, pf.id, "Bearer test", now)
+
+    const snaps = await db
+      .select()
+      .from(valueSnapshots)
+      .where(eq(valueSnapshots.portfolioId, pf.id))
+      .orderBy(valueSnapshots.snapshotDate)
+    const byDate = new Map(snaps.map((s) => [s.snapshotDate, s]))
+
+    // Day 1: fully funded + bought → cash 0, position 1500 → value 1500.
+    // The funding deposit IS an external flow → netFlow 1500 (D50 external-only).
+    expect(Number(byDate.get("2026-07-01")?.value)).toBeCloseTo(1500)
+    expect(Number(byDate.get("2026-07-01")?.netFlow)).toBeCloseTo(1500)
+
+    // Day 2: SELL (internal move) → cash +1600, position 0 → value 1600, but
+    // netFlow is 0 (no deposit/withdraw that day).
+    expect(Number(byDate.get("2026-07-02")?.value)).toBeCloseTo(1600)
+    expect(Number(byDate.get("2026-07-02")?.netFlow)).toBe(0)
+  })
+
+  it("a portfolio that only holds cash shows the cash value (no positions)", async () => {
+    const { db, user } = await makeHarness("624-b")
+    const pf = await seedPortfolio(db, user.id)
+    await db.insert(portfolioCashTransactions).values({
+      userId: user.id,
+      portfolioId: pf.id,
+      type: "DEPOSIT",
+      amount: "1000",
+      currency: "USD",
+      transactionDate: "2026-07-01",
+    })
+    mockPriceBars({})
+
+    const now = new Date("2026-07-04T00:00:00Z")
+    await runBackfill(db, pf.id, "Bearer test", now)
+
+    const snaps = await db
+      .select()
+      .from(valueSnapshots)
+      .where(eq(valueSnapshots.portfolioId, pf.id))
+      .orderBy(valueSnapshots.snapshotDate)
+    expect(snaps.length).toBeGreaterThanOrEqual(1)
+    const last = snaps[snaps.length - 1]
+    expect(Number(last.value)).toBeCloseTo(1000)
+    expect(Number(last.invested)).toBe(0)
+  })
+
+  it("snapshot value = positions + foreign-currency cash converted into base", async () => {
+    const { mockInstrumentsFx, unmockInstrumentsFx } = await import("../test-fx-mock.js")
+    mockInstrumentsFx({ table: { USD: 1.08, EUR: 1.08, PLN: 4.3 }, asOf: "2026-07-05" })
+    try {
+      const { db, user } = await makeHarness("624-c")
+      const pf = await seedPortfolio(db, user.id, "PLN")
+      // A USD deposit in a PLN-based portfolio.
+      await db.insert(portfolioCashTransactions).values({
+        userId: user.id,
+        portfolioId: pf.id,
+        type: "DEPOSIT",
+        amount: "100",
+        currency: "USD",
+        transactionDate: "2026-07-01",
+      })
+      // cash-only portfolio — no symbols, so no price fetch; the FX stub above
+      // (mockInstrumentsFx) must stay the active fetch stub.
+      const now = new Date("2026-07-04T00:00:00Z")
+      await runBackfill(db, pf.id, "Bearer test", now)
+
+      const snaps = await db
+        .select()
+        .from(valueSnapshots)
+        .where(eq(valueSnapshots.portfolioId, pf.id))
+        .orderBy(valueSnapshots.snapshotDate)
+      const last = snaps[snaps.length - 1]
+      // 100 USD × (4.3 / 1.08) = 398.148... in PLN
+      expect(Number(last.value)).toBeCloseTo(100 * (4.3 / 1.08), 2)
+    } finally {
+      unmockInstrumentsFx()
+    }
   })
 })

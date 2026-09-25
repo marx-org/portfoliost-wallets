@@ -8,8 +8,9 @@ import {
   positions,
   portfolioTransactions,
   valueSnapshots,
+  portfolioCashTransactions,
 } from "../db/schema.js"
-import { eq } from "drizzle-orm"
+import { eq, and } from "drizzle-orm"
 import { getBackfillStatus } from "../services/backfill.js"
 import { __resetBackfillRunnerForTests } from "../services/backfill-runner.js"
 
@@ -57,6 +58,15 @@ async function seedBuy(db: DB, userId: string, portfolioId: string, symbol: stri
     instrumentCurrency: "USD",
     totalAmount: String(qty * price),
     executedAt: new Date(`${date}T12:00:00Z`),
+  })
+  // §62.4 — pair a funding DEPOSIT so the position's cash nets to 0.
+  await db.insert(portfolioCashTransactions).values({
+    userId,
+    portfolioId,
+    type: "DEPOSIT",
+    amount: String(qty * price),
+    currency: "USD",
+    transactionDate: date,
   })
 }
 
@@ -170,7 +180,14 @@ describe("POST /api/portfolios/:id/recompute (plan §27.2)", () => {
 
     const dates = (await h.db.select().from(valueSnapshots).where(eq(valueSnapshots.portfolioId, pf.id))).map((s) => s.snapshotDate)
     expect(dates).not.toContain("2026-06-15") // stale day removed by full replace
-    expect(dates).not.toContain("2026-07-03") // no open position after the SELL
+    // §62.4 — after the full SELL the proceeds are held as cash, so later days
+    // carry the cash value (the sale proceeds), not nothing.
+    expect(dates).toContain("2026-07-03")
+    const sold = await h.db
+      .select({ value: valueSnapshots.value })
+      .from(valueSnapshots)
+      .where(and(eq(valueSnapshots.portfolioId, pf.id), eq(valueSnapshots.snapshotDate, "2026-07-03")))
+    expect(Number(sold[0].value)).toBeCloseTo(1550) // sale proceeds as cash
     expect(dates).toContain("2026-07-01")
   })
 

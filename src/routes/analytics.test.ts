@@ -3,7 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import { Hono } from "hono"
 import { createPortfolioRoutes, timeframeCutoff } from "./portfolios.js"
 import { makeHarness } from "./test-utils.js"
-import { portfolios, portfolioTransactions, valueSnapshots } from "../db/schema.js"
+import { portfolios, portfolioTransactions, valueSnapshots, portfolioCashTransactions } from "../db/schema.js"
 import { calendarDays } from "../services/backfill.js"
 
 function app(db: Parameters<typeof createPortfolioRoutes>[0]) {
@@ -56,6 +56,17 @@ async function seedBuy(
     instrumentCurrency: "USD",
     totalAmount: String(totalAmount ?? qty * price),
     executedAt: new Date(`${date}T12:00:00Z`),
+  })
+  // §62.4 — pair a funding DEPOSIT (same magnitude/date) so the position's
+  // cash nets to 0 and the benchmark overlay mirrors the capital deployment
+  // as an external flow (D50 now mirrors dailyExternalFlows, not trades).
+  await db.insert(portfolioCashTransactions).values({
+    userId,
+    portfolioId,
+    type: "DEPOSIT",
+    amount: String(totalAmount ?? qty * price),
+    currency: "USD",
+    transactionDate: date,
   })
 }
 

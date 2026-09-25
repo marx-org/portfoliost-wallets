@@ -9,6 +9,7 @@ import {
   portfolios,
   positions,
   portfolioTransactions,
+  portfolioCashTransactions,
 } from "../db/schema.js"
 import { eq, sql } from "drizzle-orm"
 
@@ -1354,6 +1355,16 @@ describe("Aggregates & metrics (§15 Phase G)", () => {
       method: "POST",
       headers: h.headers,
       body: JSON.stringify(BUY_BODY),
+    })
+    // §62.4 — fund the position so cash nets to 0 and totalValue = the
+    // position value. A BUY draws (notional + fee) from the account, so the
+    // funding deposit is 1500 + 4.99.
+    await h.db.insert(portfolioCashTransactions).values({
+      userId: h.user.id,
+      portfolioId: portfolio.id,
+      type: "DEPOSIT",
+      amount: "1504.99",
+      currency: "USD",
     })
 
     const res = await a.request(`/api/portfolios/${portfolio.id}/summary-metrics`, { headers: h.headers })

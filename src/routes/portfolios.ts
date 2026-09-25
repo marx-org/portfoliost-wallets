@@ -15,8 +15,7 @@ import { refreshQuotes } from "../services/quotes.js"
 import { getPortfolioNews } from "../services/portfolioNews.js"
 import { getPortfolioCalendar } from "../services/portfolioCalendar.js"
 import { runBackfill, getBackfillStatus, buildBenchmarkSeries, forcePortfolioRecalc, hasBackfillableHistory } from "../services/backfill.js"
-import { dailyNetCashFlows } from "../services/cashFlows.js"
-import { cashBalances } from "../services/cashLedger.js"
+import { cashBalances, dailyExternalFlows } from "../services/cashLedger.js"
 import { buildPortfolioCash } from "./portfolio-cash.js"
 import { computeRiskMetrics } from "../services/riskMetrics.js"
 import { resolveRates, fxTo } from "../services/instruments-fx.js"
@@ -853,10 +852,17 @@ export function createPortfolioRoutes(db?: DB) {
         ),
       )
 
-    const totalValue = posRows.reduce(
+    const positionValue = posRows.reduce(
       (s, p) => s + (p.marketValue != null ? Number(p.marketValue) : Number(p.quantity) * Number(p.averageCostBasis)),
       0,
     )
+    // §62.4 — totalValue includes the current cash total (base currency);
+    // positionValue stays positions-only.
+    const cashBal = await cashBalances(database, c.req.header("Authorization") ?? "", portfolioId)
+    const sumToBase = await fxTo(c.req.header("Authorization") ?? "", portfolio.baseCurrency ?? "USD")
+    let cashTotal = 0
+    for (const [ccy, bal] of cashBal) cashTotal += bal * (await sumToBase(ccy, 1))
+    const totalValue = positionValue + cashTotal
     const totalCostBasis = posRows.reduce(
       (s, p) => s + Number(p.quantity) * Number(p.averageCostBasis),
       0,
@@ -911,7 +917,7 @@ export function createPortfolioRoutes(db?: DB) {
       totalValue: Math.round(totalValue * 100) / 100,
       totalInvested: Math.round(totalInvested * 100) / 100,
       costBasis: Math.round(totalCostBasis * 100) / 100,
-      positionValue: Math.round(totalValue * 100) / 100,
+      positionValue: Math.round(positionValue * 100) / 100,
       simpleReturnPercent,
       investmentReturnPercent: simpleReturnPercent,
       currencyImpactPercent: 0,
@@ -1026,7 +1032,7 @@ export function createPortfolioRoutes(db?: DB) {
       const from = firstRow.snapshotDate
       const to = lastRow.snapshotDate
       const baseCurrency = pf.baseCurrency ?? "USD"
-      const flows = await dailyNetCashFlows(database, c.req.header("Authorization") ?? "", id, from, to, baseCurrency)
+      const flows = await dailyExternalFlows(database, c.req.header("Authorization") ?? "", id, from, to, baseCurrency)
       const seedInvested = Number(firstRow.invested ?? 0)
       const calcType = (["moneyWeighted", "timeWeighted", "simple"] as const).includes(
         benchmarkCalcType as "moneyWeighted" | "timeWeighted" | "simple",

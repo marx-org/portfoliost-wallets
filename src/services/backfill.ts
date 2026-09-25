@@ -19,12 +19,13 @@ import type { DB } from "../db/index.js"
 import {
   portfolioBackfillMetadata,
   portfolios,
+  portfolioCashTransactions,
   portfolioTransactions,
   positions,
   valueSnapshots,
 } from "../db/schema.js"
 import { fxTo, instrumentsBase, resolvedFxRate } from "./instruments-fx.js"
-import { dailyNetCashFlows } from "./cashFlows.js"
+import { cashBalanceSeries, dailyExternalFlows } from "./cashLedger.js"
 import { enqueueBackfill } from "./backfill-runner.js"
 import {
   recomputeReturnColumns,
@@ -439,8 +440,9 @@ export async function computeSnapshotBatch(
 ): Promise<SnapshotRow[]> {
   throwIfAborted(signal)
 
-  // 1. Find firstTxDate
-  const minRows = await db
+  // 1. Determine the window start: the earliest BUY/SELL trade OR cash row
+  //    (§62.4 — a portfolio that only holds cash still has value to backfill).
+  const minTrade = await db
     .select({ minDate: sql<string>`min(${portfolioTransactions.executedAt})` })
     .from(portfolioTransactions)
     .where(
@@ -449,10 +451,19 @@ export async function computeSnapshotBatch(
         sql`${portfolioTransactions.type} in ('BUY','SELL')`,
       ),
     )
-  const firstTxDate = minRows[0]?.minDate
-  if (!firstTxDate) return [] // no transactions yet
-
-  const from = toDateStr(firstTxDate)
+  const [pfRow] = await db
+    .select({ baseCurrency: portfolios.baseCurrency })
+    .from(portfolios)
+    .where(eq(portfolios.id, portfolioId))
+    .limit(1)
+  const base = (pfRow?.baseCurrency ?? "USD").toUpperCase()
+  const minCash = await db
+    .select({ minDate: sql<string>`min(${portfolioCashTransactions.transactionDate})` })
+    .from(portfolioCashTransactions)
+    .where(eq(portfolioCashTransactions.portfolioId, portfolioId))
+  const firstDate = minTrade[0]?.minDate ?? (minCash[0]?.minDate ? `${minCash[0].minDate}T00:00:00.000Z` : null)
+  if (!firstDate) return [] // no trades and no cash yet
+  const from = toDateStr(firstDate)
   if (!from) return []
   const to = daysAgo(1, now) // yesterday
   if (from > to) return [] // only one day of history, nothing to backfill
@@ -476,7 +487,13 @@ export async function computeSnapshotBatch(
     )
     .orderBy(portfolioTransactions.executedAt)
 
-  if (txRows.length === 0) return []
+  const hasCash =
+    (await db
+      .select({ d: sql<string>`1` })
+      .from(portfolioCashTransactions)
+      .where(eq(portfolioCashTransactions.portfolioId, portfolioId))
+      .limit(1)).length > 0
+  if (txRows.length === 0 && !hasCash) return []
 
   // Collect unique symbols + their instrument currencies (null = unknown,
   // never guessed — plan §45.3)
@@ -500,28 +517,21 @@ export async function computeSnapshotBatch(
     symbolEvents.set(tx.symbol, arr)
   }
 
-  // 4. Portfolio base currency (needed before the price fetch — plan §48.3
-  //    converts server-side INTO the base, so the target must be known up front).
-  const [portfolio] = await db
-    .select({ baseCurrency: portfolios.baseCurrency })
-    .from(portfolios)
-    .where(eq(portfolios.id, portfolioId))
-    .limit(1)
-  const base = (portfolio?.baseCurrency ?? "USD").toUpperCase()
-
-  // Per-symbol conversion target: known non-base instrument currencies are
-  // converted server-side (?currency=<base>); unknown or already-base
-  // currencies stay native. The value path then multiplies qty × close with
-  // no FX lookup (the "qty-only" property, plan §48.3).
+  // 4. Per-symbol conversion target (base already resolved in step 1).
+  //    known non-base instrument currencies are converted server-side
+  //    (?currency=<base>); unknown or already-base currencies stay native.
   const targetCcy = new Map<string, string | null>()
   for (const [sym, ccy] of symbolCcy) {
     targetCcy.set(sym, ccy && ccy.toUpperCase() !== base ? base : null)
   }
 
   // 5. Fetch price series per symbol from instruments (bounded fan-out —
-  //    see fetchPriceSeries; an aborted signal rejects promptly)
+  //    see fetchPriceSeries; an aborted signal rejects promptly). A
+  //    cash-only portfolio has no symbols to price.
   const symbols = [...symbolCcy.keys()]
-  const priceSeries = await fetchPriceSeries(symbols, from, to, authToken, fetchPriceBars, signal, targetCcy)
+  const priceSeries = symbols.length
+    ? await fetchPriceSeries(symbols, from, to, authToken, fetchPriceBars, signal, targetCcy)
+    : new Map<string, PriceBarSeries>()
   throwIfAborted(signal)
 
   // Cost-basis currency conversion for `invested` — a genuine rate-only need
@@ -531,9 +541,12 @@ export async function computeSnapshotBatch(
   // 6. Build daily value series
   const days = calendarDays(from, to)
 
-  // Daily net cash flows (BUY − SELL) in base currency populate netFlow so the
-  // portfolio's own TWR/MWR/simple columns are flow-aware (D49/D50).
-  const dailyFlows = await dailyNetCashFlows(db, authToken, portfolioId, from, to, base)
+  // §62.4 / D50: netFlow = EXTERNAL flows only (DEPOSIT +, WITHDRAWAL −,
+  // TRANSFER ± its own leg) in base currency — trade rows (BUY/SELL) are
+  // internal cash↔position moves, no longer flows. Cash value is added to
+  // the position value below via the per-day base-currency balance series.
+  const dailyFlows = await dailyExternalFlows(db, authToken, portfolioId, from, to, base)
+  const cashSeries = await cashBalanceSeries(db, authToken, portfolioId, from, to, base)
   throwIfAborted(signal)
 
   // Pre-build carry-forward price maps per symbol
@@ -605,7 +618,11 @@ export async function computeSnapshotBatch(
         totalInvested += qty * cost.avg * (await toBase(cost.ccy, 1))
       }
     }
-    if (totalValue > 0) {
+    // §62.4 — cash is part of the portfolio value (base-currency balance at
+    // day's close); `invested` stays the position cost basis so TWR/MWR keep
+    // treating cash as external flow (netFlow) rather than invested capital.
+    totalValue += cashSeries.get(day) ?? 0
+    if (totalValue !== 0) {
       snapBatch.push({
         portfolioId,
         snapshotDate: day,
