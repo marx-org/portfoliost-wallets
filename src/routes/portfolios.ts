@@ -16,6 +16,8 @@ import { getPortfolioNews } from "../services/portfolioNews.js"
 import { getPortfolioCalendar } from "../services/portfolioCalendar.js"
 import { runBackfill, getBackfillStatus, buildBenchmarkSeries, forcePortfolioRecalc, hasBackfillableHistory } from "../services/backfill.js"
 import { dailyNetCashFlows } from "../services/cashFlows.js"
+import { cashBalances } from "../services/cashLedger.js"
+import { buildPortfolioCash } from "./portfolio-cash.js"
 import { computeRiskMetrics } from "../services/riskMetrics.js"
 import { resolveRates, fxTo } from "../services/instruments-fx.js"
 import { sumSnapshotsByDate, buildMergedPerformance } from "../services/mergedAnalytics.js"
@@ -211,6 +213,7 @@ export function createPortfolioRoutes(db?: DB) {
             dailyChange: 0,
             dailyChangePercentage: 0,
           },
+          cash: await buildPortfolioCash(database, c.req.header("Authorization") ?? "", p),
         }
       }),
     )
@@ -313,6 +316,25 @@ export function createPortfolioRoutes(db?: DB) {
       p.weight = totalValue > 0 ? Math.round((p.totalValue / totalValue) * 10000) / 100 : 0
     }
 
+    // §62 — aggregate cash across all portfolios (per-currency Σ, base-converted)
+    const cashByCcy = new Map<string, number>()
+    for (const p of portfolioRows) {
+      const bal = await cashBalances(database, c.req.header("Authorization") ?? "", p.id)
+      for (const [ccy, amt] of bal) cashByCcy.set(ccy, (cashByCcy.get(ccy) ?? 0) + amt)
+    }
+    let totalCash = 0
+    const cashConverted = new Map<string, number>()
+    for (const [ccy, balance] of cashByCcy) cashConverted.set(ccy, balance * (await toBase(ccy)))
+    for (const conv of cashConverted.values()) totalCash += conv
+    totalCash = Math.round(totalCash * 100) / 100
+    const cashBreakdown = [...cashByCcy.entries()]
+      .sort((a, b) => a[0].localeCompare(b[0]))
+      .map(([currency, balance]) => ({
+        currency,
+        balance: Math.round(balance * 1e8) / 1e8,
+        weight: totalCash !== 0 ? Math.round((cashConverted.get(currency)! / totalCash) * 10000) / 100 : 0,
+      }))
+
     return c.json({
       totalValue,
       totalInvested,
@@ -328,6 +350,8 @@ export function createPortfolioRoutes(db?: DB) {
       externalCapitalBasisSource: "none",
       externalCapitalSuppressedReason: null,
       externalCapitalReturnBasisKind: "inception",
+      totalCash,
+      cashBreakdown,
     } satisfies PortfolioTotalMetrics)
   })
 
@@ -716,6 +740,7 @@ export function createPortfolioRoutes(db?: DB) {
       metrics,
       positions: posSummaries,
       positionCount: posSummaries.length,
+      cash: await buildPortfolioCash(database, c.req.header("Authorization") ?? "", p),
     })
   })
 

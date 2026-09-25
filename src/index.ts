@@ -5,6 +5,7 @@ import { validateJwt } from "./auth.js"
 import { createPortfolioRoutes } from "./routes/portfolios.js"
 import { createPublicShareRoutes } from "./routes/portfolios.js"
 import { createCrossPortfolioTransactionsRoute } from "./routes/portfolio-transactions.js"
+import { createPortfolioCashRoutes } from "./routes/portfolio-cash.js"
 import { createLabelRoutes } from "./routes/labels.js"
 import { createPositionLabelRoutes } from "./routes/position-labels.js"
 import { createTransactionLabelRoutes } from "./routes/transaction-labels.js"
@@ -45,6 +46,7 @@ const api = new Hono()
 // §15 — portfolio management (D53–D64)
 // D2: cross-portfolio transaction feed (must be mounted before portfolio routes to avoid /:id collision)
 api.route("/portfolios/transactions", createCrossPortfolioTransactionsRoute())
+api.route("/portfolios", createPortfolioCashRoutes())
 api.route("/portfolios", createPortfolioRoutes())
 // G3: public share view (auth-exempt) — mounted at /portfolios/public to avoid auth middleware
 api.route("/portfolios/public", createPublicShareRoutes())
