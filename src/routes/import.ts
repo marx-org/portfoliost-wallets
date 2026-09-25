@@ -758,13 +758,16 @@ async function insertImportPortfolioCashTx(
   if (!c) return { inserted: false }
   const ccy = c.currency.toUpperCase()
 
-  // sign clamp (§58.3): the importer may send the sheet's signed value.
+  // sign clamp (§58.3): the importer may send the sheet's signed value. A
+  // TRANSFER is a debit out of the source — stored negated (magnitude kept
+  // positive) so the paired legs match the interactive route (§62.3): the
+  // source leg is negative, the destination leg positive.
   const amount =
     c.type === "DEPOSIT"
       ? Math.abs(c.amount)
       : c.type === "WITHDRAWAL"
         ? -Math.abs(c.amount)
-        : c.amount
+        : -Math.abs(c.amount)
 
   // labels → ids (unknown name → row error, §58.3)
   const labelIds = await resolveImportLabelIds(tx, userId, c.labels ?? [], row.externalId)
@@ -834,11 +837,11 @@ async function insertImportPortfolioCashTx(
     )
   }
 
-  // server-computed target leg (same-ccy = −amount, cross = amount × rate);
-  // target currency = the row's currency (both legs store it, §62).
+  // server-computed target leg: same-ccy = |amount|, cross = |amount| × rate.
+  // Both legs store the row currency (§62); the credit leg is positive.
   const rate = c.exchangeRate ?? 1
   const targetAmount =
-    c.targetAmount != null ? c.targetAmount : rate === 1 ? -amount : -(Math.abs(amount) * rate)
+    c.targetAmount != null ? c.targetAmount : Math.abs(amount) * (rate === 1 ? 1 : rate)
 
   const [debit] = await tx
     .insert(portfolioCashTransactions)
@@ -847,12 +850,16 @@ async function insertImportPortfolioCashTx(
       portfolioId,
       toPortfolioId: to.id,
       amount: scale8(amount),
-      transferFxRate: rate != null && rate !== 1 ? String(rate) : null,
+      transferFxRate: rate !== 1 ? String(rate) : null,
       targetAmount: scale8(targetAmount),
       externalId: row.externalId,
     })
     .onConflictDoNothing()
     .returning()
+
+  // idempotency: the debit leg already exists (re-import) → skip the pair
+  // (the caller counts this row as skipped)
+  if (!debit) return { inserted: false }
 
   const [credit] = await tx
     .insert(portfolioCashTransactions)
@@ -861,14 +868,22 @@ async function insertImportPortfolioCashTx(
       portfolioId: to.id,
       toPortfolioId: portfolioId,
       amount: scale8(targetAmount),
-      transferFxRate: rate != null && rate !== 1 ? String(rate) : null,
+      transferFxRate: rate !== 1 ? String(rate) : null,
       targetAmount: scale8(amount),
       reference: c.reference ? `${c.reference} (→ ${toName})` : `→ ${toName}`,
       externalId: `${row.externalId}#t`,
+      linkedTxId: debit.id,
     })
     .onConflictDoNothing()
     .returning()
 
+  if (credit) {
+    // link both ways (§62.3)
+    await tx
+      .update(portfolioCashTransactions)
+      .set({ linkedTxId: credit.id })
+      .where(eq(portfolioCashTransactions.id, debit.id))
+  }
   if (debit && labelIds.size > 0) {
     await tx
       .insert(portfolioCashTransactionLabels)

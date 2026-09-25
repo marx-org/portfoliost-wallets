@@ -895,3 +895,117 @@ describe("import labels + dividend tax convention (§55.2)", () => {
     expect(b4.inserted).toBe(1)
   })
 })
+
+describe("§62.5 — import on the new cash schema", () => {
+  it("DEPOSIT/WITHDRAWAL land with clamped signs + labels", async () => {
+    const h = await boot()
+    await seedPortfolio(h)
+    // bootstrap the label the row will reference (§55.1)
+    await h.app.request("/api/import/labels/bootstrap", {
+      method: "POST",
+      headers: { ...h.headers, "content-type": "application/json" },
+      body: JSON.stringify({ externalSource: "google-sheets:transakcje", labels: ["Crypto"] }),
+    })
+
+    const res = await postTransactions(h, [
+      { externalId: "d1", portfolioName: "Transakcje", executedAt: "2024-01-01T00:00:00.000Z",
+        cashTx: { type: "DEPOSIT", amount: -500, currency: "USD", labels: ["Crypto"] } },
+      { externalId: "w1", portfolioName: "Transakcje", executedAt: "2024-01-02T00:00:00.000Z",
+        cashTx: { type: "WITHDRAWAL", amount: 100, currency: "USD" } },
+    ])
+    expect(res.status).toBe(200)
+    expect((await res.json()).errors).toEqual([])
+
+    const rows = await h.db.select().from(portfolioCashTransactions).orderBy(portfolioCashTransactions.createdAt)
+    const dep = rows.find((r) => r.type === "DEPOSIT")!
+    const wdr = rows.find((r) => r.type === "WITHDRAWAL")!
+    expect(Number(dep.amount)).toBe(500) // clamped positive
+    expect(Number(wdr.amount)).toBe(-100) // clamped negative
+
+    const { portfolioCashTransactionLabels } = await import("../db/schema.js")
+    const { labels } = await import("../db/schema.js")
+    const [lbl] = await h.db.select().from(labels).where(eq(labels.name, "Crypto"))
+    const joins = await h.db.select().from(portfolioCashTransactionLabels).where(eq(portfolioCashTransactionLabels.cashTransactionId, dep.id))
+    expect(joins).toHaveLength(1)
+    expect(joins[0].labelId).toBe(lbl.id)
+  })
+
+  it("cross-ccy TRANSFER pair: amounts, linkedTxId, both portfolios' balances move", async () => {
+    const h = await boot()
+    const { portfolioId } = await seedPortfolio(h) // Transakcje
+    const otherId = crypto.randomUUID()
+    await h.db.insert(portfolios).values({ userId: "user-1", id: otherId, name: "IKE", baseCurrency: "USD" })
+
+    const res = await postTransactions(h, [
+      { externalId: "tr-1", portfolioName: "Transakcje", executedAt: "2024-01-01T00:00:00.000Z",
+        cashTx: { type: "TRANSFER", amount: -200, currency: "USD", toPortfolioName: "IKE", exchangeRate: 1 } },
+    ])
+    expect(res.status).toBe(200)
+    expect((await res.json()).errors).toEqual([])
+
+    const legs = await h.db.select().from(portfolioCashTransactions).where(eq(portfolioCashTransactions.type, "TRANSFER"))
+    expect(legs).toHaveLength(2)
+    const debit = legs.find((l) => l.portfolioId === portfolioId)!
+    const credit = legs.find((l) => l.portfolioId === otherId)!
+    expect(Number(debit.amount)).toBe(-200)
+    expect(Number(credit.amount)).toBe(200)
+    expect(debit.linkedTxId).toBe(credit.id)
+    expect(credit.linkedTxId).toBe(debit.id)
+    expect(credit.externalId).toBe("tr-1#t")
+
+    const { cashBalances } = await import("../services/cashLedger.js")
+    expect((await cashBalances(h.db, null, portfolioId)).get("USD")).toBe(-200)
+    expect((await cashBalances(h.db, null, otherId)).get("USD")).toBe(200)
+  })
+
+  it("unknown portfolio name on a cash row → row error", async () => {
+    const h = await boot()
+    await seedPortfolio(h)
+    const res = await postTransactions(h, [
+      { externalId: "bad", portfolioName: "NOPE", executedAt: "2024-01-01T00:00:00.000Z",
+        cashTx: { type: "DEPOSIT", amount: 10, currency: "USD" } },
+    ])
+    const body = await res.json()
+    expect(body.errors[0].error).toBe("portfolio_not_found")
+  })
+
+  it("TRANSFER re-import: the #t credit leg dedupes (idempotent)", async () => {
+    const h = await boot()
+    const { portfolioId } = await seedPortfolio(h)
+    const otherId = crypto.randomUUID()
+    await h.db.insert(portfolios).values({ userId: "user-1", id: otherId, name: "IKE", baseCurrency: "USD" })
+    const payload = [
+      { externalId: "tr-x", portfolioName: "Transakcje", executedAt: "2024-01-01T00:00:00.000Z",
+        cashTx: { type: "TRANSFER", amount: -50, currency: "USD", toPortfolioName: "IKE" } },
+    ]
+    const first = await (await postTransactions(h, payload)).json()
+    expect(first.inserted).toBe(1)
+    const second = await (await postTransactions(h, payload)).json()
+    expect(second.inserted).toBe(0)
+    expect(second.skipped).toBe(1)
+    expect(await h.db.select().from(portfolioCashTransactions).where(eq(portfolioCashTransactions.type, "TRANSFER"))).toHaveLength(2)
+  })
+
+  it("wipe removes both transfer legs; re-import recreates idempotently", async () => {
+    const h = await boot()
+    const { portfolioId } = await seedPortfolio(h)
+    const otherId = crypto.randomUUID()
+    await h.db.insert(portfolios).values({ userId: "user-1", id: otherId, name: "IKE", baseCurrency: "USD" })
+    const payload = [
+      { externalId: "tr-w", portfolioName: "Transakcje", executedAt: "2024-01-01T00:00:00.000Z",
+        cashTx: { type: "TRANSFER", amount: -30, currency: "USD", toPortfolioName: "IKE" } },
+    ]
+    await (await postTransactions(h, payload)).json()
+    expect(await h.db.select().from(portfolioCashTransactions)).toHaveLength(2)
+
+    // wipe the source (both legs are tagged google-sheets:transakcje)
+    const wipe = await h.app.request("/api/import/source/google-sheets%3Atransakcje", { method: "DELETE", headers: h.headers })
+    expect(wipe.status).toBe(200)
+    expect(await h.db.select().from(portfolioCashTransactions)).toHaveLength(0)
+
+    // re-import recreates exactly the pair
+    const re = await (await postTransactions(h, payload)).json()
+    expect(re.inserted).toBe(1)
+    expect(await h.db.select().from(portfolioCashTransactions)).toHaveLength(2)
+  })
+})
