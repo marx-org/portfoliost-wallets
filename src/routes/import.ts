@@ -849,6 +849,17 @@ async function insertImportPortfolioCashTx(
   const rate = c.exchangeRate ?? 1
   const targetAmount =
     c.targetAmount != null ? c.targetAmount : Math.abs(amount) * (rate === 1 ? 1 : rate)
+  // The server-created credit leg states where the money CAME from, so both
+  // legs show the transfer direction in the cash tables (mirrors the
+  // interactive route, §62 follow-up).
+  const [fromRow] = await tx
+    .select({ name: portfolios.name })
+    .from(portfolios)
+    .where(eq(portfolios.id, portfolioId))
+  const fromName = fromRow?.name ?? ""
+  const creditDesc = c.description
+    ? `${c.description} (from ${fromName})`
+    : `from ${fromName}`
 
   const [debit] = await tx
     .insert(portfolioCashTransactions)
@@ -872,6 +883,7 @@ async function insertImportPortfolioCashTx(
     .insert(portfolioCashTransactions)
     .values({
       ...baseRow,
+      description: creditDesc ?? null,
       portfolioId: to.id,
       toPortfolioId: portfolioId,
       amount: scale8(targetAmount),

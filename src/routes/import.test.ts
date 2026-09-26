@@ -1032,7 +1032,7 @@ describe("§62.5 — import on the new cash schema", () => {
 
     const res = await postTransactions(h, [
       { externalId: "tr-1", portfolioName: "Transakcje", executedAt: "2024-01-01T00:00:00.000Z",
-        cashTx: { type: "TRANSFER", amount: -200, currency: "USD", toPortfolioName: "IKE", exchangeRate: 1 } },
+        cashTx: { type: "TRANSFER", amount: -200, currency: "USD", toPortfolioName: "IKE", exchangeRate: 1, description: "Sell: X (→ IKE)" } },
     ])
     expect(res.status).toBe(200)
     expect((await res.json()).errors).toEqual([])
@@ -1046,6 +1046,9 @@ describe("§62.5 — import on the new cash schema", () => {
     expect(debit.linkedTxId).toBe(credit.id)
     expect(credit.linkedTxId).toBe(debit.id)
     expect(credit.externalId).toBe("tr-1#t")
+    // the server-created credit leg states where the money came from
+    expect(debit.description).toBe("Sell: X (→ IKE)")
+    expect(credit.description).toBe("Sell: X (→ IKE) (from Transakcje)")
 
     const { cashBalances } = await import("../services/cashLedger.js")
     expect((await cashBalances(h.db, null, portfolioId)).get("USD")).toBe(-200)
