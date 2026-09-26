@@ -498,6 +498,100 @@ describe("POST /api/import/transactions (§23.4)", () => {
     expect(optTx.every((t) => t.realizedGainLoss == null)).toBe(true)
   })
 
+  it("EXPIRATION closes the short option lot at zero value (zero cash effect)", async () => {
+    const h = await boot()
+    const { portfolioId } = await seedPortfolio(h)
+
+    const leg = (type: string, externalId: string): Record<string, unknown> => ({
+      externalId,
+      portfolioName: "Transakcje",
+      executedAt: "2024-03-15T10:00:00.000Z",
+      portfolioTx: {
+        portfolioId,
+        type,
+        instrumentSymbol: "SAP",
+        assetType: "OPTION",
+        direction: "SHORT",
+        optionType: "CALL",
+        contractSize: 100,
+        quantity: 100,
+        price: type === "EXPIRATION" ? 0 : 0.5,
+        currency: "USD",
+      },
+    })
+
+    // open the short lot (a written call), then expire it
+    const res = await postTransactions(h, [leg("SELL", "e-exp-open"), leg("EXPIRATION", "e-exp-open#e")])
+    expect((await res.json()).errors).toEqual([])
+
+    const lots = await h.db.select().from(positions).where(eq(positions.portfolioId, portfolioId))
+    const option = lots.find((p) => p.direction === "SHORT")
+    expect(option?.isOpen).toBe(false)
+    expect(Number(option?.quantity)).toBe(0)
+
+    const expTx = await h.db
+      .select()
+      .from(portfolioTransactions)
+      .where(and(eq(portfolioTransactions.type, "EXPIRATION"), eq(portfolioTransactions.portfolioId, portfolioId)))
+    expect(expTx).toHaveLength(1)
+    expect(Number(expTx[0].totalAmount)).toBe(0)
+    // the expiry realizes −premium × qty (the short lot's P/L)
+    expect(Number(expTx[0].realizedGainLoss)).toBe(-50)
+
+    // no cash leg was created by the expiry (the premium cash came from the SELL)
+    const cashTxs = await h.db
+      .select()
+      .from(portfolioCashTransactions)
+      .where(eq(portfolioCashTransactions.portfolioId, portfolioId))
+    expect(cashTxs).toHaveLength(0)
+  })
+
+  it("EXPIRATION with a non-zero price or fees → row error", async () => {
+    const h = await boot()
+    const { portfolioId } = await seedPortfolio(h)
+    const bad = {
+      externalId: "e-exp-bad",
+      portfolioName: "Transakcje",
+      executedAt: "2024-03-15T10:00:00.000Z",
+      portfolioTx: {
+        portfolioId,
+        type: "EXPIRATION",
+        instrumentSymbol: "SAP",
+        assetType: "OPTION",
+        direction: "SHORT",
+        quantity: 100,
+        price: 0.5,
+        currency: "USD",
+      },
+    }
+    const res = await postTransactions(h, [bad])
+    const body = await res.json()
+    expect(body.errors.map((e: { error: string }) => e.error)).toEqual(["expiration_must_be_zero_value"])
+  })
+
+  it("EXPIRATION without an open short lot → row error", async () => {
+    const h = await boot()
+    const { portfolioId } = await seedPortfolio(h)
+    const bad = {
+      externalId: "e-exp-nolot",
+      portfolioName: "Transakcje",
+      executedAt: "2024-03-15T10:00:00.000Z",
+      portfolioTx: {
+        portfolioId,
+        type: "EXPIRATION",
+        instrumentSymbol: "SAP",
+        assetType: "OPTION",
+        direction: "SHORT",
+        quantity: 100,
+        price: 0,
+        currency: "USD",
+      },
+    }
+    const res = await postTransactions(h, [bad])
+    const body = await res.json()
+    expect(body.errors.map((e: { error: string }) => e.error)).toEqual(["no_open_position"])
+  })
+
   it("stores pre-restatement originalQuantity/originalPrice independently from restated values", async () => {
     const h = await boot()
     const { portfolioId } = await seedPortfolio(h)

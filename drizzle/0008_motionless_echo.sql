@@ -1,0 +1,2 @@
+ALTER TABLE "portfolios"."transactions" DROP CONSTRAINT "ck_ptx_type";--> statement-breakpoint
+ALTER TABLE "portfolios"."transactions" ADD CONSTRAINT "ck_ptx_type" CHECK ("portfolios"."transactions"."type" in ('BUY','SELL','DIVIDEND','EXPIRATION'));

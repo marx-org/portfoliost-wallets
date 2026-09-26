@@ -259,7 +259,7 @@ export const portfolioTransactions = portfoliosSchema.table(
     index("idx_ptx_user").on(t.userId, t.executedAt.desc()),
     index("idx_ptx_position").on(t.positionId),
     uniqueIndex("uq_ptx_external").on(t.externalSource, t.externalId).where(sql`${t.externalId} is not null`),
-    check("ck_ptx_type", sql`${t.type} in ('BUY','SELL','DIVIDEND')`),
+    check("ck_ptx_type", sql`${t.type} in ('BUY','SELL','DIVIDEND','EXPIRATION')`),
     check("ck_ptx_rate_source", sql`${t.rateSource} in ('automatic','manual')`),
     check("ck_ptx_fee_rate_source", sql`${t.feeRateSource} in ('automatic','manual')`),
     check("ck_ptx_fees_type", sql`${t.feesType} in ('fixed','pct')`),

@@ -94,7 +94,7 @@ const ImportPortfolioCashTxSchema = z
 const ImportPortfolioTxSchema = z
   .object({
     portfolioId: z.string().uuid(),
-    type: z.enum(["BUY", "SELL", "DIVIDEND"]),
+    type: z.enum(["BUY", "SELL", "DIVIDEND", "EXPIRATION"]),
     instrumentSymbol: z.string().min(1),
     instrumentName: z.string().nullable().optional(),
     assetType: z.string().default("STOCK"),
@@ -115,6 +115,8 @@ const ImportPortfolioTxSchema = z
     feeExchangeRate: z.number().positive().nullable().optional(),
     // Options (plan §24.7): `direction: "SHORT"` marks a short-option OPEN
     // (e.g. a written covered call) — position-creating, regardless of type.
+    // For `type: "EXPIRATION"` it is required and CLOSES the short-option lot
+    // at zero value (zero cash effect).
     direction: z.enum(["LONG", "SHORT"]).nullable().optional(),
     optionType: z.enum(["CALL", "PUT"]).nullable().optional(),
     contractSize: z.number().nullable().optional(),
@@ -264,6 +266,8 @@ async function processImportSell(
     quantity: number
     price: number
     feesSettled: number
+    /** Close the lot with this direction (undefined = default NULL/LONG lot). */
+    direction?: "LONG" | "SHORT" | null
   },
 ): Promise<
   | { position: typeof positions.$inferSelect; realizedGainLoss: number }
@@ -279,6 +283,9 @@ async function processImportSell(
         eq(positions.portfolioId, portfolioId),
         eq(positions.symbol, symbol),
         eq(positions.isOpen, true),
+        body.direction != null
+          ? eq(positions.direction, body.direction)
+          : sql`${positions.direction} is null or ${positions.direction} = 'LONG'`,
       ),
     )
 
@@ -909,6 +916,17 @@ async function insertImportPortfolioTx(
   const feesSettled = settleImportFees(ptx.fees, ptx.feesType, notional)
   const rate = ptx.exchangeRate ?? 1
 
+  // EXPIRATION closes an expired (unexercised) option lot at zero value — it
+  // must carry zero price and zero fees (the premium was booked on the SELL
+  // that opened the short lot; nothing moves on expiry).
+  if (ptx.type === "EXPIRATION" && (ptx.price !== 0 || (ptx.fees ?? 0) !== 0)) {
+    throw new ImportRowError(
+      "expiration_must_be_zero_value",
+      row.externalId,
+      `EXPIRATION requires price 0 and no fees (got price ${ptx.price}, fees ${ptx.fees ?? 0})`,
+    )
+  }
+
   // §49 convention (interactive route): a DIVIDEND's totalAmount is the NET
   // (gross − withholding tax); the wallet leg keeps whatever the importer
   // sent (the sheet's actual cash). taxes > gross is contradictory → row error.
@@ -935,7 +953,9 @@ async function insertImportPortfolioTx(
   // A SHORT row opens (or adds to) a short option position — position-
   // creating, no realized P/L — whether it arrives as type BUY or SELL
   // (written covered calls come in as SELL + direction SHORT, plan §24.7).
-  const isShortOpen = ptx.direction === "SHORT"
+  // EXPIRATION is a CLOSE, not an open — it must fall through to the sell
+  // branch (even though it carries direction SHORT).
+  const isShortOpen = ptx.direction === "SHORT" && ptx.type !== "EXPIRATION"
   if (ptx.type === "BUY" || isShortOpen) {
     const position = await upsertImportPositionOnBuy(tx, userId, ptx.portfolioId, {
       symbol,
@@ -953,15 +973,23 @@ async function insertImportPortfolioTx(
       country: ptx.country ?? null,
     })
     positionId = position.id
-  } else if (ptx.type === "SELL") {
+  } else if (ptx.type === "SELL" || ptx.type === "EXPIRATION") {
     const res = await processImportSell(tx, userId, ptx.portfolioId, {
       symbol,
       quantity: ptx.quantity,
-      price: ptx.price,
-      feesSettled,
+      price: ptx.type === "EXPIRATION" ? 0 : ptx.price,
+      feesSettled: ptx.type === "EXPIRATION" ? 0 : feesSettled,
+      // SELL rows that reach this branch are always default-lot closes (a
+      // SHORT-direction SELL is an open, handled above) — so the default
+      // NULL/LONG lot filter. EXPIRATION closes the SHORT option lot.
+      direction: ptx.type === "EXPIRATION" ? "SHORT" : undefined,
     })
     if ("error" in res) {
-      throw new ImportRowError(res.error, row.externalId, res.message ?? "Cannot sell")
+      throw new ImportRowError(
+        res.error,
+        row.externalId,
+        res.message ?? (ptx.type === "EXPIRATION" ? "Cannot expire option" : "Cannot sell"),
+      )
     }
     positionId = res.position.id
     realizedGainLoss = res.realizedGainLoss
