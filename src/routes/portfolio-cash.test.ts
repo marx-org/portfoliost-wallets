@@ -135,6 +135,9 @@ describe("POST transfers (62.3)", () => {
     // linkedTxId both ways
     expect(d.linkedTxId).toBe(cr.id)
     expect(cr.linkedTxId).toBe(d.id)
+    // both legs show the transfer direction in the description
+    expect(d.description).toBe("→ Dst")
+    expect(cr.description).toBe("from Src")
 
     const cashSrc = await (await h.app.request(`/api/portfolios/${src}/cash`, { headers: h.headers })).json()
     const cashDst = await (await h.app.request(`/api/portfolios/${dst}/cash`, { headers: h.headers })).json()
@@ -314,6 +317,39 @@ describe("PATCH / DELETE / labels on a cash row (62.3)", () => {
     expect(Number(body.amount)).toBe(120)
     expect(body.date).toBe("2024-02-01")
     expect(Array.isArray(body.labels)).toBe(true)
+  })
+
+  it("PATCH a WITHDRAWAL re-clamps the sign and patches currency+fees", async () => {
+    const h = await boot()
+    const pf = await makePf(h, "P1", "USD")
+    const [w] = await h.db
+      .insert(portfolioCashTransactions)
+      .values({ userId: "user-1", portfolioId: pf, type: "WITHDRAWAL", amount: "-100", currency: "USD" })
+      .returning()
+    // edit as a magnitude +150 in EUR with a fixed fee → stored as −150 EUR
+    const res = await h.app.request(`/api/portfolios/cash/transactions/${w.id}`, {
+      method: "PATCH",
+      headers: { ...h.headers, "content-type": "application/json" },
+      body: JSON.stringify({ amount: 150, currency: "EUR", fees: 5, feesType: "fixed" }),
+    })
+    expect(res.status).toBe(200)
+    const body = await res.json()
+    expect(Number(body.amount)).toBe(-150)
+    expect(body.currency).toBe("EUR")
+    expect(Number(body.fees)).toBe(5)
+    expect(body.feeCurrency).toBe("EUR")
+  })
+
+  it("PATCH a zero amount → 422 (the non-zero constraint)", async () => {
+    const h = await boot()
+    const pf = await makePf(h, "P1", "USD")
+    const r = await seedRow(h, pf)
+    const res = await h.app.request(`/api/portfolios/cash/transactions/${r.id}`, {
+      method: "PATCH",
+      headers: { ...h.headers, "content-type": "application/json" },
+      body: JSON.stringify({ amount: 0 }),
+    })
+    expect(res.status).toBe(422)
   })
 
   it("DELETE removes the row (204)", async () => {

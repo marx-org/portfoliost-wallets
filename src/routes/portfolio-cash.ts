@@ -95,10 +95,15 @@ const TransferCashSchema = FeeFxFieldsSchema.extend({
 
 const CashPatchSchema = z
   .object({
-    type: z.enum(["DEPOSIT", "WITHDRAWAL", "TRANSFER"]).optional(),
     amount: z.number().optional(),
+    currency: z.string().regex(ISO_CURRENCY).optional(),
     description: z.string().nullable().optional(),
     date: z.string().nullable().optional(),
+    fees: z.number().nonnegative().nullable().optional(),
+    feesType: z.enum(["fixed", "pct"]).nullable().optional(),
+    feeCurrency: z.string().regex(ISO_CURRENCY).nullable().optional(),
+    feeRateSource: z.enum(["automatic", "manual"]).nullable().optional(),
+    feeExchangeRate: z.number().positive().nullable().optional(),
   })
   .strict()
 
@@ -492,7 +497,15 @@ export function createPortfolioCashRoutes(db?: DB) {
     const debitAmount = -Math.abs(body.amount)
     const rate = toCcy === ccy ? 1 : (body.targetFxRate ?? 1)
     const targetAmount = body.targetAmount != null ? body.targetAmount : Math.abs(body.amount) * rate
-    const ref = body.description ? `${body.description} (→ ${to.name})` : `→ ${to.name}`
+    // Both legs of the pair show the transfer direction in the cash tables:
+    // the debit leg "… (→ Target)", the server-created credit leg "… (from Source)".
+    const debitDesc = body.description
+      ? `${body.description} (→ ${to.name})`
+      : `→ ${to.name}`
+    const ref = debitDesc
+    const creditDesc = body.description
+      ? `${body.description} (from ${from.name})`
+      : `from ${from.name}`
 
     const baseRow = fxFields(body as Record<string, unknown>, ccy)
     const debit = await database.transaction(async (tx) => {
@@ -505,9 +518,9 @@ export function createPortfolioCashRoutes(db?: DB) {
           type: "TRANSFER",
           amount: scale8(debitAmount),
           currency: ccy,
-          description: body.description ?? null,
+          description: debitDesc ?? null,
           transactionDate: body.transactionDate ?? null,
-          reference: body.description ?? null,
+          reference: debitDesc ?? null,
           transferFxRate: rate !== 1 ? String(rate) : null,
           targetAmount: scale8(targetAmount),
           ...baseRow,
@@ -522,7 +535,7 @@ export function createPortfolioCashRoutes(db?: DB) {
           type: "TRANSFER",
           amount: scale8(targetAmount),
           currency: ccy,
-          description: body.description ?? null,
+          description: creditDesc ?? null,
           transactionDate: body.transactionDate ?? null,
           reference: ref,
           transferFxRate: rate !== 1 ? String(rate) : null,
@@ -598,8 +611,37 @@ export function createPortfolioCashRoutes(db?: DB) {
     if (!existing) return c.json({ error: "NotFound", message: "Cash transaction not found" }, 404)
 
     const b = parsed.data
+    if (b.amount != null && b.amount === 0) {
+      return c.json({ error: "ValidationError", message: "amount must be non-zero (delete the row instead)" }, 422)
+    }
     const updates: Partial<typeof portfolioCashTransactions.$inferInsert> = { updatedAt: new Date() }
-    if (b.amount != null) updates.amount = scale8(b.amount)
+    if (b.amount != null && b.amount !== 0) {
+      // Re-apply the §58.3 sign clamp (the modal ships magnitudes).
+      let amount = b.amount
+      if (existing.type === "DEPOSIT") amount = Math.abs(amount)
+      if (existing.type === "WITHDRAWAL") amount = -Math.abs(amount)
+      updates.amount = scale8(amount)
+    }
+    if (b.currency != null && existing.type !== "TRANSFER") {
+      // Transfers keep their currency (the paired leg is denominated in it).
+      updates.currency = b.currency.toUpperCase()
+      // A currency change orphans the fee leg — reset the fee to the new
+      // currency at rate 1 (same convention as the create paths).
+      if (existing.feeCurrency && existing.feeCurrency !== b.currency.toUpperCase()) {
+        updates.feeCurrency = b.currency.toUpperCase()
+      }
+    }
+    if (b.fees != null) updates.fees = b.fees > 0 ? scale8(b.fees) : null
+    if (b.feesType != null) updates.feesType = b.feesType
+    // Default the fee leg to the row currency (like the create paths) when
+    // fees are set but no fee currency sent — without touching rows that
+    // carry no fees at all.
+    if (existing.type !== "TRANSFER" && b.fees != null && b.fees > 0 && b.feeCurrency == null) {
+      updates.feeCurrency = (b.currency ?? existing.currency).toUpperCase()
+    }
+    if (b.feeCurrency != null && existing.type !== "TRANSFER") updates.feeCurrency = b.feeCurrency.toUpperCase()
+    if (b.feeRateSource != null) updates.feeRateSource = b.feeRateSource
+    if (b.feeExchangeRate != null) updates.feeExchangeRate = String(b.feeExchangeRate)
     if (b.description != null) updates.description = b.description
     if (b.date != null) updates.transactionDate = b.date
     await database.update(portfolioCashTransactions).set(updates).where(eq(portfolioCashTransactions.id, txId))
