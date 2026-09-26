@@ -92,9 +92,15 @@ async function pump(): Promise<void> {
       active = { task, controller }
       try {
         await task.run(controller.signal)
-      } catch {
+      } catch (err) {
         // Defensive: run fns swallow their own errors (status='failed'). A
         // throw here must not wedge the queue — drop the pass and move on.
+        // (2026-09-25: observed a recompute pass that vanished with no log —
+        // never log-less again: §63.1)
+        console.error(
+          `[backfill-runner] pass for portfolio ${task.portfolioId} threw outside the run fn:`,
+          err,
+        )
       } finally {
         active = null
       }

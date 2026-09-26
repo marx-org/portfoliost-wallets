@@ -708,6 +708,13 @@ export async function recalcPortfolioHistory(
     // An aborted pass must stay silent: the queue restarts with the latest data.
     if (err instanceof RecalcAbortedError) return
     const msg = err instanceof Error ? err.message : String(err)
-    await setBackfillStatus(db, portfolioId, "failed", { errorMessage: msg }).catch(() => undefined)
+    // §63.1 — the recompute route is fire-and-forget, so this is the ONLY place
+    // a pass failure is observable. Log it (never swallow silently).
+    console.error(
+      `[recalc] portfolio ${portfolioId} failed: ${msg}\n${err instanceof Error ? err.stack : ""}`,
+    )
+    await setBackfillStatus(db, portfolioId, "failed", { errorMessage: msg }).catch((e) =>
+      console.error(`[recalc] portfolio ${portfolioId} failed to persist status:`, e),
+    )
   }
 }

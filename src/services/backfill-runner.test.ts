@@ -123,11 +123,33 @@ describe("backfill-runner (serialized recompute passes)", () => {
     expect(runs).toBe(MAX_AUTO_RESTARTS)
 
     // A fresh enqueue runs immediately.
-    let ran = false
+    let ranFresh = false
     await enqueueBackfill("pf", async () => {
+      ranFresh = true
+    })
+    expect(ranFresh).toBe(true)
+    void p
+  })
+
+  it("logs (never swallows) a pass that throws outside the run fn, and keeps the queue draining", async () => {
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {})
+
+    // A run fn that rejects with a plain (non-abort) error — the defensive
+    // runner catch must log it and move on, not wedge the queue (§63.1).
+    const done = enqueueBackfill("pf-boom", async () => {
+      throw new Error("boom outside run fn")
+    })
+    await done
+    expect(errSpy).toHaveBeenCalled()
+    expect(String(errSpy.mock.calls[0]?.[0])).toContain("pf-boom")
+    expect(String(errSpy.mock.calls[0]?.[0] ?? "")).toContain("threw outside the run fn")
+
+    // Queue still drains after the failure.
+    let ran = false
+    await enqueueBackfill("pf-after", async () => {
       ran = true
     })
     expect(ran).toBe(true)
-    void p
+    errSpy.mockRestore()
   })
 })
