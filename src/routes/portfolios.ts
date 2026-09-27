@@ -19,7 +19,7 @@ import { cashBalances, dailyExternalFlows } from "../services/cashLedger.js"
 import { buildPortfolioCash } from "./portfolio-cash.js"
 import { computeRiskMetrics } from "../services/riskMetrics.js"
 import { resolveRates, fxTo } from "../services/instruments-fx.js"
-import { sumSnapshotsByDate, buildMergedPerformance } from "../services/mergedAnalytics.js"
+import { sumSnapshotsByDateForwardFilled, buildMergedPerformance } from "../services/mergedAnalytics.js"
 import { createTransactionRoutes } from "./portfolio-transactions.js"
 import type { components } from "../generated/api-types.js"
 
@@ -650,8 +650,9 @@ export function createPortfolioRoutes(db?: DB) {
       "USD",
       rows.map((r) => r.baseCurrency),
     )
-    const series = sumSnapshotsByDate(
+    const series = sumSnapshotsByDateForwardFilled(
       rows.map((r) => ({
+        portfolioId: r.portfolioId,
         baseCurrency: r.baseCurrency,
         snapshotDate: r.snapshotDate,
         value: Number(r.value),

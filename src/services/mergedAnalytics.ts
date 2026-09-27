@@ -13,6 +13,9 @@
  */
 
 export interface SnapshotRow {
+  /** Present when the caller groups per portfolio (forward-fill); the naive
+   * per-date sum ignores it. */
+  portfolioId?: string
   baseCurrency: string | null
   snapshotDate: string
   value: number
@@ -59,6 +62,87 @@ export function sumSnapshotsByDate(
  * chart plots `value` only, so the TWR/MWR/simple scalar return fields are
  * left null and monthlyReturns is empty.
  */
+/**
+ * Same as {@link sumSnapshotsByDate}, but each portfolio's value is
+ * forward-filled: on a date where the portfolio has no snapshot, it carries
+ * its latest earlier value instead of contributing 0.
+ *
+ * Why: today's snapshot is written lazily (snapshot-on-read / recompute), so
+ * early in the day only the portfolios the user opened have a "today" row.
+ * A naive per-date sum then collapses the combined total to just those
+ * portfolios (the "sudden drop at the head of the composed chart"). A
+ * portfolio's value is a step function — it does not vanish on days nobody
+ * opened it — so the combined series sums each portfolio's last-known value
+ * as of each date. Historical (complete) dates are unaffected: every
+ * portfolio already has a row there, so forward-fill is a no-op.
+ *
+ * Portfolios whose first snapshot is *after* a given date contribute 0 on
+ * that date (nothing to carry from the past — the combined total ramps up as
+ * each portfolio's history begins, matching the naive sum).
+ */
+export function sumSnapshotsByDateForwardFilled(
+  rows: SnapshotRow[],
+  rateFor: (from: string) => number | null,
+  target: string,
+): MergedPoint[] {
+  const to = target.toUpperCase()
+  const rateCache = new Map<string, number | null>()
+  const rateOf = (from: string): number | null => {
+    const f = (from ?? to).toUpperCase()
+    if (f === to) return 1
+    if (!rateCache.has(f)) rateCache.set(f, rateFor(f))
+    return rateCache.get(f) ?? null
+  }
+
+  const sorted = [...rows].sort(
+    (a, b) =>
+      (a.portfolioId ?? "").localeCompare(b.portfolioId ?? "") ||
+      a.snapshotDate.localeCompare(b.snapshotDate),
+  )
+
+  // Per-portfolio series (converted into `target`), kept sorted by date so
+  // each date can walk its pointer forward.
+  const perPfSeries = new Map<string, { date: string; value: number; invested: number }[]>()
+  for (const row of sorted) {
+    const rate = rateOf(row.baseCurrency ?? to)
+    if (rate == null) continue
+    const pf = row.portfolioId ?? ""
+    const arr = perPfSeries.get(pf) ?? []
+    perPfSeries.set(pf, arr)
+    arr.push({
+      date: row.snapshotDate,
+      value: Number(row.value) * rate,
+      invested: Number(row.invested) * rate,
+    })
+  }
+
+  // Materialize: for each date in the union of snapshot dates, sum each
+  // portfolio's latest value at or before that date (portfolios whose first
+  // snapshot is later contribute 0 — nothing to carry from the past).
+  const dates = [...new Set(rows.map((r) => r.snapshotDate))].sort()
+  const idx = new Map<string, number>()
+  for (const pf of perPfSeries.keys()) idx.set(pf, 0)
+
+  const out: MergedPoint[] = []
+  for (const date of dates) {
+    let value = 0
+    let invested = 0
+    let any = false
+    for (const [pf, series] of perPfSeries) {
+      let i = idx.get(pf)!
+      while (i < series.length - 1 && series[i + 1].date <= date) i++
+      idx.set(pf, i)
+      if (series[i].date <= date) {
+        value += series[i].value
+        invested += series[i].invested
+        any = true
+      }
+    }
+    if (any) out.push({ date, value, invested })
+  }
+  return out
+}
+
 export function buildMergedPerformance(series: MergedPoint[]) {
   const last = series[series.length - 1]
   const totalValue = last?.value ?? 0

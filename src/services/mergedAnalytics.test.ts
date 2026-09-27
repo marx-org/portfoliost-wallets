@@ -1,6 +1,11 @@
 import { describe, expect, it } from "vitest"
 import { crossRate } from "@marx2/contracts/fx"
-import { buildMergedPerformance, sumSnapshotsByDate, type SnapshotRow } from "./mergedAnalytics.js"
+import {
+  buildMergedPerformance,
+  sumSnapshotsByDate,
+  sumSnapshotsByDateForwardFilled,
+  type SnapshotRow,
+} from "./mergedAnalytics.js"
 
 // EUR-quoted table (D27): the rate callback resolves from→USD cross-rates the
 // same way the real service does (plan §48.3 — resolved upstream, passed in).
@@ -69,6 +74,71 @@ describe("sumSnapshotsByDate (§46.1)", () => {
       "2026-01-01",
       "2026-02-01",
     ])
+  })
+})
+
+describe("sumSnapshotsByDateForwardFilled (§63 follow-up)", () => {
+  it("carries a portfolio's last value forward when it has no row on a date", () => {
+    // B is only snapshotted on day 1 (not yet re-quoted on day 2). The naive
+    // sum collapses day 2 to just A; forward-fill keeps B at its last value.
+    const rows: SnapshotRow[] = [
+      { portfolioId: "A", baseCurrency: "USD", snapshotDate: "2026-01-01", value: 1000, invested: 800 },
+      { portfolioId: "B", baseCurrency: "USD", snapshotDate: "2026-01-01", value: 500, invested: 400 },
+      { portfolioId: "A", baseCurrency: "USD", snapshotDate: "2026-01-02", value: 1200, invested: 800 },
+    ]
+    expect(sumSnapshotsByDate(rows, RATES, "USD")).toEqual([
+      { date: "2026-01-01", value: 1500, invested: 1200 },
+      { date: "2026-01-02", value: 1200, invested: 800 }, // B dropped out
+    ])
+    expect(sumSnapshotsByDateForwardFilled(rows, RATES, "USD")).toEqual([
+      { date: "2026-01-01", value: 1500, invested: 1200 },
+      { date: "2026-01-02", value: 1700, invested: 1200 }, // B carried forward
+    ])
+  })
+
+  it("a portfolio whose first snapshot is after a date contributes 0 there", () => {
+    const rows: SnapshotRow[] = [
+      { portfolioId: "A", baseCurrency: "USD", snapshotDate: "2026-01-01", value: 1000, invested: 800 },
+      { portfolioId: "B", baseCurrency: "USD", snapshotDate: "2026-01-02", value: 300, invested: 300 },
+    ]
+    expect(sumSnapshotsByDateForwardFilled(rows, RATES, "USD")).toEqual([
+      { date: "2026-01-01", value: 1000, invested: 800 },
+      { date: "2026-01-02", value: 1300, invested: 1100 },
+    ])
+  })
+
+  it("converts via FX when carrying values forward", () => {
+    const rows: SnapshotRow[] = [
+      { portfolioId: "A", baseCurrency: "PLN", snapshotDate: "2026-01-01", value: 4300, invested: 4000 },
+      { portfolioId: "B", baseCurrency: "USD", snapshotDate: "2026-01-02", value: 500, invested: 500 },
+    ]
+    const pln = (1.08 / 4.3)
+    const result = sumSnapshotsByDateForwardFilled(rows, RATES, "USD")
+    expect(result).toHaveLength(2)
+    expect(result[0].value).toBeCloseTo(4300 * pln, 6)
+    expect(result[1].value).toBeCloseTo(4300 * pln + 500, 6)
+  })
+
+  it("skips rows with unresolvable rates and is empty for empty input", () => {
+    const rows: SnapshotRow[] = [
+      { portfolioId: "A", baseCurrency: "USD", snapshotDate: "2026-01-01", value: 1000, invested: 800 },
+      { portfolioId: "B", baseCurrency: "ZZZ", snapshotDate: "2026-01-02", value: 500, invested: 500 },
+    ]
+    expect(sumSnapshotsByDateForwardFilled(rows, RATES, "USD")).toEqual([
+      { date: "2026-01-01", value: 1000, invested: 800 },
+      { date: "2026-01-02", value: 1000, invested: 800 },
+    ])
+    expect(sumSnapshotsByDateForwardFilled([], RATES, "USD")).toEqual([])
+  })
+
+  it("matches the naive sum when every portfolio has a row on every date", () => {
+    const rows: SnapshotRow[] = [
+      { portfolioId: "A", baseCurrency: "USD", snapshotDate: "2026-01-01", value: 1000, invested: 800 },
+      { portfolioId: "B", baseCurrency: "USD", snapshotDate: "2026-01-01", value: 500, invested: 400 },
+      { portfolioId: "A", baseCurrency: "USD", snapshotDate: "2026-01-02", value: 1100, invested: 800 },
+      { portfolioId: "B", baseCurrency: "USD", snapshotDate: "2026-01-02", value: 600, invested: 400 },
+    ]
+    expect(sumSnapshotsByDateForwardFilled(rows, RATES, "USD")).toEqual(sumSnapshotsByDate(rows, RATES, "USD"))
   })
 })
 
