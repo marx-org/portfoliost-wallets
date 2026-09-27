@@ -1,0 +1,1 @@
+ALTER TABLE "portfolios"."portfolio_backfill_metadata" ADD COLUMN "gap_symbols" text[];

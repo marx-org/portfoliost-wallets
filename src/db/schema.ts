@@ -352,6 +352,10 @@ export const portfolioBackfillMetadata = portfoliosSchema.table(
     startedAt: timestamp("started_at", { withTimezone: true }),
     completedAt: timestamp("completed_at", { withTimezone: true }),
     errorMessage: text("error_message"),
+    // §63.8 — symbols the latest backfill pass held (qty > 0 on the window's
+    // last day) but had NO price bar for → the stored value is a *partial*
+    // sum (silently under-reported). null/absent = every held symbol priced.
+    gapSymbols: text("gap_symbols").array(),
   },
 )
 

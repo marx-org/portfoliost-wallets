@@ -446,12 +446,48 @@ export interface SnapshotRow {
 }
 
 /**
+ * Result of {@link computeSnapshotBatch}: the per-day snapshot rows plus the
+ * held-but-unpriced symbols (no price bar in the window) that were dropped from
+ * every day's value. `gapSymbols.length > 0` means the stored value is a
+ * **partial** sum (§63.8).
+ */
+export interface SnapshotBatch {
+  rows: SnapshotRow[]
+  gapSymbols: string[]
+}
+
+/** No history to backfill (no BUY/SELL or cash yet) — shared by every guard. */
+const EMPTY_BATCH: SnapshotBatch = { rows: [], gapSymbols: [] }
+
+/**
+ * §63.8 — record which held symbols lacked a price bar in the latest pass, so
+ * `GET /:id/analytics` can flag the stored value as a *partial* sum. A null
+ * clears a previously-recorded gap (all held symbols now priced).
+ */
+export async function persistGapSymbols(
+  db: DB,
+  portfolioId: string,
+  gapSymbols: string[] | null,
+): Promise<void> {
+  // Empty = every held symbol priced → store NULL ("no gap") rather than [] so
+  // consumers can treat null as the clean state.
+  const gap = gapSymbols && gapSymbols.length > 0 ? gapSymbols : null
+  await db
+    .insert(portfolioBackfillMetadata)
+    .values({ portfolioId, status: "pending", gapSymbols: gap })
+    .onConflictDoUpdate({
+      target: portfolioBackfillMetadata.portfolioId,
+      set: { gapSymbols: gap },
+    })
+}
+
+/**
  * Recompute the full daily value/invested/netFlow series for one portfolio
  * from its BUY/SELL transactions + instrument price bars (steps 1–7 of the old
- * `_runBackfillCore`). Returns [] when there is no history to backfill (no
- * BUY/SELL transactions, or nothing valued). Honors an optional AbortSignal and
- * throws RecalcAbortedError on abort so the caller never commits a partial
- * series.
+ * `_runBackfillCore`). Returns `{ rows: [], gapSymbols: [] }` when there is no
+ * history to backfill (no BUY/SELL transactions, or nothing valued). Honors an
+ * optional AbortSignal and throws RecalcAbortedError on abort so the caller
+ * never commits a partial series.
  */
 export async function computeSnapshotBatch(
   db: DB,
@@ -464,7 +500,7 @@ export async function computeSnapshotBatch(
    * re-valued (FX for a new date is unknown until the ECB publish and can
    * still move the converted value). */
   toOverride?: string,
-): Promise<SnapshotRow[]> {
+): Promise<SnapshotBatch> {
   throwIfAborted(signal)
 
   // 1. Determine the window start: the earliest BUY/SELL trade OR cash row
@@ -489,11 +525,11 @@ export async function computeSnapshotBatch(
     .from(portfolioCashTransactions)
     .where(eq(portfolioCashTransactions.portfolioId, portfolioId))
   const firstDate = minTrade[0]?.minDate ?? (minCash[0]?.minDate ? `${minCash[0].minDate}T00:00:00.000Z` : null)
-  if (!firstDate) return [] // no trades and no cash yet
+  if (!firstDate) return EMPTY_BATCH // no trades and no cash yet
   const from = toDateStr(firstDate)
-  if (!from) return []
+  if (!from) return EMPTY_BATCH
   const to = toOverride ?? daysAgo(1, now) // yesterday (today when overridden)
-  if (from > to) return [] // only one day of history, nothing to backfill
+  if (from > to) return EMPTY_BATCH // only one day of history, nothing to backfill
 
   // 2. Fetch all BUY/SELL transactions ordered by date
   const txRows = await db
@@ -520,7 +556,7 @@ export async function computeSnapshotBatch(
       .from(portfolioCashTransactions)
       .where(eq(portfolioCashTransactions.portfolioId, portfolioId))
       .limit(1)).length > 0
-  if (txRows.length === 0 && !hasCash) return []
+  if (txRows.length === 0 && !hasCash) return EMPTY_BATCH
 
   // Collect unique symbols + their instrument currencies (null = unknown,
   // never guessed — plan §45.3)
@@ -614,6 +650,18 @@ export async function computeSnapshotBatch(
   const recalcDebug = process.env.RECALC_DEBUG === "1"
   const snapBatch: SnapshotRow[] = []
 
+  // §63.8 — a held symbol (qty > 0 on the window's last day) with NO price bar
+  // for the window is *dropped* from every day's value, so the stored series
+  // is a partial sum. Surface those symbols so the caller can flag the value as
+  // incomplete instead of silently under-reporting (the IKE Beata spike: 18/23
+  // symbols priced → 155k vs true 205k).
+  const lastDay = days[days.length - 1]
+  const gapSymbols: string[] = []
+  for (const sym of symbols) {
+    if ((qtyMaps.get(sym)?.get(lastDay) ?? 0) <= 0) continue
+    if (!priceMaps.get(sym) || !priceMaps.get(sym)!.has(lastDay)) gapSymbols.push(sym)
+  }
+
   for (const day of days) {
     let totalValue = 0
     let totalInvested = 0
@@ -653,7 +701,7 @@ export async function computeSnapshotBatch(
     }
   }
 
-  return snapBatch
+  return { rows: snapBatch, gapSymbols }
 }
 
 async function _runBackfillCore(
@@ -665,12 +713,13 @@ async function _runBackfillCore(
   toOverride?: string,
 ): Promise<void> {
   const batch = await computeSnapshotBatch(db, portfolioId, authToken, now, signal, toOverride)
-  if (batch.length === 0) return
+  await persistGapSymbols(db, portfolioId, batch.gapSymbols)
+  if (batch.rows.length === 0) return
 
   // Bulk upsert in chunks to avoid huge parameter lists
   const CHUNK = 100
-  for (let i = 0; i < batch.length; i += CHUNK) {
-    const chunk = batch.slice(i, i + CHUNK)
+  for (let i = 0; i < batch.rows.length; i += CHUNK) {
+    const chunk = batch.rows.slice(i, i + CHUNK)
     await db
       .insert(valueSnapshots)
       .values(chunk)
@@ -712,10 +761,13 @@ export async function recalcPortfolioHistory(
 
     await db.transaction(async (tx) => {
       await tx.delete(valueSnapshots).where(eq(valueSnapshots.portfolioId, portfolioId))
-      if (batch.length > 0) {
+      // §63.8 — record the held-but-unpriced symbols atomically with the
+      // delete+rebuild so the value is never presented without its gap flag.
+      await persistGapSymbols(tx, portfolioId, batch.gapSymbols)
+      if (batch.rows.length > 0) {
         const CHUNK = 100
-        for (let i = 0; i < batch.length; i += CHUNK) {
-          await tx.insert(valueSnapshots).values(batch.slice(i, i + CHUNK))
+        for (let i = 0; i < batch.rows.length; i += CHUNK) {
+          await tx.insert(valueSnapshots).values(batch.rows.slice(i, i + CHUNK))
         }
       }
     })

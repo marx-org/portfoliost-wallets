@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import { crossRate } from "@marx2/contracts/fx"
 import { makeHarness } from "../routes/test-utils.js"
-import { portfolios, portfolioTransactions, positions, valueSnapshots, portfolioCashTransactions } from "../db/schema.js"
+import { portfolios, portfolioTransactions, positions, valueSnapshots, portfolioCashTransactions, portfolioBackfillMetadata } from "../db/schema.js"
 import { eq, and } from "drizzle-orm"
 import {
   buildPriceMap,
@@ -268,6 +268,71 @@ describe("runBackfill (H6)", () => {
     await runBackfill(db, pf.id, "Bearer test", now)
     // No prices returned → no snapshots → completes without rows (not a failure)
     expect(await getBackfillStatus(db, pf.id)).toBe("complete")
+  })
+})
+
+describe("§63.8 — backfill records held-but-unpriced symbols (no silent under-report)", () => {
+  beforeEach(() => {
+    process.env.INSTRUMENTS_URL = "http://instruments:3000"
+  })
+  afterEach(() => {
+    vi.unstubAllGlobals()
+    delete process.env.INSTRUMENTS_URL
+    __resetBackfillRunnerForTests()
+  })
+
+  it("flags a held symbol with no price bar as a gap (value is a partial sum)", async () => {
+    const { db, user } = await makeHarness("gap-user-1")
+    const pf = await seedPortfolio(db, user.id)
+    // Two held symbols; only AAA has price bars — BBB is dropped from every day.
+    await seedBuy(db, user.id, pf.id, "AAA", 10, 100, "2026-07-01")
+    await seedBuy(db, user.id, pf.id, "BBB", 5, 200, "2026-07-01")
+    mockPriceBars({
+      AAA: { dates: ["2026-07-01", "2026-07-02"], closes: [100, 110] },
+      // BBB intentionally absent → 404 → dropped
+    })
+
+    await runBackfill(db, pf.id, "Bearer t", new Date("2026-07-03T00:00:00Z"))
+
+    const [meta] = await db
+      .select({ gapSymbols: portfolioBackfillMetadata.gapSymbols })
+      .from(portfolioBackfillMetadata)
+      .where(eq(portfolioBackfillMetadata.portfolioId, pf.id))
+    expect(meta?.gapSymbols).toEqual(["BBB"])
+
+    // And the stored value is the partial sum (AAA only) — the under-report the
+    // flag exists to surface.
+    const day2 = await db
+      .select({ value: valueSnapshots.value })
+      .from(valueSnapshots)
+      .where(and(eq(valueSnapshots.portfolioId, pf.id), eq(valueSnapshots.snapshotDate, "2026-07-02")))
+    expect(Number(day2[0]?.value ?? 0)).toBeCloseTo(1100) // 10 × 110, BBB missing
+  })
+
+  it("clears the gap once the missing symbol is priced", async () => {
+    const { db, user } = await makeHarness("gap-user-2")
+    const pf = await seedPortfolio(db, user.id)
+    await seedBuy(db, user.id, pf.id, "AAA", 10, 100, "2026-07-01")
+    await seedBuy(db, user.id, pf.id, "BBB", 5, 200, "2026-07-01")
+
+    // First pass: BBB unpriced → gap recorded.
+    mockPriceBars({ AAA: { dates: ["2026-07-01", "2026-07-02"], closes: [100, 110] } })
+    await runBackfill(db, pf.id, "Bearer t", new Date("2026-07-03T00:00:00Z"))
+    expect(
+      (await db.select().from(portfolioBackfillMetadata).where(eq(portfolioBackfillMetadata.portfolioId, pf.id)))[0]
+        ?.gapSymbols,
+    ).toEqual(["BBB"])
+
+    // Second pass: BBB now has bars → gap cleared (null), value complete.
+    mockPriceBars({
+      AAA: { dates: ["2026-07-01", "2026-07-02"], closes: [100, 110] },
+      BBB: { dates: ["2026-07-01", "2026-07-02"], closes: [200, 210] },
+    })
+    await runBackfill(db, pf.id, "Bearer t", new Date("2026-07-03T00:00:00Z"))
+    expect(
+      (await db.select().from(portfolioBackfillMetadata).where(eq(portfolioBackfillMetadata.portfolioId, pf.id)))[0]
+        ?.gapSymbols,
+    ).toBeNull()
   })
 })
 
@@ -550,7 +615,7 @@ describe("§53.6 — snapshot-on-read agrees with the backfill pipeline", () => 
 
     // Backfill as of 07-03 → the series covers through 07-02 ("yesterday").
     const batch = await computeSnapshotBatch(db, pf.id, "Bearer t", new Date("2026-07-03T00:00:00Z"))
-    const backfillDay2 = batch.find((r) => r.snapshotDate === "2026-07-02")
+    const backfillDay2 = batch.rows.find((r) => r.snapshotDate === "2026-07-02")
     expect(backfillDay2).toBeDefined()
 
     // Snapshot-on-read on 07-02 from live quotes at the day-2 closes:
