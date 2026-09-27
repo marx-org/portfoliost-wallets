@@ -35,6 +35,29 @@ export function instrumentsAuthHeaders(token: string | null | undefined): Record
 }
 
 /**
+ * §63.10 — read the service token for a **non-user** caller, or fail.
+ *
+ * Only the scheduled snapshot sweep needs this: it iterates every portfolio of
+ * every user, so it cannot present a user identity, and it must present the
+ * shared secret instead. Failing here is the whole point — the sweep used to run
+ * with an empty credential, every instruments call was rejected, and the pass
+ * wrote cash-only values over correct ones twice a day for the whole fleet.
+ */
+export function resolveServiceToken(env: NodeJS.ProcessEnv = process.env): string {
+  const token = env.INSTRUMENTS_SERVICE_TOKEN?.trim()
+  if (!token) {
+    throw new Error(
+      "INSTRUMENTS_SERVICE_TOKEN is not set. This job has no user identity, so it " +
+        "cannot use a user JWT against instruments — without the service token every " +
+        "price-bars call is rejected and the pass is refused by the §63.10 write guard " +
+        "instead of writing cash-only values. " +
+        "Set it from the cluster secret (and in docker-compose for local dev).",
+    )
+  }
+  return token
+}
+
+/**
  * Thrown when instruments could not be asked at all (auth rejection, a non-2xx,
  * a network error) — as opposed to answering "this symbol/date has no data".
  *

@@ -1,25 +1,41 @@
 // Scheduled additive snapshot refresh (2026-09-27).
 //
-// Cron job (wallets HelmRelease `snapshotsync`): for EVERY portfolio,
-// upsert value_snapshots for [first trade, TODAY] — never deletes, so a
-// failed/slow pass can't blank a chart. Extends past the normal backfill
-// window (yesterday) so the last two days are re-valued: FX for a fresh
+// Cron job (wallets HelmRelease `snapshotssync` + `snapshotssync-postfx`): for
+// EVERY portfolio, upsert value_snapshots for [first trade, TODAY] — never
+// deletes, so a failed/slow pass can't blank a chart. Extends past the normal
+// backfill window (yesterday) so the last two days are re-valued: FX for a fresh
 // date is unknown until the ECB publish (~16:00 CET, fxsync 17:10 UTC) and
 // can still shift the converted value. Runs after fxsync.
 //
 // The per-portfolio passes are serialized by the shared backfill runner
 // (one at a time — same guard as the analytics-triggered backfills), and
-// `enqueueBackfill` coalesces to one slot per portfolio. No user token is
-// needed: the instruments /internal/fx-rates endpoint is unauthenticated.
+// `enqueueBackfill` coalesces to one slot per portfolio.
+//
+// §63.10 — the credential. This job is not a user: it iterates every portfolio of
+// every user, so it has no single user identity to present and a user JWT is the
+// wrong credential for it by construction. It authenticates with the
+// INSTRUMENTS_SERVICE_TOKEN shared secret, which instruments' serviceOrUserMiddleware
+// accepts in place of a user JWT (instruments/src/auth.ts). The previous version
+// of this file passed an empty string on the belief — stated in its own comment —
+// that instruments' /internal/fx-rates endpoint was unauthenticated. It is not,
+// so every price-bars and FX call 401'd, the backfill dropped every position, and
+// the pass wrote cash-only values over correct ones twice a day for the whole
+// fleet. `main` now fails fast when the token is missing rather than running a
+// pass that cannot price anything.
 //
 // Manual recompute (POST /:id/recompute, default mode) still does a FULL
-// delete+rebuild (forcePortfolioRecalc); this job is the additive one.
+// delete+rebuild (forcePortfolioRecalc); this job is the additive one, and it
+// carries the caller's browser JWT rather than the service token.
 
 import { getDb, closeDb } from "../db/index.js"
 import { portfolios } from "../db/schema.js"
 import { runBackfillRecent } from "../services/backfill.js"
+import { resolveServiceToken } from "../services/instruments-fx.js"
 
 async function main() {
+  // Before touching the DB: a pass that cannot price is refused by the write
+  // guard, so failing here is cheaper and clearer than N portfolio failures.
+  const token = resolveServiceToken()
   const db = getDb()
   const rows = await db
     .select({ id: portfolios.id, name: portfolios.name })
@@ -31,8 +47,10 @@ async function main() {
   let failed = 0
   for (const p of rows) {
     try {
-      // Resolves when the serialized pass has been consumed.
-      await runBackfillRecent(db, p.id, "")
+      // Resolves when the serialized pass has been consumed. Rejections are
+      // swallowed by runBackfillCore (status → 'failed'), so a credential or
+      // transport problem shows up in portfolio_backfill_metadata, not here.
+      await runBackfillRecent(db, p.id, token)
       ok++
       console.log(`[snapshotsync] ${p.name} (${p.id}) ok`)
     } catch (err) {
