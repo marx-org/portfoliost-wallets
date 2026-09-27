@@ -125,7 +125,7 @@ async function buildPortfolioCash(
   authToken: string,
   portfolio: { id: string; baseCurrency: string },
 ): Promise<PortfolioCash> {
-  const base = (portfolio.baseCurrency ?? "USD").toUpperCase()
+  const base = portfolio.baseCurrency.toUpperCase()
   const balances = await cashBalances(db, authToken, portfolio.id)
   const toBase = await fxTo(authToken, base)
   const items: PortfolioCash["balances"] = []
@@ -321,7 +321,7 @@ export function createPortfolioCashRoutes(db?: DB) {
     const database = getDb()
     const portfolio = await loadPortfolio(database, c.req.param("id"), identity.id)
     if (!portfolio) return c.json({ error: "NotFound", message: "Portfolio not found" }, 404)
-    const base = (portfolio.baseCurrency ?? "USD").toUpperCase()
+    const base = portfolio.baseCurrency.toUpperCase()
     const period = c.req.query("period") ?? "ALL"
     const resolution = c.req.query("resolution") ?? "day"
 
@@ -446,7 +446,7 @@ export function createPortfolioCashRoutes(db?: DB) {
     if (!portfolio) return c.json({ error: "NotFound", message: "Portfolio not found" }, 404)
 
     const body = parsed.data
-    const ccy = (body.currency ?? portfolio.baseCurrency ?? "USD").toUpperCase()
+    const ccy = (body.currency ?? portfolio.baseCurrency).toUpperCase()
     const amount = kind === "DEPOSIT" ? Math.abs(body.amount) : -Math.abs(body.amount)
     const baseRow = fxFields(body as Record<string, unknown>, ccy)
 

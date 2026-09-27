@@ -90,7 +90,9 @@ async function recomputePortfolioTotals(
     .select({ baseCurrency: portfolios.baseCurrency })
     .from(portfolios)
     .where(and(eq(portfolios.id, portfolioId), eq(portfolios.userId, userId)))
-  const totalInvested = await externalCashInvested(tx, authToken, portfolioId, pf?.baseCurrency ?? "USD")
+  // §66.4 — a missing portfolio must not silently value as USD.
+  if (!pf) throw new Error(`portfolio ${portfolioId} not found while recomputing invested`)
+  const totalInvested = await externalCashInvested(tx, authToken, portfolioId, pf.baseCurrency)
 
   await tx
     .update(portfolios)
@@ -1070,8 +1072,8 @@ export function createTransactionRoutes(db?: DB) {
     const body = parsed.data
     const symbol = body.symbol.toUpperCase()
     // Use submitted currency when provided; fall back to portfolio base currency
-    const currency = (body.currency ?? body.instrumentCurrency ?? portfolio.baseCurrency ?? "USD").toUpperCase()
-    const instCurrency = (body.instrumentCurrency ?? body.currency ?? portfolio.baseCurrency ?? "USD").toUpperCase()
+    const currency = (body.currency ?? body.instrumentCurrency ?? portfolio.baseCurrency).toUpperCase()
+    const instCurrency = (body.instrumentCurrency ?? body.currency ?? portfolio.baseCurrency).toUpperCase()
     const price = body.price ?? body.averageCostBasis
     if (price == null) {
       return c.json({ error: "ValidationError", message: "price or averageCostBasis is required" }, 422)

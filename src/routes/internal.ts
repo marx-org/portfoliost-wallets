@@ -224,7 +224,8 @@ async function recomputeTotals(tx: DB, userId: string, portfolioId: string) {
     .select({ baseCurrency: portfolios.baseCurrency })
     .from(portfolios)
     .where(and(eq(portfolios.id, portfolioId), eq(portfolios.userId, userId)))
-  const totalInvested = await externalCashInvested(tx, null, portfolioId, pf?.baseCurrency ?? "USD")
+  if (!pf) throw new Error(`internal recompute: portfolio ${portfolioId} not found`)
+  const totalInvested = await externalCashInvested(tx, null, portfolioId, pf.baseCurrency)
 
   await tx
     .update(portfolios)

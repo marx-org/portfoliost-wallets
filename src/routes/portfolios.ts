@@ -260,18 +260,41 @@ export function createPortfolioRoutes(db?: DB) {
       .where(sql`${portfolios.userId} = ${identity.id}`)
 
     // plan §48.6e B5 — each portfolio's value/invested is denominated in its
-    // own base_currency (each position in its instrument currency). Convert
-    // to the aggregate baseCurrency (USD) via instruments' FX BEFORE summing
-    // — never add foreign-currency values raw. Unresolvable pairs degrade
-    // 1:1 (plan §48.3).
-    const toBase = await fxTo(c.req.header("Authorization") ?? "", "USD")
+    // own base_currency (each position in its instrument currency). Convert to
+    // the aggregate base BEFORE summing — never add foreign-currency values raw.
+    //
+    // §66.4 — that base used to be the literal "USD", hardcoded here while
+    // `preferredBaseCurrency` sat imported and unused in this file. The response
+    // then *reported* `baseCurrency: "USD"` while the cards rendered raw
+    // per-portfolio base amounts, which is why the headline and the card sum
+    // could not reconcile (§63.3). Use the user's declared preference instead,
+    // and fail loudly rather than degrade 1:1 on a valuation aggregate.
+    let aggregateBase: string | null = null
+    try {
+      aggregateBase = await preferredBaseCurrency(Object.fromEntries(c.req.raw.headers))
+    } catch (e) {
+      // §66.4 — the preference service being down must not 500 the homepage, but
+      // we must not invent a currency either. Fall back to a value derived from
+      // the user's OWN portfolios (their most common base_currency). If they have
+      // none, aggregateBase stays null and the totals are reported as null so the
+      // SPA renders no symbol rather than a wrong one.
+      const tally = new Map<string, number>()
+      for (const p of portfolioRows) tally.set(p.baseCurrency, (tally.get(p.baseCurrency) ?? 0) + 1)
+      aggregateBase = [...tally.entries()].sort((a, b) => b[1] - a[1])[0]?.[0] ?? null
+      console.warn("[total-metrics] base-currency preference unreadable:", e instanceof Error ? e.message : e)
+    }
+    if (!aggregateBase) {
+      // no honest aggregate base -> no converted totals
+      return c.json({ baseCurrency: null, totalValue: null, totalInvested: null, portfolioBreakdown: [] })
+    }
+    const toBase = await fxTo(c.req.header("Authorization") ?? "", aggregateBase, new Map(), { strict: true })
 
     // Compute actual totals from positions + transactions rather than
     // stale denormalized columns.
     const portfolioBreakdown = await Promise.all(
       portfolioRows.map(async (p) => {
         const totalInvested =
-          Number(p.totalInvested || 0) * (await toBase(p.baseCurrency ?? "USD"))
+          Number(p.totalInvested || 0) * (await toBase(p.baseCurrency))
 
         // Sum market values from open positions (each in its instrument ccy)
         const posRows = await database
@@ -290,7 +313,10 @@ export function createPortfolioRoutes(db?: DB) {
             r.marketValue != null
               ? Number(r.marketValue)
               : Number(r.quantity) * Number(r.averageCostBasis)
-          currentValue += mv * (await toBase(r.instrumentCurrency ?? "USD"))
+          // §66.4 — no guessed source currency: a null instrument_currency is
+          // passed through, and the strict fxTo above throws rather than
+          // valuing it at face value in the base currency.
+          currentValue += mv * (await toBase(r.instrumentCurrency ?? ""))
         }
 
         const gainLoss = currentValue - totalInvested
@@ -397,7 +423,7 @@ export function createPortfolioRoutes(db?: DB) {
           totalCostBasis: costBasis,
           marketValue: mktVal,
           assetType: p.assetType || "STOCK",
-          instrumentCurrency: p.instrumentCurrency || "USD",
+          instrumentCurrency: p.instrumentCurrency,
         })
       }
     }
@@ -542,7 +568,9 @@ export function createPortfolioRoutes(db?: DB) {
       if (v) forwardedHeaders[k] = v
     }
     const defaultBase =
-      parsed.data.baseCurrency ?? (await preferredBaseCurrency(forwardedHeaders))
+      // creation stays best-effort (§66.4): a preference-service blip must not
+      // block creating a portfolio, and the client may pass the base explicitly
+      parsed.data.baseCurrency ?? (await preferredBaseCurrency(forwardedHeaders, undefined, { strict: false }))
 
     try {
       const [created] = await database
@@ -860,7 +888,7 @@ export function createPortfolioRoutes(db?: DB) {
     // §62.4 — totalValue includes the current cash total (base currency);
     // positionValue stays positions-only.
     const cashBal = await cashBalances(database, c.req.header("Authorization") ?? "", portfolioId)
-    const sumToBase = await fxTo(c.req.header("Authorization") ?? "", portfolio.baseCurrency ?? "USD")
+    const sumToBase = await fxTo(c.req.header("Authorization") ?? "", portfolio.baseCurrency, new Map(), { strict: true })
     let cashTotal = 0
     for (const [ccy, bal] of cashBal) cashTotal += bal * (await sumToBase(ccy, 1))
     const totalValue = positionValue + cashTotal
@@ -1044,7 +1072,7 @@ export function createPortfolioRoutes(db?: DB) {
     if (benchmarkSymbols.length > 0 && firstRow && lastRow) {
       const from = firstRow.snapshotDate
       const to = lastRow.snapshotDate
-      const baseCurrency = pf.baseCurrency ?? "USD"
+      const baseCurrency = pf.baseCurrency
       const flows = await dailyExternalFlows(database, c.req.header("Authorization") ?? "", id, from, to, baseCurrency)
       const seedInvested = Number(firstRow.invested ?? 0)
       const calcType = (["moneyWeighted", "timeWeighted", "simple"] as const).includes(

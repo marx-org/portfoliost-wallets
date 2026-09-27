@@ -338,11 +338,16 @@ export async function refreshQuotes(
     .from(portfolios)
     .where(eq(portfolios.id, portfolioId))
     .limit(1)
-  if (!portfolio) return
+  // §66.4 — a missing portfolio row is an error on a valuation path, not a
+  // reason to silently leave the previous snapshot in place.
+  if (!portfolio) throw new Error(`snapshotPortfolioValue: portfolio ${portfolioId} not found`)
 
   const base = portfolio.baseCurrency
   // plan §48.3 — pair rates resolved via instruments, memoized per currency.
-  const toBase = await fxTo(authToken, base)
+  // §66.4 — STRICT: this is the headline valuation. A missing source currency or
+  // an unresolvable pair must abort rather than write a 1:1 number, which is
+  // how the headline ended up disagreeing with the cards (§63.2/§63.3).
+  const toBase = await fxTo(authToken, base, new Map(), { strict: true })
 
   let totalValue = 0
   // §62 follow-up (2026-09-27): invested = cumulative net EXTERNAL cash flow
@@ -350,10 +355,11 @@ export async function refreshQuotes(
   // a fully-invested portfolio has ~0 cash balance but a large invested total.
   let totalInvested = 0
   for (const p of positionRows) {
-    const instFrom = (p.instrumentCurrency ?? "USD").toUpperCase()
+    // §66.4 — no guessed source currency; strict fxTo throws if it is unknown.
+    const instFrom = (p.instrumentCurrency ?? "").toUpperCase()
     // Market value is denominated in the quote's currency (live) or the
     // instrument currency (fallback / legacy stored MV).
-    const valueFrom = (p.quoteCurrency ?? p.instrumentCurrency ?? "USD").toUpperCase()
+    const valueFrom = (p.quoteCurrency ?? p.instrumentCurrency ?? "").toUpperCase()
     const investedRate = await toBase(instFrom, 1)
     const valueRate = valueFrom === instFrom ? investedRate : await toBase(valueFrom, 1)
     const mv = Number(p.marketValue ?? 0)

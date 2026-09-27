@@ -630,7 +630,8 @@ export async function computeSnapshotBatch(
     .from(portfolios)
     .where(eq(portfolios.id, portfolioId))
     .limit(1)
-  const base = (pfRow?.baseCurrency ?? "USD").toUpperCase()
+  if (!pfRow) throw new Error(`backfill: portfolio ${portfolioId} not found`)
+  const base = pfRow.baseCurrency.toUpperCase()
   const minCash = await db
     .select({ minDate: sql<string>`min(${portfolioCashTransactions.transactionDate})` })
     .from(portfolioCashTransactions)

@@ -66,6 +66,24 @@ export function resolveServiceToken(env: NodeJS.ProcessEnv = process.env): strin
  * indistinguishable from "no price history", so the snapshot backfill dropped
  * every position and wrote cash-only values over correct ones, twice a day.
  */
+/** §66.4 — a value cannot be converted because its own currency is unknown.
+ * Thrown only in strict mode (valuation paths). Non-strict callers log and
+ * continue, so a user's single deposit is not blocked by a metadata gap. */
+export class UnknownCurrencyError extends Error {
+  constructor(public readonly target: string) {
+    super(`cannot convert into ${target}: the source currency is unknown`)
+    this.name = "UnknownCurrencyError"
+  }
+}
+
+/** §66.4 — strict mode could not obtain a rate for a real currency pair. */
+export class FxRateUnavailableError extends Error {
+  constructor(public readonly pair: string) {
+    super(`no FX rate available for ${pair}`)
+    this.name = "FxRateUnavailableError"
+  }
+}
+
 export class InstrumentsUnavailableError extends Error {
   constructor(
     public readonly status: number | null,
@@ -165,13 +183,30 @@ export async function fxTo(
 ): Promise<(from: string, amount?: number) => Promise<number>> {
   const target = to.toUpperCase()
   return async (from: string, amount = 1): Promise<number> => {
-    const f = (from ?? "").toUpperCase()
-    if (!f || f === target) return amount
+    const f = (from ?? "").trim().toUpperCase()
+    // §66.4 — an UNKNOWN source currency is not "already in the base". The old
+    // `if (!f || ...) return amount` silently passed the amount through
+    // unconverted, which is the same class of lie as assuming USD: a position
+    // with no instrument_currency was valued at face value in the base currency.
+    if (!f) {
+      if (opts.strict) throw new UnknownCurrencyError(target)
+      console.warn(`[fx] no source currency for a conversion into ${target}: amount left unconverted`)
+      return amount
+    }
+    if (f === target) return amount
     const key = `${f}>${target}`
     let rate = cache.get(key)
     if (rate === undefined) {
       const r = await resolvedFxRate(authToken, f, target, undefined, opts)
-      rate = r?.rate ?? 1
+      // strict: an unresolvable pair must fail the valuation, not silently
+      // become 1:1 (the §63.10 docstring's own argument, applied to rates).
+      if (!r) {
+        if (opts.strict) throw new FxRateUnavailableError(`${f}>${target}`)
+        console.warn(`[fx] no rate for ${f}>${target}: using 1:1`)
+        rate = 1
+      } else {
+        rate = r.rate
+      }
       cache.set(key, rate)
     }
     return amount * rate

@@ -338,7 +338,8 @@ async function recomputeImportPortfolioTotals(tx: DB, authToken: string | null, 
     .select({ baseCurrency: portfolios.baseCurrency })
     .from(portfolios)
     .where(and(eq(portfolios.id, portfolioId), eq(portfolios.userId, userId)))
-  const totalInvested = await externalCashInvested(tx, authToken, portfolioId, pf?.baseCurrency ?? "USD")
+  if (!pf) throw new Error(`import: portfolio ${portfolioId} not found`)
+  const totalInvested = await externalCashInvested(tx, authToken, portfolioId, pf.baseCurrency)
 
   await tx
     .update(portfolios)
@@ -387,7 +388,10 @@ export function createImportRoutes(db?: DB) {
       const v = c.req.header(k)
       if (v) forwardedHeaders[k] = v
     }
-    const defaultBase = await preferredBaseCurrency(forwardedHeaders)
+    // §66.4 — best-effort: a users-auth blip must not abort a sheets import
+    // (the same choice as portfolio creation). The sheet always states each
+    // portfolio's own currency, so this is only a fallback for new portfolios.
+    const defaultBase = await preferredBaseCurrency(forwardedHeaders, undefined, { strict: false })
     const baseCurrency = (parsed.data.baseCurrency ?? defaultBase).toUpperCase()
 
     const [inserted] = await database
