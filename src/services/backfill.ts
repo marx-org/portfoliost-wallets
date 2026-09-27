@@ -339,6 +339,27 @@ export function runBackfill(
 }
 
 /**
+ * Additive refresh (2026-09-27) — the scheduled job's mode. Like
+ * {@link runBackfill} it UPSERTs (never deletes) the computed days, but the
+ * window extends to **today**, so the last two days are re-valued: FX for a
+ * fresh date is unknown until the ECB publish (~16:00 CET) and the converted
+ * portfolio value can still shift after a mid-day pass. A failed pass
+ * leaves the prior values in place (upsert, no deletes) — the chart never
+ * goes blank.
+ */
+export function runBackfillRecent(
+  db: DB,
+  portfolioId: string,
+  authToken: string,
+  now = new Date(),
+): Promise<void> {
+  const today = now.toISOString().slice(0, 10)
+  return enqueueBackfill(portfolioId, (signal) =>
+    runBackfillCore(db, portfolioId, authToken, now, signal, today),
+  )
+}
+
+/**
  * Force-rebuild a portfolio's value-snapshot history on user request.
  * Uses the full delete+rebuild path (`recalcPortfolioHistory`) rather than the
  * upsert-only backfill so stale rows (days that no longer carry value) are
@@ -389,10 +410,11 @@ async function runBackfillCore(
   authToken: string,
   now: Date,
   signal?: AbortSignal,
+  toOverride?: string,
 ): Promise<void> {
   await setBackfillStatus(db, portfolioId, "pending")
   try {
-    await _runBackfillCore(db, portfolioId, authToken, now, signal)
+    await _runBackfillCore(db, portfolioId, authToken, now, signal, toOverride)
     await setBackfillStatus(db, portfolioId, "complete", { completedAt: new Date() })
   } catch (err) {
     // An aborted pass stays silent: the pass that replaced it recomputes the
@@ -437,6 +459,11 @@ export async function computeSnapshotBatch(
   authToken: string,
   now = new Date(),
   signal?: AbortSignal,
+  /** Optional window-end override (YYYY-MM-DD). The default is yesterday —
+   * the scheduled additive refresh passes *today* so the last two days are
+   * re-valued (FX for a new date is unknown until the ECB publish and can
+   * still move the converted value). */
+  toOverride?: string,
 ): Promise<SnapshotRow[]> {
   throwIfAborted(signal)
 
@@ -465,7 +492,7 @@ export async function computeSnapshotBatch(
   if (!firstDate) return [] // no trades and no cash yet
   const from = toDateStr(firstDate)
   if (!from) return []
-  const to = daysAgo(1, now) // yesterday
+  const to = toOverride ?? daysAgo(1, now) // yesterday (today when overridden)
   if (from > to) return [] // only one day of history, nothing to backfill
 
   // 2. Fetch all BUY/SELL transactions ordered by date
@@ -635,8 +662,9 @@ async function _runBackfillCore(
   authToken: string,
   now: Date,
   signal?: AbortSignal,
+  toOverride?: string,
 ): Promise<void> {
-  const batch = await computeSnapshotBatch(db, portfolioId, authToken, now, signal)
+  const batch = await computeSnapshotBatch(db, portfolioId, authToken, now, signal, toOverride)
   if (batch.length === 0) return
 
   // Bulk upsert in chunks to avoid huge parameter lists

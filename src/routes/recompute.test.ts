@@ -205,4 +205,34 @@ describe("POST /api/portfolios/:id/recompute (plan §27.2)", () => {
     const snaps = await h.db.select().from(valueSnapshots).where(eq(valueSnapshots.portfolioId, pf.id))
     expect(snaps.length).toBe(0)
   })
+
+  it("?mode=upsert extends to today AND does not delete (additive job mode)", async () => {
+    const h = await makeHarness("recalc-route-upsert")
+    const a = app(h.db)
+    const pf = await seedPortfolio(h.db, h.user.id)
+    const d = (n: number) => {
+      const x = new Date(); x.setUTCDate(x.getUTCDate() - n)
+      return x.toISOString().slice(0, 10)
+    }
+    const today = d(0), t1 = d(1), t2 = d(2)
+    // BUY 10 days ago; price bars run up to today.
+    await seedBuy(h.db, h.user.id, pf.id, "AAPL", 10, 150, d(10))
+    await seedPosition(h.db, h.user.id, pf.id, "AAPL", 10, 150)
+    mockPriceBars({ AAPL: { dates: [d(10), d(5), today], closes: [150, 160, 170] } })
+    // A stale row that a full rebuild would delete.
+    await h.db.insert(valueSnapshots).values({
+      portfolioId: pf.id, snapshotDate: "2000-01-01", value: "9999", invested: "9999",
+    })
+
+    const res = await a.request(`/api/portfolios/${pf.id}/recompute?mode=upsert`, { method: "POST", headers: h.headers })
+    expect(res.status).toBe(200)
+    expect(await waitForComplete(h.db, pf.id)).toBe("complete")
+
+    const byDate = new Map((await h.db.select().from(valueSnapshots).where(eq(valueSnapshots.portfolioId, pf.id))).map((s) => [s.snapshotDate, Number(s.value)]))
+    // upsert mode reaches TODAY (10 × 170 = 1700), where the default window (yesterday) would stop at t1.
+    expect(byDate.get(today)).toBeCloseTo(1700) // today's bar (170)
+    expect(byDate.get(t1)).toBeCloseTo(1600) // t1 uses the prior bar (160)
+    // and it did NOT delete the stale 2000 row (additive).
+    expect(byDate.get("2000-01-01")).toBe(9999)
+  })
 })

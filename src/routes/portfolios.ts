@@ -14,7 +14,7 @@ import { preferredBaseCurrency } from "../services/preferences.js"
 import { refreshQuotes } from "../services/quotes.js"
 import { getPortfolioNews } from "../services/portfolioNews.js"
 import { getPortfolioCalendar } from "../services/portfolioCalendar.js"
-import { runBackfill, getBackfillStatus, buildBenchmarkSeries, forcePortfolioRecalc, hasBackfillableHistory } from "../services/backfill.js"
+import { runBackfill, runBackfillRecent, getBackfillStatus, buildBenchmarkSeries, forcePortfolioRecalc, hasBackfillableHistory } from "../services/backfill.js"
 import { cashBalances, dailyExternalFlows } from "../services/cashLedger.js"
 import { buildPortfolioCash } from "./portfolio-cash.js"
 import { computeRiskMetrics } from "../services/riskMetrics.js"
@@ -947,8 +947,17 @@ export function createPortfolioRoutes(db?: DB) {
       .limit(1)
     if (!pf) return c.json({ error: "NotFound", message: "Portfolio not found" }, 404)
 
-    // Fire-and-forget; the serialized runner resolves it once the pass runs.
-    void forcePortfolioRecalc(database, id, c.req.header("Authorization") ?? "").catch(() => undefined)
+    // Two modes (2026-09-27) over one shared core (computeSnapshotBatch):
+    // default = FULL delete+rebuild (manual recompute after data fixes — no
+    // stale rows can survive); ?mode=upsert = ADDITIVE (upsert computed days,
+    // never delete) — what the scheduled refresh job uses, so a mid-day pass
+    // that fails can't erase a day it didn't recompute.
+    if (c.req.query("mode") === "upsert") {
+      // additive + through today (the job's mode — re-values the last 2 days)
+      void runBackfillRecent(database, id, c.req.header("Authorization") ?? "").catch(() => undefined)
+    } else {
+      void forcePortfolioRecalc(database, id, c.req.header("Authorization") ?? "").catch(() => undefined)
+    }
     return c.json({ backfillStatus: "pending" } satisfies components["schemas"]["BackfillRecomputeResponse"])
   })
 
