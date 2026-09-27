@@ -943,6 +943,10 @@ export function createPortfolioRoutes(db?: DB) {
       : 0
 
     return c.json({
+      // §66.3 — every amount below is denominated in the portfolio's base
+      // currency; the contract now requires saying so, because the SPA was
+      // guessing (and rendering PLN with a $).
+      currency: portfolio.baseCurrency,
       totalValue: Math.round(totalValue * 100) / 100,
       totalInvested: Math.round(totalInvested * 100) / 100,
       costBasis: Math.round(totalCostBasis * 100) / 100,

@@ -894,6 +894,11 @@ describe("Portfolio positions & allocation (§15 Phase E)", () => {
     expect(body.bySector[0].name).toBe("Technology")
     expect(body.byAssetType.length).toBe(1)
     expect(body.byAssetType[0].name).toBe("STOCK")
+    // §66.3 — the allocation now states the currency it is denominated in, so the
+    // SPA does not have to guess one to label the numbers.
+    expect(body.currency).toBe("USD")
+    // byCurrency rows carry their OWN currency in `name` and are NOT converted
+    for (const row of body.byCurrency) expect(row.name).toMatch(/^[A-Z]{3}$/)
     expect(body.byCurrency.length).toBe(1)
     expect(body.byCurrency[0].name).toBe("USD")
   })

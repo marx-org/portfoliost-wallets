@@ -3121,6 +3121,8 @@ export interface components {
         };
         PortfolioSnapshot: {
             allocation?: {
+                /** @description Currency of every allocation row below except byCurrency */
+                currency?: string;
                 byAsset?: {
                     name?: string;
                     value?: number;
@@ -3145,7 +3147,9 @@ export interface components {
                     name?: string;
                     value?: number;
                 }[];
+                /** @description Each row is denominated in its OWN currency, which is its `name` as an ISO-4217 code — this is the one breakdown that is not in the allocation `currency`. */
                 byCurrency?: {
+                    /** @description ISO-4217 currency code for this row. */
                     name?: string;
                     value?: number;
                 }[];
@@ -3227,6 +3231,8 @@ export interface components {
             instrumentAvgCostBasis: number;
         };
         PortfolioSummaryMetrics: {
+            /** @description The portfolio's base currency (ISO-4217). Every amount on this object is denominated in it. */
+            currency: string;
             totalValue: number;
             totalInvested: number;
             simpleReturnPercent: number;
@@ -3833,6 +3839,8 @@ export interface components {
         cursor: string;
         /** @description Optional ISO-4217 target currency — prices are converted server-side (plan §48.2); same/absent value serves the native series */
         currency: string;
+        /** @description Optional ISO-4217 currency the CALLER believes the prices are denominated in (e.g. wallets passes the position's `instrumentCurrency`). Honoured only where the server's own resolver is silent; a locally resolved base is never overridden (plan §47, "never guess"). Without it, a ticker listed on several venues in different currencies cannot be converted at all, which made `currency` unusable for the caller's whole request (plan §63.10.5). */
+        baseCurrency: string;
         limit: number;
         page: number;
         perPage: number;
@@ -4893,6 +4901,8 @@ export interface operations {
                 to: string;
                 /** @description Optional ISO-4217 target currency — prices are converted server-side (plan §48.2); same/absent value serves the native series */
                 currency?: components["parameters"]["currency"];
+                /** @description Optional ISO-4217 currency the CALLER believes the prices are denominated in (e.g. wallets passes the position's `instrumentCurrency`). Honoured only where the server's own resolver is silent; a locally resolved base is never overridden (plan §47, "never guess"). Without it, a ticker listed on several venues in different currencies cannot be converted at all, which made `currency` unusable for the caller's whole request (plan §63.10.5). */
+                baseCurrency?: components["parameters"]["baseCurrency"];
             };
             header?: never;
             path: {

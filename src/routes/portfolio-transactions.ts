@@ -12,7 +12,7 @@ import {
 } from "../db/schema.js"
 import { resolveFeeFx } from "../services/fee-fx.js"
 import { externalCashInvested } from "../services/cashLedger.js"
-import { resolveRates } from "../services/instruments-fx.js"
+import { fxTo, resolveRates } from "../services/instruments-fx.js"
 import {
   labelsForPositions,
   labelsForTransactions,
@@ -1261,12 +1261,37 @@ export function createTransactionRoutes(db?: DB) {
         ),
       )
 
-    const totalValue = posRows.reduce(
-      (sum, p) => sum + (p.marketValue != null ? Number(p.marketValue) : Number(p.quantity) * Number(p.averageCostBasis)),
-      0,
-    )
+    // §66.3 — `positions.marketValue` is denominated in the POSITION's own
+    // instrument currency (see quotes.ts: "market value is denominated in the
+    // quote's currency (live) or the instrument currency (fallback)"). This
+    // route used to add those raw numbers together, so totalValue and the
+    // sector/asset-type breakdowns were a sum of EUR + USD + PLN — not a number
+    // in any currency, which is why the tab could not be given a currency label.
+    //
+    // Convert every position into the portfolio's base currency first. byCurrency
+    // is deliberately left unconverted: it groups BY instrument currency, so
+    // each row is already internally consistent and its `name` is the currency.
+    const toBase = await fxTo(c.req.header("Authorization") ?? "", portfolio.baseCurrency, new Map(), { strict: true })
+    const baseValue = async (p: (typeof posRows)[number]): Promise<number> => {
+      const raw = p.marketValue != null ? Number(p.marketValue) : Number(p.quantity) * Number(p.averageCostBasis)
+      return raw * (await toBase(p.instrumentCurrency ?? ""))
+    }
 
-    function sumBy(field: string) {
+    let totalValue = 0
+    for (const p of posRows) totalValue += await baseValue(p)
+
+    async function sumByBase(field: string) {
+      const totals = new Map<string, number>()
+      for (const p of posRows) {
+        const key = (p as Record<string, unknown>)[field] || "Other"
+        totals.set(String(key), (totals.get(String(key)) || 0) + (await baseValue(p)))
+      }
+      return [...totals.entries()]
+        .map(([name, value]) => ({ name, value: round2(value) }))
+        .sort((a, b) => b.value - a.value)
+    }
+
+    function sumByOwnCurrency(field: string) {
       const totals = new Map<string, number>()
       for (const p of posRows) {
         const key = (p as Record<string, unknown>)[field] || "Other"
@@ -1279,10 +1304,11 @@ export function createTransactionRoutes(db?: DB) {
     }
 
     return c.json({
+      currency: portfolio.baseCurrency,
       totalValue: round2(totalValue),
-      bySector: sumBy("sector"),
-      byAssetType: sumBy("assetType"),
-      byCurrency: sumBy("instrumentCurrency"),
+      bySector: await sumByBase("sector"),
+      byAssetType: await sumByBase("assetType"),
+      byCurrency: sumByOwnCurrency("instrumentCurrency"),
     })
   })
 
