@@ -57,10 +57,20 @@ async function fetchPriceBars(
   authToken: string,
   signal?: AbortSignal,
   currency?: string,
+  /** §63.10.5 — the base we already know for this symbol (the position's
+   * `instrumentCurrency`). instruments' own resolver is silent for a ticker listed
+   * on several venues in different currencies (AFL: NYSE+ASX), and §48.2 refuses a
+   * conversion whose base is unknown — so one such position 400'd and took the
+   * whole portfolio with it. Declared here, honoured there, and never overriding a
+   * base instruments can resolve itself (§47). */
+  baseCcy?: string,
 ): Promise<PriceBarSeries | null> {
   const base = instrumentsBase()
   if (!base) throw new InstrumentsUnavailableError(null, "instruments (INSTRUMENTS_URL unset)")
-  const url = `${base}/api/instruments/${encodeURIComponent(symbol)}/price-bars?from=${from}&to=${to}${currency ? `&currency=${encodeURIComponent(currency)}` : ""}`
+  const q = new URLSearchParams({ from, to })
+  if (currency) q.set("currency", currency)
+  if (baseCcy) q.set("baseCurrency", baseCcy)
+  const url = `${base}/api/instruments/${encodeURIComponent(symbol)}/price-bars?${q}`
   let res: Response
   try {
     res = await fetch(url, { headers: instrumentsAuthHeaders(authToken), signal })
@@ -93,6 +103,9 @@ async function fetchPriceBars(
  */
 const PRICE_FETCH_CONCURRENCY = Math.max(1, Number(process.env.RECALC_PRICE_CONCURRENCY ?? 4))
 
+/** ISO-4217 shape, so a junk `instrument_currency` is not declared as a base. */
+const KNOWN_CURRENCY = /^[A-Z]{3}$/
+
 /**
  * Fetch per-symbol price series with a bounded worker pool (default 4
  * concurrent). `targetCcy` (plan §48.3) carries the per-symbol conversion
@@ -113,9 +126,13 @@ export async function fetchPriceSeries(
     authToken: string,
     signal?: AbortSignal,
     currency?: string,
+    baseCcy?: string,
   ) => Promise<PriceBarSeries | null> = fetchPriceBars,
   signal?: AbortSignal,
   targetCcy?: Map<string, string | null>,
+  /** §63.10.5 — per-symbol base the caller already knows; passed to instruments
+   * so an ambiguous listing can still be converted. */
+  baseCcyMap?: Map<string, string | null>,
 ): Promise<Map<string, PriceBarSeries>> {
   const out = new Map<string, PriceBarSeries>()
   let next = 0
@@ -140,6 +157,7 @@ export async function fetchPriceSeries(
         authToken,
         signal,
         targetCcy?.get(symbols[i] ?? "") ?? undefined,
+        baseCcyMap?.get(symbols[i] ?? "") ?? undefined,
       )
       if (failure !== null) return
       if (series && series.dates.length > 0) out.set(symbols[i], series)
@@ -718,8 +736,14 @@ export async function computeSnapshotBatch(
   // 6. Fetch price series per held symbol from instruments (bounded fan-out —
   //    see fetchPriceSeries; an aborted signal rejects promptly). A
   //    cash-only portfolio has no symbols to price.
+  // §63.10.5 — the known instrument currency travels with the request, so a
+  // symbol instruments cannot resolve on its own is still convertible.
+  const declaredBase = new Map<string, string | null>()
+  for (const [sym, ccy] of symbolCcy) {
+    declaredBase.set(sym, ccy && KNOWN_CURRENCY.test(ccy) ? ccy.toUpperCase() : null)
+  }
   const priceSeries = symbols.length
-    ? await fetchPriceSeries(symbols, from, to, authToken, fetchPriceBars, signal, targetCcy)
+    ? await fetchPriceSeries(symbols, from, to, authToken, fetchPriceBars, signal, targetCcy, declaredBase)
     : new Map<string, PriceBarSeries>()
   throwIfAborted(signal)
 

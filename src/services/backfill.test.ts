@@ -382,6 +382,52 @@ describe("runBackfill (H6)", () => {
     expect(await getBackfillStatus(db, pf.id)).toBe("complete")
   })
 
+  it("§63.10.5 — declares the known base currency so an ambiguous listing can convert", async () => {
+    // AFL-style: instruments cannot resolve whether AFL is NYSE(USD) or ASX(AUD),
+    // so `?currency=PLN` alone 400s and — pre-§63.10.5 — took the whole portfolio
+    // with it. The position's own instrumentCurrency is the authority the import
+    // recorded, so the backfill sends it as `baseCurrency`.
+    const { db, user } = await makeHarness("declared-base-user-1")
+    const pf = await seedPortfolio(db, user.id, "PLN")
+    await seedBuy(db, user.id, pf.id, "AFL", 10, 100, "2026-07-01", "USD")
+    await seedPosition(db, user.id, pf.id, "AFL", 10, 100)
+
+    const seen: string[] = []
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockImplementation((url: string) => {
+        seen.push(String(url))
+        if (String(url).includes("/api/instruments/")) {
+          return Promise.resolve({
+            ok: true,
+            status: 200,
+            json: async () => ({
+              symbol: "AFL",
+              dates: ["2026-07-01", "2026-07-02"],
+              closes: [420, 431],
+              currency: "PLN",
+              baseCurrency: "USD",
+              stale: false,
+            }),
+          })
+        }
+        // the FX pair leg
+        return Promise.resolve({
+          ok: true,
+          status: 200,
+          json: async () => ({ rate: 1, asOf: "2026-07-02" }),
+        })
+      }),
+    )
+
+    await runBackfill(db, pf.id, "Bearer t", new Date("2026-07-03T00:00:00Z"))
+
+    const priceCall = seen.find((u) => u.includes("/price-bars"))!
+    expect(priceCall).toContain("currency=PLN")
+    expect(priceCall).toContain("baseCurrency=USD")
+    expect(await getBackfillStatus(db, pf.id)).toBe("complete")
+  })
+
   it("§63.10.5 — does not price a symbol the portfolio no longer holds", async () => {
     // A long-closed position (bought and sold inside the window, so qty is 0 on
     // every day) must not be fetched: it contributes nothing, and in PROD one of
