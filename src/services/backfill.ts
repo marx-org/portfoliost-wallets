@@ -681,17 +681,47 @@ export async function computeSnapshotBatch(
     targetCcy.set(sym, ccy && ccy.toUpperCase() !== base ? base : null)
   }
 
-  // 5. Fetch price series per symbol from instruments (bounded fan-out —
+  // 5. Daily value grid + cumulative qty per symbol per day.
+  //    qty_held(sym, day) = sum of deltas where date <= day
+  const days = calendarDays(from, to)
+  const qtyMaps = new Map<string, Map<string, number>>()
+  for (const [sym, events] of symbolEvents) {
+    const sorted = events.slice().sort((a, b) => a.date.localeCompare(b.date))
+    const dayQty = new Map<string, number>()
+    let cum = 0
+    let ei = 0
+    for (const day of days) {
+      while (ei < sorted.length && sorted[ei].date <= day) {
+        cum += sorted[ei].delta
+        ei++
+      }
+      dayQty.set(day, Math.max(0, cum))
+    }
+    qtyMaps.set(sym, dayQty)
+  }
+
+  // §63.10.5 — only ask for symbols this portfolio actually held INSIDE the
+  // window. `symbolCcy` is built from every BUY/SELL row ever imported, so it
+  // also contains long-closed positions (PROD: IKE Beata's AFL, sold 2024-03,
+  // in a window starting 2021-10). Those contribute nothing to any day, and one
+  // of them failing to price aborted the entire portfolio — which is how a
+  // closed ticker kept a live portfolio unvaluable.
+  const symbols = [...symbolCcy.keys()].filter((sym) => {
+    const perDay = qtyMaps.get(sym)
+    if (!perDay) return false
+    for (const day of days) {
+      if ((perDay.get(day) ?? 0) > 0) return true
+    }
+    return false
+  })
+
+  // 6. Fetch price series per held symbol from instruments (bounded fan-out —
   //    see fetchPriceSeries; an aborted signal rejects promptly). A
   //    cash-only portfolio has no symbols to price.
-  const symbols = [...symbolCcy.keys()]
   const priceSeries = symbols.length
     ? await fetchPriceSeries(symbols, from, to, authToken, fetchPriceBars, signal, targetCcy)
     : new Map<string, PriceBarSeries>()
   throwIfAborted(signal)
-
-  // 6. Build daily value series
-  const days = calendarDays(from, to)
 
   // §62.4 / D50: netFlow = EXTERNAL flows only (DEPOSIT +, WITHDRAWAL −,
   // TRANSFER ± its own leg) in base currency — trade rows (BUY/SELL) are
@@ -710,24 +740,6 @@ export async function computeSnapshotBatch(
     if (series) {
       priceMaps.set(sym, buildPriceMap(series.dates, series.closes, days))
     }
-  }
-
-  // Pre-build cumulative qty per symbol per day
-  // qty_held(sym, day) = sum of deltas where date <= day
-  const qtyMaps = new Map<string, Map<string, number>>()
-  for (const [sym, events] of symbolEvents) {
-    const sorted = events.slice().sort((a, b) => a.date.localeCompare(b.date))
-    const dayQty = new Map<string, number>()
-    let cum = 0
-    let ei = 0
-    for (const day of days) {
-      while (ei < sorted.length && sorted[ei].date <= day) {
-        cum += sorted[ei].delta
-        ei++
-      }
-      dayQty.set(day, Math.max(0, cum))
-    }
-    qtyMaps.set(sym, dayQty)
   }
 
   // §62 follow-up (2026-09-27): invested(day) = cumulative net EXTERNAL cash

@@ -82,8 +82,32 @@ async function seedBuy(
   })
 }
 
-/** A cash-only portfolio: a DEPOSIT and no positions at all. */
-async function seedCash(
+/** Mirror of {@link seedBuy} for a SELL, so a position can be fully closed. */
+async function seedSell(
+  db: Awaited<ReturnType<typeof makeHarness>>["db"],
+  userId: string,
+  portfolioId: string,
+  symbol: string,
+  qty: number,
+  price: number,
+  date: string,
+  ccy = "USD",
+) {
+  await db.insert(portfolioTransactions).values({
+    userId,
+    portfolioId,
+    type: "SELL",
+    instrumentSymbol: symbol,
+    quantity: String(qty),
+    price: String(price),
+    currency: ccy,
+    instrumentCurrency: ccy,
+    totalAmount: String(qty * price),
+    executedAt: new Date(`${date}T12:00:00Z`),
+  })
+}
+
+/** A cash-only portfolio: a DEPOSIT and no positions at all. */async function seedCash(
   db: Awaited<ReturnType<typeof makeHarness>>["db"],
   userId: string,
   portfolioId: string,
@@ -357,6 +381,45 @@ describe("runBackfill (H6)", () => {
     await runBackfill(db, pf.id, "Bearer t", new Date("2026-07-03T00:00:00Z"))
     expect(await getBackfillStatus(db, pf.id)).toBe("complete")
   })
+
+  it("§63.10.5 — does not price a symbol the portfolio no longer holds", async () => {
+    // A long-closed position (bought and sold inside the window, so qty is 0 on
+    // every day) must not be fetched: it contributes nothing, and in PROD one of
+    // them (AFL, sold 2024-03, currency unresolvable -> 400) aborted the entire
+    // portfolio and left its stored value stale.
+    const { db, user } = await makeHarness("closed-symbol-user-1")
+    const pf = await seedPortfolio(db, user.id)
+    await seedBuy(db, user.id, pf.id, "AAA", 10, 100, "2026-07-01")
+    await seedSell(db, user.id, pf.id, "OLD", 5, 200, "2026-07-02")
+    await seedPosition(db, user.id, pf.id, "AAA", 10, 100)
+
+    const asked: string[] = []
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockImplementation((url: string) => {
+        const sym = decodeURIComponent(String(url).match(/\/instruments\/([^/]+)\/price-bars/)?.[1] ?? "")
+        asked.push(sym)
+        if (sym !== "AAA") {
+          return Promise.resolve({ ok: false, status: 400, json: async () => ({ error: "BadRequest" }) })
+        }
+        return Promise.resolve({
+          ok: true,
+          status: 200,
+          json: async () => ({ symbol: "AAA", dates: ["2026-07-01", "2026-07-02"], closes: [100, 110], stale: false }),
+        })
+      }),
+    )
+
+    await runBackfill(db, pf.id, "Bearer t", new Date("2026-07-03T00:00:00Z"))
+
+    expect(asked).toContain("AAA")
+    expect(asked).not.toContain("OLD")
+    expect(await getBackfillStatus(db, pf.id)).toBe("complete")
+    expect(
+      (await db.select().from(valueSnapshots).where(eq(valueSnapshots.portfolioId, pf.id))).length,
+    ).toBeGreaterThan(0)
+  })
+
 })
 
 describe("§63.8 — backfill records held-but-unpriced symbols (no silent under-report)", () => {
