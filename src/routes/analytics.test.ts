@@ -77,9 +77,12 @@ function mockPriceBars(series: Record<string, { dates: string[]; closes: number[
       const sym = decodeURIComponent(String(url).match(/\/instruments\/([^/]+)\/price-bars/)?.[1] ?? "")
       void init
       const data = series[sym]
-      if (!data) return Promise.resolve({ ok: false, json: async () => ({}) })
+      // §63.10 — 404 is the documented "no data for this key" answer, so an
+      // unresolvable benchmark ticker is dropped rather than aborting the request.
+      if (!data) return Promise.resolve({ ok: false, status: 404, json: async () => ({}) })
       return Promise.resolve({
         ok: true,
+        status: 200,
         json: async () => ({ symbol: sym, dates: data.dates, closes: data.closes, stale: false }),
       })
     }),

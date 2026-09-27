@@ -24,7 +24,12 @@ import {
   positions,
   valueSnapshots,
 } from "../db/schema.js"
-import { instrumentsBase, resolvedFxRate } from "./instruments-fx.js"
+import {
+  InstrumentsUnavailableError,
+  instrumentsAuthHeaders,
+  instrumentsBase,
+  resolvedFxRate,
+} from "./instruments-fx.js"
 import { cashBalanceSeries, dailyExternalFlows } from "./cashLedger.js"
 import { enqueueBackfill } from "./backfill-runner.js"
 import {
@@ -54,15 +59,29 @@ async function fetchPriceBars(
   currency?: string,
 ): Promise<PriceBarSeries | null> {
   const base = instrumentsBase()
-  if (!base) return null
+  if (!base) throw new InstrumentsUnavailableError(null, "instruments (INSTRUMENTS_URL unset)")
+  const url = `${base}/api/instruments/${encodeURIComponent(symbol)}/price-bars?from=${from}&to=${to}${currency ? `&currency=${encodeURIComponent(currency)}` : ""}`
+  let res: Response
   try {
-    const url = `${base}/api/instruments/${encodeURIComponent(symbol)}/price-bars?from=${from}&to=${to}${currency ? `&currency=${encodeURIComponent(currency)}` : ""}`
-    const res = await fetch(url, { headers: { Authorization: authToken }, signal })
-    if (!res.ok) return null
-    return (await res.json()) as PriceBarSeries
-  } catch {
-    return null
+    res = await fetch(url, { headers: instrumentsAuthHeaders(authToken), signal })
+  } catch (e) {
+    // §63.10 — a price source we could not reach is an error, not "no data".
+    // The old `catch { return null }` made an auth rejection indistinguishable
+    // from an empty series, and computeSnapshotBatch then dropped every
+    // position and wrote a cash-only value over the correct one.
+    throw new InstrumentsUnavailableError(null, url, e)
   }
+  if (!res.ok) {
+    // 404 is cachest/instruments' documented "no data for this key" answer (an
+    // unknown ticker, a symbol with no history) — a legitimate gap, which the
+    // batch surfaces via `gapSymbols`. Everything else — 401/403 (auth), 400, 5xx
+    // — means the price source could not be used at all and the pass must abort.
+    if (res.status === 404) return null
+    throw new InstrumentsUnavailableError(res.status, url)
+  }
+  // A 200 with zero dates is a legitimate answer: the symbol genuinely has no
+  // price history, which surfaces as a gap rather than an aborted pass.
+  return (await res.json()) as PriceBarSeries
 }
 
 /**
@@ -100,17 +119,41 @@ export async function fetchPriceSeries(
 ): Promise<Map<string, PriceBarSeries>> {
   const out = new Map<string, PriceBarSeries>()
   let next = 0
+  /**
+   * §63.10 — a rejected fetch must abort the whole pass, not just skip a symbol.
+   * Workers run concurrently, so the first failure is latched and re-thrown once
+   * they have all settled; without the latch an in-flight `Promise.all` could
+   * reject while another worker was still writing into `out`, and the pass would
+   * continue with a partial map.
+   */
+  let failure: unknown = null
   const worker = async (): Promise<void> => {
     for (;;) {
       throwIfAborted(signal)
+      if (failure !== null) return
       const i = next++
       if (i >= symbols.length) return
-      const series = await fetcher(symbols[i], from, to, authToken, signal, targetCcy?.get(symbols[i] ?? "") ?? undefined)
+      const series = await fetcher(
+        symbols[i],
+        from,
+        to,
+        authToken,
+        signal,
+        targetCcy?.get(symbols[i] ?? "") ?? undefined,
+      )
+      if (failure !== null) return
       if (series && series.dates.length > 0) out.set(symbols[i], series)
     }
   }
   const workers = Math.min(PRICE_FETCH_CONCURRENCY, symbols.length)
-  await Promise.all(Array.from({ length: workers }, () => worker()))
+  await Promise.all(
+    Array.from({ length: workers }, () =>
+      worker().catch((e) => {
+        if (failure === null) failure = e
+      }),
+    ),
+  )
+  if (failure !== null) throw failure
   return out
 }
 
@@ -156,7 +199,7 @@ export async function buildBenchmarkSeries(
   const isBaseCcy = !series.currency || series.currency.toUpperCase() === base
   // plan §48.3 — one resolved pair rate for the overlay (benchmarks are a
   // single instrument; the rate degrades 1:1 when unresolvable).
-  const rate = isBaseCcy ? 1 : (await resolvedFxRate(authToken, series.currency!, base))?.rate ?? 1
+  const rate = isBaseCcy ? 1 : (await resolvedFxRate(authToken, series.currency!, base, undefined, { strict: true }))?.rate ?? 1
   const toBase = (v: number): number => (isBaseCcy ? v : v * rate)
 
   // Carry-forward closes (converted to base currency) over every calendar day.
@@ -469,10 +512,45 @@ export interface SnapshotRow {
 export interface SnapshotBatch {
   rows: SnapshotRow[]
   gapSymbols: string[]
+  /**
+   * §63.10 — held symbols the pass was asked to price (qty > 0 on the window's
+   * last day). `gapSymbols.length === heldSymbols` means the pass priced *nothing*,
+   * which is never a legitimate result: it is what a transport/auth failure looks
+   * like once it has been collapsed into "no data". A genuinely all-cash
+   * portfolio has `heldSymbols === 0` and is unaffected.
+   */
+  heldSymbols: number
 }
 
 /** No history to backfill (no BUY/SELL or cash yet) — shared by every guard. */
-const EMPTY_BATCH: SnapshotBatch = { rows: [], gapSymbols: [] }
+const EMPTY_BATCH: SnapshotBatch = { rows: [], gapSymbols: [], heldSymbols: 0 }
+
+/**
+ * §63.10 — refuse to persist a pass that could not price a single held symbol.
+ *
+ * The stored value would be cash only, written over a correct one by
+ * `onConflictDoUpdate`, and the fleet-wide symptom was `gap_symbols` equal to the
+ * position count on every portfolio (IBKR ended up with a *negative* value). With
+ * a real credential in place this should never fire; it exists so the next
+ * credential or transport mistake is loud instead of silent.
+ */
+export class UnpriceablePortfolioError extends Error {
+  constructor(
+    public readonly portfolioId: string,
+    public readonly heldSymbols: number,
+  ) {
+    super(
+      `refusing to write snapshots for portfolio ${portfolioId}: priced 0 of ${heldSymbols} ` +
+        `held symbols — the price source was not usable (a partial pass with at least ` +
+        `one priced symbol is still written and flagged in gap_symbols)`,
+    )
+    this.name = "UnpriceablePortfolioError"
+  }
+}
+
+export function isUnpriceable(batch: SnapshotBatch): boolean {
+  return batch.heldSymbols > 0 && batch.gapSymbols.length >= batch.heldSymbols
+}
 
 /**
  * §63.8 — record which held symbols lacked a price bar in the latest pass, so
@@ -619,8 +697,10 @@ export async function computeSnapshotBatch(
   // TRANSFER ± its own leg) in base currency — trade rows (BUY/SELL) are
   // internal cash↔position moves, no longer flows. Cash value is added to
   // the position value below via the per-day base-currency balance series.
-  const dailyFlows = await dailyExternalFlows(db, authToken, portfolioId, from, to, base)
-  const cashSeries = await cashBalanceSeries(db, authToken, portfolioId, from, to, base)
+  // §63.10 — strict: a 1:1 FX degrade across a whole valuation misvalues every
+  // non-base row silently, so an unusable FX source aborts the pass instead.
+  const dailyFlows = await dailyExternalFlows(db, authToken, portfolioId, from, to, base, { strict: true })
+  const cashSeries = await cashBalanceSeries(db, authToken, portfolioId, from, to, base, { strict: true })
   throwIfAborted(signal)
 
   // Pre-build carry-forward price maps per symbol
@@ -672,8 +752,10 @@ export async function computeSnapshotBatch(
   // symbols priced → 155k vs true 205k).
   const lastDay = days[days.length - 1]
   const gapSymbols: string[] = []
+  let heldCount = 0
   for (const sym of symbols) {
     if ((qtyMaps.get(sym)?.get(lastDay) ?? 0) <= 0) continue
+    heldCount += 1
     if (!priceMaps.get(sym) || !priceMaps.get(sym)!.has(lastDay)) gapSymbols.push(sym)
   }
 
@@ -716,7 +798,7 @@ export async function computeSnapshotBatch(
     }
   }
 
-  return { rows: snapBatch, gapSymbols }
+  return { rows: snapBatch, gapSymbols, heldSymbols: heldCount }
 }
 
 async function _runBackfillCore(
@@ -728,6 +810,8 @@ async function _runBackfillCore(
   toOverride?: string,
 ): Promise<void> {
   const batch = await computeSnapshotBatch(db, portfolioId, authToken, now, signal, toOverride)
+  // §63.10 — never overwrite good values with a pass that priced nothing.
+  if (isUnpriceable(batch)) throw new UnpriceablePortfolioError(portfolioId, batch.heldSymbols)
   await persistGapSymbols(db, portfolioId, batch.gapSymbols)
   if (batch.rows.length === 0) return
 
@@ -773,6 +857,10 @@ export async function recalcPortfolioHistory(
   try {
     const batch = await computeSnapshotBatch(db, portfolioId, authToken, now, signal)
     throwIfAborted(signal)
+    // §63.10 — this path DELETEs before it writes, so an unusable pass would not
+    // just mis-value the chart, it would erase the history and rebuild it as
+    // cash-only. Refuse before the transaction opens.
+    if (isUnpriceable(batch)) throw new UnpriceablePortfolioError(portfolioId, batch.heldSymbols)
 
     await db.transaction(async (tx) => {
       await tx.delete(valueSnapshots).where(eq(valueSnapshots.portfolioId, portfolioId))

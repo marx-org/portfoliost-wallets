@@ -22,9 +22,12 @@ function mockPriceBars(series: Record<string, { dates: string[]; closes: number[
     vi.fn().mockImplementation((url: string) => {
       const sym = decodeURIComponent(String(url).match(/\/instruments\/([^/]+)\/price-bars/)?.[1] ?? "")
       const data = series[sym]
-      if (!data) return Promise.resolve({ ok: false, json: async () => ({}) })
+      // §63.10 — 404 is the documented "no data for this key" answer, so a symbol
+      // with no series is a *gap*, not an aborted pass. Any other non-2xx aborts.
+      if (!data) return Promise.resolve({ ok: false, status: 404, json: async () => ({}) })
       return Promise.resolve({
         ok: true,
+        status: 200,
         json: async () => ({ symbol: sym, dates: data.dates, closes: data.closes, stale: false }),
       })
     }),
@@ -79,13 +82,31 @@ async function seedBuy(
   })
 }
 
+/** A cash-only portfolio: a DEPOSIT and no positions at all. */
+async function seedCash(
+  db: Awaited<ReturnType<typeof makeHarness>>["db"],
+  userId: string,
+  portfolioId: string,
+  amount: number,
+  currency: string,
+  date: string,
+) {
+  await db.insert(portfolioCashTransactions).values({
+    userId,
+    portfolioId,
+    type: "DEPOSIT",
+    amount: String(amount),
+    currency,
+    transactionDate: date,
+  })
+}
+
 async function seedPosition(
   db: Awaited<ReturnType<typeof makeHarness>>["db"],
   userId: string,
   portfolioId: string,
   symbol: string,
-  qty: number,
-  avg: number,
+  qty: number,  avg: number,
   ccy = "USD",
 ) {
   await db.insert(positions).values({
@@ -257,16 +278,83 @@ describe("runBackfill (H6)", () => {
     await seedPosition(db, user.id, pf.id, "NFLX", 1, 600)
 
     vi.stubGlobal("fetch", vi.fn().mockRejectedValue(new Error("network down")))
-    // Without a position the cost calc still works; but with fetch broken, fetchPriceBars
-    // returns null → value=0 → no snapshots → runBackfill still marks complete (empty is ok)
-    // To test 'failed' we force an error in DB — simplest: kill the db access inside the job
-    // by passing a bad portfolioId so the portfolio lookup returns nothing → early return
-    // so status stays pending. Instead, trigger an error in the insert by passing invalid data.
-    // The simplest reliable test: DB throws via a sabotaged insert. Skip detailed mock here
-    // and just verify the status transition works when the backfill produces no rows gracefully.
     const now = new Date("2026-07-02T00:00:00Z")
     await runBackfill(db, pf.id, "Bearer test", now)
-    // No prices returned → no snapshots → completes without rows (not a failure)
+    // §63.10 — an unreachable price source used to look like "no prices" and the
+    // pass still reported 'complete', which is how the fleet ended up with
+    // cash-only snapshots. It must now be a failure.
+    expect(await getBackfillStatus(db, pf.id)).toBe("failed")
+  })
+
+  it("§63.10 — leaves the previous snapshots untouched when the pass cannot price", async () => {
+    const { db, user } = await makeHarness("keep-old-user-1")
+    const pf = await seedPortfolio(db, user.id)
+    await seedBuy(db, user.id, pf.id, "NFLX", 1, 600, "2026-07-01")
+    await seedPosition(db, user.id, pf.id, "NFLX", 1, 600)
+
+    // A good pass first, so there is a correct stored value to protect.
+    mockPriceBars({ NFLX: { dates: ["2026-07-01", "2026-07-02"], closes: [600, 610] } })
+    await runBackfill(db, pf.id, "Bearer t", new Date("2026-07-03T00:00:00Z"))
+    const before = await db
+      .select()
+      .from(valueSnapshots)
+      .where(eq(valueSnapshots.portfolioId, pf.id))
+      .orderBy(valueSnapshots.snapshotDate)
+    expect(before.length).toBeGreaterThan(0)
+
+    // Now the price source rejects us the way a 401 does.
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue({ ok: false, status: 401, json: async () => ({}) }),
+    )
+    await runBackfill(db, pf.id, "Bearer t", new Date("2026-07-04T00:00:00Z"))
+
+    const after = await db
+      .select()
+      .from(valueSnapshots)
+      .where(eq(valueSnapshots.portfolioId, pf.id))
+      .orderBy(valueSnapshots.snapshotDate)
+    expect(after).toEqual(before)
+    expect(await getBackfillStatus(db, pf.id)).toBe("failed")
+    const [meta] = await db
+      .select()
+      .from(portfolioBackfillMetadata)
+      .where(eq(portfolioBackfillMetadata.portfolioId, pf.id))
+    expect(meta?.errorMessage ?? "").toMatch(/401/)
+  })
+
+  it("§63.10 — refuses a pass that priced 0 of N held symbols, but allows a partial one", async () => {
+    const { db, user } = await makeHarness("unpriceable-user-1")
+    const pf = await seedPortfolio(db, user.id)
+    await seedBuy(db, user.id, pf.id, "AAA", 10, 100, "2026-07-01")
+    await seedBuy(db, user.id, pf.id, "BBB", 5, 200, "2026-07-01")
+    await seedPosition(db, user.id, pf.id, "AAA", 10, 100)
+    await seedPosition(db, user.id, pf.id, "BBB", 5, 200)
+
+    // A 200-with-no-dates for every symbol is what a collapsed price source
+    // looks like once it stops throwing: priced 0 of 2.
+    mockPriceBars({})
+    await runBackfill(db, pf.id, "Bearer t", new Date("2026-07-03T00:00:00Z"))
+    expect(await getBackfillStatus(db, pf.id)).toBe("failed")
+    expect(
+      (await db.select().from(valueSnapshots).where(eq(valueSnapshots.portfolioId, pf.id))).length,
+    ).toBe(0)
+
+    // One symbol priced is a legitimate partial sum: written, and flagged.
+    mockPriceBars({ AAA: { dates: ["2026-07-01", "2026-07-02"], closes: [100, 110] } })
+    await runBackfill(db, pf.id, "Bearer t", new Date("2026-07-03T00:00:00Z"))
+    expect(await getBackfillStatus(db, pf.id)).toBe("complete")
+    expect(
+      (await db.select().from(valueSnapshots).where(eq(valueSnapshots.portfolioId, pf.id))).length,
+    ).toBeGreaterThan(0)
+  })
+
+  it("§63.10 — an all-cash portfolio (0 held symbols) is not 'unpriceable'", async () => {
+    const { db, user } = await makeHarness("cash-only-user-1")
+    const pf = await seedPortfolio(db, user.id)
+    await seedCash(db, user.id, pf.id, 1000, "USD", "2026-07-01")
+    mockPriceBars({})
+    await runBackfill(db, pf.id, "Bearer t", new Date("2026-07-03T00:00:00Z"))
     expect(await getBackfillStatus(db, pf.id)).toBe("complete")
   })
 })

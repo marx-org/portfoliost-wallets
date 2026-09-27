@@ -147,6 +147,10 @@ export async function cashBalanceSeries(
   from: string,
   to: string,
   baseCurrency: string,
+  /** §63.10 — `strict` propagates to the FX lookup so a transport/auth failure
+   * aborts the historical backfill instead of valuing every foreign-currency cash
+   * row 1:1. The interactive callers leave it off. */
+  opts: { strict?: boolean } = {},
 ): Promise<Map<string, number>> {
   const base = baseCurrency.toUpperCase()
   const days = enumerateDays(from, to)
@@ -212,7 +216,7 @@ export async function cashBalanceSeries(
 
   const series = new Map<string, number>()
   for (const day of days) {
-    const toBase = await fxToOnDay(authToken, base, day)
+    const toBase = await fxToOnDay(authToken, base, day, new Map(), opts)
     let total = 0
     for (const [ccy, bal] of perDayBal.get(day) ?? new Map()) {
       total += await toBase(ccy, bal)
@@ -235,6 +239,8 @@ export async function dailyExternalFlows(
   from: string,
   to: string,
   baseCurrency: string,
+  /** §63.10 — see {@link cashBalanceSeries}. */
+  opts: { strict?: boolean } = {},
 ): Promise<Map<string, number>> {
   const base = baseCurrency.toUpperCase()
   const rows = await db
@@ -254,7 +260,7 @@ export async function dailyExternalFlows(
     const day = toDateStr(r.transactionDate)
     if (!day || day < from || day > to) continue
     const ccy = (r.currency ?? base).toUpperCase()
-    const toBase = ccy === base ? 1 : ((await resolvedFxRate(authToken, ccy, base, day))?.rate ?? 1)
+    const toBase = ccy === base ? 1 : ((await resolvedFxRate(authToken, ccy, base, day, opts))?.rate ?? 1)
     flows.set(day, (flows.get(day) ?? 0) + Number(r.amount ?? 0) * toBase)
   }
   return flows
@@ -280,6 +286,8 @@ export async function externalCashInvested(
   authToken: string | null,
   portfolioId: string,
   baseCurrency: string,
+  /** §63.10 — see {@link cashBalanceSeries}. */
+  opts: { strict?: boolean } = {},
 ): Promise<number> {
   const base = baseCurrency.toUpperCase()
   const rows = await db
@@ -295,7 +303,7 @@ export async function externalCashInvested(
   for (const r of rows) {
     const day = toDateStr(r.transactionDate) ?? new Date().toISOString().slice(0, 10)
     const ccy = (r.currency ?? base).toUpperCase()
-    const toBase = ccy === base ? 1 : ((await resolvedFxRate(authToken, ccy, base, day))?.rate ?? 1)
+    const toBase = ccy === base ? 1 : ((await resolvedFxRate(authToken, ccy, base, day, opts))?.rate ?? 1)
     total += Number(r.amount ?? 0) * toBase
   }
   return total
