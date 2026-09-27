@@ -324,6 +324,7 @@ export async function refreshQuotes(
   authToken: string | null,
   portfolioId: string,
   positionRows: Array<{
+    symbol?: string
     marketValue: string | null
     averageCostBasis: string
     quantity: string
@@ -356,6 +357,11 @@ export async function refreshQuotes(
     const cost = Number(p.averageCostBasis) * Number(p.quantity)
     totalValue += mv * valueRate
     totalInvested += cost * investedRate
+    if (process.env.RECALC_DEBUG === "1") {
+      console.log(
+        `[recalc-debug-quote] pf=${portfolioId} sym=${p.symbol} mv=${mv} mvCcy=${valueFrom}→${base} rate=${valueRate.toFixed(6)} contrib=${(mv * valueRate).toFixed(2)}`,
+      )
+    }
   }
 
   const snapshotDate = now.toISOString().slice(0, 10)
@@ -364,6 +370,11 @@ export async function refreshQuotes(
   const cashBal = await cashBalances(db, authToken, portfolioId)
   let totalCash = 0
   for (const [ccy, bal] of cashBal) totalCash += bal * (await toBase(ccy, 1))
+  if (process.env.RECALC_DEBUG === "1") {
+    console.log(
+      `[recalc-debug-quote] pf=${portfolioId} CASH=${totalCash.toFixed(2)} value=${totalValue.toFixed(2)} invested=${totalInvested.toFixed(2)} base=${base}`,
+    )
+  }
   totalValue += totalCash
   const todayFlows = await dailyExternalFlows(db, authToken, portfolioId, snapshotDate, snapshotDate, base)
   await db

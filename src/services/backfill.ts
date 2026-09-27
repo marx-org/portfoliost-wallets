@@ -599,7 +599,8 @@ export async function computeSnapshotBatch(
     })
   }
 
-  // 7. Build the snapshot batch
+  // 7. Build the snapshot batch (RECALC_DEBUG=1 → per-symbol day-0 debug logs)
+  const recalcDebug = process.env.RECALC_DEBUG === "1"
   const snapBatch: SnapshotRow[] = []
 
   for (const day of days) {
@@ -609,7 +610,7 @@ export async function computeSnapshotBatch(
       const qty = qtyMaps.get(sym)?.get(day) ?? 0
       if (qty <= 0) continue
       const price = priceMaps.get(sym)?.get(day)
-      if (!price) continue
+      if (price == null) continue
       // plan §48.3 — the close is already in the portfolio base currency
       // (server-side conversion); the value path is qty × close.
       totalValue += qty * price
@@ -617,11 +618,22 @@ export async function computeSnapshotBatch(
       if (cost) {
         totalInvested += qty * cost.avg * (await toBase(cost.ccy, 1))
       }
+      if (recalcDebug && day === days[days.length - 1]) {
+        console.log(
+          `[recalc-debug] pf=${portfolioId} day=${day} sym=${sym} qty=${qty} close=${price} contrib=${(qty * price).toFixed(2)} base=${base}`,
+        )
+      }
     }
     // §62.4 — cash is part of the portfolio value (base-currency balance at
     // day's close); `invested` stays the position cost basis so TWR/MWR keep
     // treating cash as external flow (netFlow) rather than invested capital.
-    totalValue += cashSeries.get(day) ?? 0
+    const cashDay = cashSeries.get(day) ?? 0
+    totalValue += cashDay
+    if (recalcDebug && day === days[days.length - 1]) {
+      console.log(
+        `[recalc-debug] pf=${portfolioId} day=${day} CASH=${cashDay.toFixed(2)} TOTAL=${totalValue.toFixed(2)} invested=${totalInvested.toFixed(2)}`,
+      )
+    }
     if (totalValue !== 0) {
       snapBatch.push({
         portfolioId,
