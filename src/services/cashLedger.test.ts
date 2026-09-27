@@ -3,6 +3,7 @@ import crypto from "node:crypto"
 import { makeHarness, type Harness } from "../routes/test-utils.js"
 import { portfolios, portfolioTransactions, portfolioCashTransactions } from "../db/schema.js"
 import { mockInstrumentsFx, unmockInstrumentsFx } from "../test-fx-mock.js"
+import { crossRate } from "@marx2/contracts/fx"
 import {
   tradeCashEffects,
   cashBalances,
@@ -171,5 +172,62 @@ describe("dailyExternalFlows", () => {
   it("empty rows → empty map", async () => {
     const f = await dailyExternalFlows(h.db, null, portfolioId, "2024-01-01", "2024-01-31", "PLN")
     expect(f.size).toBe(0)
+  })
+})
+
+/**
+ * §66.4 — both cash-ledger conversions inlined
+ * `(...)?.rate ?? 1`, which degraded a missing FX rate to 1:1 while accepting
+ * and then IGNORING the `opts` they were handed. So a multi-currency portfolio's
+ * cash balance and its "money actually put in" could each be wrong by an FX
+ * factor with nothing logged — even on the historical backfill, which explicitly
+ * asks for strict.
+ */
+describe("§66.4: cash-ledger FX respects opts.strict", () => {
+  const prevUrl = process.env.INSTRUMENTS_URL
+
+  beforeEach(async () => {
+    // only EUR is known, so every USD>PLN cross-rate 404s
+    mockInstrumentsFx({ table: {} })
+    h = await makeHarness()
+    await seedPortfolio()
+  })
+  afterEach(() => {
+    if (prevUrl === undefined) delete process.env.INSTRUMENTS_URL
+    else process.env.INSTRUMENTS_URL = prevUrl
+  })
+
+  async function depositUsd() {
+    await h.db.insert(portfolioCashTransactions).values({
+      userId, portfolioId, type: "DEPOSIT", amount: "100", currency: "USD",
+      transactionDate: "2024-06-01",
+    })
+  }
+
+  it("strict: an unresolvable pair throws instead of silently becoming 1:1", async () => {
+    await depositUsd()
+    // the base is PLN and the row is USD, with no USD>PLN rate available
+    await expect(
+      dailyExternalFlows(h.db, null, portfolioId, "2024-01-01", "2024-12-31", "PLN", { strict: true }),
+    ).rejects.toThrow()
+  })
+
+  it("non-strict: an unresolvable pair degrades to 1:1 and does not throw", async () => {
+    await depositUsd()
+    const flows = await dailyExternalFlows(h.db, null, portfolioId, "2024-01-01", "2024-12-31", "PLN")
+    expect(flows.get("2024-06-01")).toBe(100) // left unconverted, by design
+  })
+
+  it("a resolvable pair is converted and never degraded", async () => {
+    // both legs of the cross must exist; the expectation is derived from the same
+    // table via the same contract helper the mock uses, so it cannot encode a
+    // wrong rate convention
+    const table = { USD: 1.08, PLN: 4.3 }
+    mockInstrumentsFx({ table })
+    await depositUsd()
+    const rate = crossRate("USD", "PLN", { EUR: 1, ...table })
+    if (rate === undefined) throw new Error("test table cannot resolve USD>PLN")
+    const flows = await dailyExternalFlows(h.db, null, portfolioId, "2024-01-01", "2024-12-31", "PLN", { strict: true })
+    expect(flows.get("2024-06-01")).toBeCloseTo(100 * rate, 6)
   })
 })

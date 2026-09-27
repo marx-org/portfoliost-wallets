@@ -17,7 +17,7 @@
 import { and, eq, inArray, sql } from "drizzle-orm"
 import type { DB } from "../db/index.js"
 import { portfolioCashTransactions, portfolioTransactions } from "../db/schema.js"
-import { fxToOnDay, resolvedFxRate } from "./instruments-fx.js"
+import { FxRateUnavailableError, fxToOnDay, resolvedFxRate } from "./instruments-fx.js"
 const TRADE_CASH_TYPES = ["BUY", "SELL", "DIVIDEND"] as const
 
 /**
@@ -260,10 +260,35 @@ export async function dailyExternalFlows(
     const day = toDateStr(r.transactionDate)
     if (!day || day < from || day > to) continue
     const ccy = (r.currency ?? base).toUpperCase()
-    const toBase = ccy === base ? 1 : ((await resolvedFxRate(authToken, ccy, base, day, opts))?.rate ?? 1)
+    const toBase = await rateToBase(authToken, ccy, base, day, opts)
     flows.set(day, (flows.get(day) ?? 0) + Number(r.amount ?? 0) * toBase)
   }
   return flows
+}
+
+/**
+ * §66.4 — a rate for a real currency pair, resolved with the caller's strictness.
+ *
+ * Both cash-ledger conversions used to inline
+ * `(...)?.rate ?? 1`, which silently degraded a missing rate to 1:1 while
+ * accepting — and then ignoring — the `opts` they were handed. So a
+ * multi-currency portfolio's cash balance and its "money actually put in" could
+ * both be wrong by an FX factor with nothing logged and nothing thrown, even on
+ * the paths that explicitly asked for strict (the historical backfill).
+ */
+async function rateToBase(
+  authToken: string | null,
+  from: string,
+  base: string,
+  day: string | null,
+  opts: { strict?: boolean },
+): Promise<number> {
+  if (from === base) return 1
+  const r = await resolvedFxRate(authToken, from, base, day ?? undefined, opts)
+  if (r) return r.rate
+  if (opts.strict) throw new FxRateUnavailableError(`${from}>${base}@${day ?? "latest"}`)
+  console.warn(`[cash-ledger] no FX rate for ${from}>${base} on ${day ?? "latest"}: degrading 1:1`)
+  return 1
 }
 
 /**
@@ -303,7 +328,7 @@ export async function externalCashInvested(
   for (const r of rows) {
     const day = toDateStr(r.transactionDate) ?? new Date().toISOString().slice(0, 10)
     const ccy = (r.currency ?? base).toUpperCase()
-    const toBase = ccy === base ? 1 : ((await resolvedFxRate(authToken, ccy, base, day, opts))?.rate ?? 1)
+    const toBase = await rateToBase(authToken, ccy, base, day, opts)
     total += Number(r.amount ?? 0) * toBase
   }
   return total
