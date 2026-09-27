@@ -259,3 +259,44 @@ export async function dailyExternalFlows(
   }
   return flows
 }
+
+/**
+ * Cumulative net EXTERNAL cash flow of a portfolio in base currency (plan
+ * follow-up 2026-09-27): Σ DEPOSIT − Σ WITHDRAWAL ± TRANSFER legs, each at
+ * its own historical rate (instruments' date carry-forward). This is the
+ * "money actually put in (and taken out)" number — the correct basis for
+ * `Total Invested`. A portfolio that is 100% invested has ~0 cash *balance*
+ * but a large positive net external flow (it deposited its money), which is
+ * exactly what `invested` should report.
+ *
+ * Trade rows (BUY/SELL/DIVIDEND) are internal cash↔position moves and are
+ * excluded — only the cash-ledger external rows (DEPOSIT/WITHDRAWAL/TRANSFER)
+ * count, mirroring {@link dailyExternalFlows}. The sign convention is the
+ * cash ledger's: DEPOSIT >0, WITHDRAWAL <0, a transfer out of this portfolio
+ * <0 / into it >0, so the net is deposits − withdrawals ± transfer legs.
+ */
+export async function externalCashInvested(
+  db: DB,
+  authToken: string | null,
+  portfolioId: string,
+  baseCurrency: string,
+): Promise<number> {
+  const base = baseCurrency.toUpperCase()
+  const rows = await db
+    .select({
+      amount: portfolioCashTransactions.amount,
+      currency: portfolioCashTransactions.currency,
+      transactionDate: portfolioCashTransactions.transactionDate,
+    })
+    .from(portfolioCashTransactions)
+    .where(eq(portfolioCashTransactions.portfolioId, portfolioId))
+
+  let total = 0
+  for (const r of rows) {
+    const day = toDateStr(r.transactionDate) ?? new Date().toISOString().slice(0, 10)
+    const ccy = (r.currency ?? base).toUpperCase()
+    const toBase = ccy === base ? 1 : ((await resolvedFxRate(authToken, ccy, base, day))?.rate ?? 1)
+    total += Number(r.amount ?? 0) * toBase
+  }
+  return total
+}

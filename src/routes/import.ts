@@ -3,6 +3,7 @@ import { and, desc, eq, inArray, notInArray, sql } from "drizzle-orm"
 import { z } from "zod"
 import { userIdentityMiddleware } from "../auth.js"
 import { getDb, type DB } from "../db/index.js"
+import { externalCashInvested } from "../services/cashLedger.js"
 import {
   portfolios,
   portfolioCashTransactions,
@@ -328,23 +329,20 @@ async function processImportSell(
   return { position: updated, realizedGainLoss }
 }
 
-/** Recompute a portfolio's invested total from BUY rows (§23.4 final pass). */
-async function recomputeImportPortfolioTotals(tx: DB, userId: string, portfolioId: string) {
-  const [agg] = await tx
-    .select({
-      totalInvested: sql<string>`COALESCE(SUM(CASE WHEN ${portfolioTransactions.type} = 'BUY' THEN ${portfolioTransactions.totalAmount} ELSE 0 END), 0)::text`,
-    })
-    .from(portfolioTransactions)
-    .where(
-      and(
-        eq(portfolioTransactions.userId, userId),
-        eq(portfolioTransactions.portfolioId, portfolioId),
-      ),
-    )
+/** Recompute a portfolio's invested total from its external cash flows
+ * (§23.4 final pass; 2026-09-27 — net external flow = deposits − withdrawals
+ * ± transfer legs, NOT BUY-row cost basis: a fully-invested portfolio has ~0
+ * cash balance but a large invested total). */
+async function recomputeImportPortfolioTotals(tx: DB, authToken: string | null, userId: string, portfolioId: string) {
+  const [pf] = await tx
+    .select({ baseCurrency: portfolios.baseCurrency })
+    .from(portfolios)
+    .where(and(eq(portfolios.id, portfolioId), eq(portfolios.userId, userId)))
+  const totalInvested = await externalCashInvested(tx, authToken, portfolioId, pf?.baseCurrency ?? "USD")
 
   await tx
     .update(portfolios)
-    .set({ totalInvested: agg.totalInvested, updatedAt: new Date() })
+    .set({ totalInvested: totalInvested.toFixed(8), updatedAt: new Date() })
     .where(eq(portfolios.id, portfolioId))
 }
 
@@ -546,7 +544,7 @@ export function createImportRoutes(db?: DB) {
     }
 
     for (const portfolioId of affectedPortfolios) {
-      await recomputeImportPortfolioTotals(database, identity.id, portfolioId)
+      await recomputeImportPortfolioTotals(database, c.req.header("Authorization") ?? null, identity.id, portfolioId)
     }
 
     const status: SyncRun["status"] =

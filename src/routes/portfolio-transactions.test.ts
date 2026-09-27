@@ -1246,6 +1246,11 @@ describe("Aggregates & metrics (§15 Phase G)", () => {
     const portfolios = await list.json()
     const pid = portfolios[0].id
 
+    // Fund the buy (notional + fee) so the deposit is the invested basis;
+    // the BUY POST recompute reads net external flow for total_invested.
+    await h.db.insert(portfolioCashTransactions).values({
+      userId: h.user.id, portfolioId: pid, type: "DEPOSIT", amount: "1504.99", currency: "USD",
+    })
     // BUY
     await a.request(`/api/portfolios/${pid}/transactions`, {
       method: "POST",
@@ -1276,6 +1281,10 @@ describe("Aggregates & metrics (§15 Phase G)", () => {
         body: JSON.stringify({ name: "PLN P", currency: "USD", baseCurrency: "PLN" }),
       })
       const pln = await plnRes.json()
+      // 1500 PLN deposit = the invested basis for the PLN position.
+      await h.db.insert(portfolioCashTransactions).values({
+        userId: h.user.id, portfolioId: pln.id, type: "DEPOSIT", amount: "1500", currency: "PLN",
+      })
       await a.request(`/api/portfolios/${pln.id}/positions`, {
         method: "POST",
         headers: h.headers,
@@ -1290,6 +1299,10 @@ describe("Aggregates & metrics (§15 Phase G)", () => {
       })
       const list = await a.request("/api/portfolios", { headers: h.headers })
       const usd = (await list.json()).find((p: { name: string }) => p.name === "P1")
+      // Fund the P1 buy (1500 + 4.99 fee) — the deposit is its invested basis.
+      await h.db.insert(portfolioCashTransactions).values({
+        userId: h.user.id, portfolioId: usd.id, type: "DEPOSIT", amount: "1504.99", currency: "USD",
+      })
       await a.request(`/api/portfolios/${usd.id}/transactions`, {
         method: "POST",
         headers: h.headers,
@@ -1302,12 +1315,13 @@ describe("Aggregates & metrics (§15 Phase G)", () => {
       expect(body.baseCurrency).toBe("USD")
       // 10×150 PLN × 0.5 = 750 USD — never 1,500 raw PLN as USD.
       expect(body.totalValue).toBeCloseTo(750 + 1500, 2)
-      expect(body.totalInvested).toBeCloseTo(750 + 1500, 2)
+      // invested = net external flow (the deposits): 1500 PLN→750 + 1504.99 USD.
+      expect(body.totalInvested).toBeCloseTo(750 + 1504.99, 2)
       const byName = (n: string) => body.portfolioBreakdown.find((r: { name: string }) => r.name === n)
       expect(byName("PLN P").totalValue).toBeCloseTo(750, 2)
       expect(byName("PLN P").totalInvested).toBeCloseTo(750, 2)
       expect(byName("P1").totalValue).toBeCloseTo(1500, 2)
-      expect(byName("P1").totalInvested).toBeCloseTo(1500, 2)
+      expect(byName("P1").totalInvested).toBeCloseTo(1504.99, 2)
     } finally {
       unmockInstrumentsFx()
     }

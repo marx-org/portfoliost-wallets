@@ -651,7 +651,8 @@ describe("§62.4 — snapshots include cash; netFlow is external-only", () => {
     expect(snaps.length).toBeGreaterThanOrEqual(1)
     const last = snaps[snaps.length - 1]
     expect(Number(last.value)).toBeCloseTo(1000)
-    expect(Number(last.invested)).toBe(0)
+    // 2026-09-27 — invested = net external flow (the 1000 deposit), not 0.
+    expect(Number(last.invested)).toBeCloseTo(1000)
   })
 
   it("snapshot value = positions + foreign-currency cash converted into base", async () => {

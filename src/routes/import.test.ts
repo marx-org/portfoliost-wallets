@@ -289,6 +289,12 @@ describe("POST /api/import/transactions (§23.4)", () => {
 
     const res = await postTransactions(h, [
       {
+        externalId: "e-deposit-1",
+        portfolioName: "Transakcje",
+        executedAt: "2024-01-10T10:00:00.000Z",
+        cashTx: { type: "DEPOSIT", amount: 1000, currency: "USD" },
+      },
+      {
         externalId: "e-buy-1",
         portfolioName: "Transakcje",
         executedAt: "2024-01-15T10:00:00.000Z",
@@ -303,7 +309,7 @@ describe("POST /api/import/transactions (§23.4)", () => {
     ])
     expect(res.status).toBe(200)
     const body = await res.json()
-    expect(body.inserted).toBe(2)
+    expect(body.inserted).toBe(3) // 1 DEPOSIT + BUY + SELL
     expect(body.skipped).toBe(0)
     expect(body.errors).toEqual([])
 
@@ -319,7 +325,7 @@ describe("POST /api/import/transactions (§23.4)", () => {
     expect(Number(sellTx.realizedGainLoss)).toBe(80)
 
     const [portfolio] = await h.db.select().from(portfolios).where(eq(portfolios.id, portfolioId))
-    expect(Number(portfolio.totalInvested)).toBe(1000)
+    expect(Number(portfolio.totalInvested)).toBe(1000) // = the 1000 deposit (net external flow)
   })
 
   it("persists catalog sector/industry/country and keeps stored values on later buys (plan §28.5)", async () => {

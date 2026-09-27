@@ -24,7 +24,7 @@ import {
   positions,
   valueSnapshots,
 } from "../db/schema.js"
-import { fxTo, instrumentsBase, resolvedFxRate } from "./instruments-fx.js"
+import { instrumentsBase, resolvedFxRate } from "./instruments-fx.js"
 import { cashBalanceSeries, dailyExternalFlows } from "./cashLedger.js"
 import { enqueueBackfill } from "./backfill-runner.js"
 import {
@@ -534,10 +534,6 @@ export async function computeSnapshotBatch(
     : new Map<string, PriceBarSeries>()
   throwIfAborted(signal)
 
-  // Cost-basis currency conversion for `invested` — a genuine rate-only need
-  // (the stored avgCost is denominated in the instrument currency, plan §48.3).
-  const toBase = await fxTo(authToken, base)
-
   // 6. Build daily value series
   const days = calendarDays(from, to)
 
@@ -576,27 +572,15 @@ export async function computeSnapshotBatch(
     qtyMaps.set(sym, dayQty)
   }
 
-  // Also need invested = cost basis at each day
-  // invested(day) = Σ sym: qty_held(sym,day) × avg_cost(sym,day) × fx
-  // avg_cost is harder to track daily; approximate as total_invested from positions
-  // For simplicity (matching the plan): invested = Σ qty×avgCost from current positions
-  // (static — we upsert value_snapshots.invested as the current total invested each day)
-  // A more accurate per-day invested is left for H9 refinement.
-  const currentPositions = await db
-    .select({
-      symbol: positions.symbol,
-      averageCostBasis: positions.averageCostBasis,
-      instrumentCurrency: positions.instrumentCurrency,
-    })
-    .from(positions)
-    .where(and(eq(positions.portfolioId, portfolioId), eq(positions.isOpen, true)))
-
-  const costPerSymbol = new Map<string, { avg: number; ccy: string }>()
-  for (const p of currentPositions) {
-    costPerSymbol.set(p.symbol, {
-      avg: Number(p.averageCostBasis),
-      ccy: p.instrumentCurrency ?? "USD",
-    })
+  // §62 follow-up (2026-09-27): invested(day) = cumulative net EXTERNAL cash
+  // flow up to that day (deposits − withdrawals ± transfer legs, base ccy) —
+  // "money put in". Position cost basis is NOT the invested basis (a fully
+  // invested portfolio has ~0 cash balance but a large invested total).
+  let cumulativeFlow = 0
+  const cumulativeFlows = new Map<string, number>()
+  for (const day of days) {
+    cumulativeFlow += dailyFlows.get(day) ?? 0
+    cumulativeFlows.set(day, cumulativeFlow)
   }
 
   // 7. Build the snapshot batch (RECALC_DEBUG=1 → per-symbol day-0 debug logs)
@@ -614,10 +598,6 @@ export async function computeSnapshotBatch(
       // plan §48.3 — the close is already in the portfolio base currency
       // (server-side conversion); the value path is qty × close.
       totalValue += qty * price
-      const cost = costPerSymbol.get(sym)
-      if (cost) {
-        totalInvested += qty * cost.avg * (await toBase(cost.ccy, 1))
-      }
       if (recalcDebug && day === days[days.length - 1]) {
         console.log(
           `[recalc-debug] pf=${portfolioId} day=${day} sym=${sym} qty=${qty} close=${price} contrib=${(qty * price).toFixed(2)} base=${base}`,
@@ -629,6 +609,7 @@ export async function computeSnapshotBatch(
     // treating cash as external flow (netFlow) rather than invested capital.
     const cashDay = cashSeries.get(day) ?? 0
     totalValue += cashDay
+    totalInvested = cumulativeFlows.get(day) ?? 0
     if (recalcDebug && day === days[days.length - 1]) {
       console.log(
         `[recalc-debug] pf=${portfolioId} day=${day} CASH=${cashDay.toFixed(2)} TOTAL=${totalValue.toFixed(2)} invested=${totalInvested.toFixed(2)}`,

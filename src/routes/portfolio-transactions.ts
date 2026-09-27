@@ -11,6 +11,7 @@ import {
   transactionLabels,
 } from "../db/schema.js"
 import { resolveFeeFx } from "../services/fee-fx.js"
+import { externalCashInvested } from "../services/cashLedger.js"
 import { resolveRates } from "../services/instruments-fx.js"
 import {
   labelsForPositions,
@@ -79,25 +80,22 @@ async function loadPortfolio(db: DB, id: string, userId: string) {
 
 async function recomputePortfolioTotals(
   tx: DB,
+  authToken: string | null,
   userId: string,
   portfolioId: string,
 ) {
-  const [agg] = await tx
-    .select({
-      totalInvested: sql<string>`COALESCE(SUM(CASE WHEN ${portfolioTransactions.type} = 'BUY' THEN ${portfolioTransactions.totalAmount} ELSE 0 END), 0)::text`,
-    })
-    .from(portfolioTransactions)
-    .where(
-      and(
-        eq(portfolioTransactions.userId, userId),
-        eq(portfolioTransactions.portfolioId, portfolioId),
-      ),
-    )
+  // 2026-09-27 — invested = cumulative net EXTERNAL cash flow (deposits −
+  // withdrawals ± transfer legs), not BUY-row cost basis.
+  const [pf] = await tx
+    .select({ baseCurrency: portfolios.baseCurrency })
+    .from(portfolios)
+    .where(and(eq(portfolios.id, portfolioId), eq(portfolios.userId, userId)))
+  const totalInvested = await externalCashInvested(tx, authToken, portfolioId, pf?.baseCurrency ?? "USD")
 
   await tx
     .update(portfolios)
     .set({
-      totalInvested: agg.totalInvested,
+      totalInvested: totalInvested.toFixed(8),
       updatedAt: new Date(),
     })
     .where(eq(portfolios.id, portfolioId))
@@ -529,7 +527,7 @@ export function createTransactionRoutes(db?: DB) {
           .where(eq(portfolioTransactions.id, inserted.id))
       }
 
-      await recomputePortfolioTotals(tx, identity.id, portfolioId)
+      await recomputePortfolioTotals(tx, c.req.header("Authorization") ?? null, identity.id, portfolioId)
 
       const convertedFees =
         body.fees != null
@@ -647,7 +645,7 @@ export function createTransactionRoutes(db?: DB) {
         .where(eq(portfolioTransactions.id, txId))
         .returning()
 
-      await recomputePortfolioTotals(tx, identity.id, portfolioId)
+      await recomputePortfolioTotals(tx, c.req.header("Authorization") ?? null, identity.id, portfolioId)
 
       return {
         ...updated,
@@ -756,7 +754,7 @@ export function createTransactionRoutes(db?: DB) {
         .delete(portfolioTransactions)
         .where(eq(portfolioTransactions.id, txId))
 
-      await recomputePortfolioTotals(tx, identity.id, portfolioId)
+      await recomputePortfolioTotals(tx, c.req.header("Authorization") ?? null, identity.id, portfolioId)
     })
 
     notifyTransactionsChanged(database, portfolioId, c.req.header("Authorization") ?? "")
@@ -837,7 +835,7 @@ export function createTransactionRoutes(db?: DB) {
       .set(setData)
       .where(eq(positions.id, positionId))
 
-    await recomputePortfolioTotals(database, identity.id, portfolioId)
+    await recomputePortfolioTotals(database, c.req.header("Authorization") ?? null, identity.id, portfolioId)
 
     const [updated] = await database
       .select()
@@ -886,7 +884,7 @@ export function createTransactionRoutes(db?: DB) {
           ),
         )
       await tx.delete(positions).where(eq(positions.id, positionId))
-      await recomputePortfolioTotals(tx, identity.id, portfolioId)
+      await recomputePortfolioTotals(tx, c.req.header("Authorization") ?? null, identity.id, portfolioId)
     })
 
     notifyTransactionsChanged(database, portfolioId, c.req.header("Authorization") ?? "")
@@ -1165,7 +1163,7 @@ export function createTransactionRoutes(db?: DB) {
           .where(eq(portfolioTransactions.id, inserted.id))
       }
 
-      await recomputePortfolioTotals(tx, identity.id, portfolioId)
+      await recomputePortfolioTotals(tx, c.req.header("Authorization") ?? null, identity.id, portfolioId)
 
       return { transaction: inserted, position }
     })
@@ -1179,7 +1177,7 @@ export function createTransactionRoutes(db?: DB) {
 
     // D58: enrich with live quote so 201 response has current price/market value
     await refreshQuotes(database, identity.id, portfolioId, c.req.header("Authorization") ?? "")
-    await recomputePortfolioTotals(database, identity.id, portfolioId)
+    await recomputePortfolioTotals(database, c.req.header("Authorization") ?? null, identity.id, portfolioId)
 
     const [fresh] = await database
       .select()

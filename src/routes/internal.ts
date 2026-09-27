@@ -219,20 +219,15 @@ async function restatePositions(
 
 async function recomputeTotals(tx: DB, userId: string, portfolioId: string) {
   const { portfolios } = await import("../db/schema.js")
-  const [agg] = await tx
-    .select({
-      totalInvested: sql<string>`COALESCE(SUM(CASE WHEN ${portfolioTransactions.type} = 'BUY' THEN ${portfolioTransactions.totalAmount} ELSE 0 END), 0)::text`,
-    })
-    .from(portfolioTransactions)
-    .where(
-      and(
-        eq(portfolioTransactions.userId, userId),
-        eq(portfolioTransactions.portfolioId, portfolioId),
-      ),
-    )
+  const { externalCashInvested } = await import("../services/cashLedger.js")
+  const [pf] = await tx
+    .select({ baseCurrency: portfolios.baseCurrency })
+    .from(portfolios)
+    .where(and(eq(portfolios.id, portfolioId), eq(portfolios.userId, userId)))
+  const totalInvested = await externalCashInvested(tx, null, portfolioId, pf?.baseCurrency ?? "USD")
 
   await tx
     .update(portfolios)
-    .set({ totalInvested: agg.totalInvested, updatedAt: new Date() })
+    .set({ totalInvested: totalInvested.toFixed(8), updatedAt: new Date() })
     .where(eq(portfolios.id, portfolioId))
 }

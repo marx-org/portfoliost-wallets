@@ -116,6 +116,18 @@ describe("snapshotPortfolioValue — today snapshot", () => {
     const { db, user } = await makeHarness("snap-2pos")
     const pf = await seedPortfolio(db, user.id)
 
+    // Funding: 2750 USD deposited and immediately spent on the positions —
+    // the deposit is the invested basis (net external flow, 2026-09-27); the
+    // paired BUY keeps the cash balance at 0 (deposit − purchase).
+    await db.insert(portfolioTransactions).values({
+      userId: user.id, portfolioId: pf.id, type: "BUY", instrumentSymbol: "X",
+      quantity: "1", price: "2750", currency: "USD", instrumentCurrency: "USD",
+      totalAmount: "2750", executedAt: new Date("2026-09-01T09:00:00Z"),
+    })
+    await db.insert(portfolioCashTransactions).values({
+      userId: user.id, portfolioId: pf.id, type: "DEPOSIT", amount: "2750",
+      currency: "USD", transactionDate: "2026-09-01",
+    })
     const posRows = [
       { marketValue: "2000", averageCostBasis: "200", quantity: "10", instrumentCurrency: "USD" },
       { marketValue: "750", averageCostBasis: "250", quantity: "3", instrumentCurrency: "USD" },
@@ -127,7 +139,7 @@ describe("snapshotPortfolioValue — today snapshot", () => {
     expect(snaps).toHaveLength(1)
     expect(snaps[0].snapshotDate).toBe("2026-09-01")
     expect(Number(snaps[0].value)).toBeCloseTo(2750)    // 2000 + 750
-    expect(Number(snaps[0].invested)).toBeCloseTo(2750) // 10×200 + 3×250
+    expect(Number(snaps[0].invested)).toBeCloseTo(2750) // = the deposit (net external flow)
   })
 
   it("applies FX conversion for multi-currency positions (PLN, EUR → USD)", async () => {
@@ -139,6 +151,21 @@ describe("snapshotPortfolioValue — today snapshot", () => {
     // → PLN→USD = 1.10/4.40 = 0.25; EUR→USD = 1.10/1.10 = 1.0
     mockInstrumentsFx({ table: { USD: 1.10, PLN: 4.40 }, asOf: "2026-09-01" })
 
+    // Funding deposits: 1000 USD (for the USD leg) + 4000 PLN (for the PLN
+    // leg) → invested = 1000 + 4000×(1.10/4.40) = 1000 + 1000 = 2000 USD.
+    // Paired BUYs (in the portfolio base, USD) keep the cash balance at 0.
+    await db.insert(portfolioTransactions).values(
+      [
+        { userId: user.id, portfolioId: pf.id, type: "BUY", instrumentSymbol: "P", quantity: "1", price: "1000", currency: "USD", instrumentCurrency: "PLN", totalAmount: "1000", executedAt: new Date("2026-09-01T09:00:00Z") },
+        { userId: user.id, portfolioId: pf.id, type: "BUY", instrumentSymbol: "U", quantity: "1", price: "1000", currency: "USD", instrumentCurrency: "USD", totalAmount: "1000", executedAt: new Date("2026-09-01T09:00:00Z") },
+      ],
+    )
+    await db.insert(portfolioCashTransactions).values(
+      [
+        { userId: user.id, portfolioId: pf.id, type: "DEPOSIT", amount: "1000", currency: "USD", transactionDate: "2026-09-01" },
+        { userId: user.id, portfolioId: pf.id, type: "DEPOSIT", amount: "4000", currency: "PLN", transactionDate: "2026-09-01" },
+      ],
+    )
     const posRows = [
       { marketValue: "4000", averageCostBasis: "400", quantity: "10", instrumentCurrency: "PLN" },
       // 4000 PLN → 4000 × (1.10/4.40) = 4000 × 0.25 = 1000 USD
@@ -150,8 +177,7 @@ describe("snapshotPortfolioValue — today snapshot", () => {
 
     const snaps = await db.select().from(valueSnapshots).where(eq(valueSnapshots.portfolioId, pf.id))
     expect(Number(snaps[0].value)).toBeCloseTo(1000 + 1000) // 2000 USD
-    // invested: 10×400 PLN→USD + 1×900 USD = 10×400×0.25 + 900 = 1000 + 900 = 1900
-    expect(Number(snaps[0].invested)).toBeCloseTo(1000 + 900)
+    expect(Number(snaps[0].invested)).toBeCloseTo(1000 + 1000) // deposits: 1000 USD + 4000 PLN→1000 USD
   })
 
   it("empty portfolio — no positions → value and invested are 0", async () => {

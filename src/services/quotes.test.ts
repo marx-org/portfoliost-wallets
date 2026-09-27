@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import { makeHarness } from "../routes/test-utils.js"
-import { portfolios, positions, valueSnapshots } from "../db/schema.js"
+import { portfolios, positions, valueSnapshots, portfolioTransactions, portfolioCashTransactions } from "../db/schema.js"
 import { eq } from "drizzle-orm"
 import { refreshQuotes, snapshotPortfolioValue, _clearQuoteCache, isIsoCurrency } from "./quotes.js"
 
@@ -371,6 +371,18 @@ describe("snapshotPortfolioValue (H5)", () => {
       .values({ userId: user.id, name: "Snap PF", baseCurrency: "USD" })
       .returning()
 
+    // 2026-09-27 — invested = net external flow. Seed a 2100 deposit paired
+    // with a 2100 BUY so the deposit is the invested basis and the cash
+    // balance stays 0 (deposit − purchase) → value is just the positions.
+    await db.insert(portfolioTransactions).values({
+      userId: user.id, portfolioId: pf.id, type: "BUY", instrumentSymbol: "X",
+      quantity: "1", price: "2100", currency: "USD", instrumentCurrency: "USD",
+      totalAmount: "2100", executedAt: new Date("2026-09-03T09:00:00Z"),
+    })
+    await db.insert(portfolioCashTransactions).values({
+      userId: user.id, portfolioId: pf.id, type: "DEPOSIT", amount: "2100",
+      currency: "USD", transactionDate: "2026-09-03",
+    })
     const posRows = [
       { marketValue: "1800", averageCostBasis: "150", quantity: "10", instrumentCurrency: "USD" },
       { marketValue: "500", averageCostBasis: "200", quantity: "3", instrumentCurrency: "USD" },
@@ -382,7 +394,7 @@ describe("snapshotPortfolioValue (H5)", () => {
     expect(snaps).toHaveLength(1)
     expect(snaps[0].snapshotDate).toBe("2026-09-03")
     expect(Number(snaps[0].value)).toBeCloseTo(2300)   // 1800 + 500
-    expect(Number(snaps[0].invested)).toBeCloseTo(2100) // 150×10 + 200×3
+    expect(Number(snaps[0].invested)).toBeCloseTo(2100) // = the deposit
     // §53.5 — the snapshot-on-read upsert maintains portfolios.current_value
     const [pfRow] = await db.select().from(portfolios).where(eq(portfolios.id, pf.id))
     expect(Number(pfRow.currentValue)).toBeCloseTo(2300)

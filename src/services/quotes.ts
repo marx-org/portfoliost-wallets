@@ -16,7 +16,7 @@ import { and, eq, sql } from "drizzle-orm"
 import type { DB } from "../db/index.js"
 import { positions, portfolios, valueSnapshots } from "../db/schema.js"
 import { fxTo } from "./instruments-fx.js"
-import { cashBalances, dailyExternalFlows } from "./cashLedger.js"
+import { cashBalances, dailyExternalFlows, externalCashInvested } from "./cashLedger.js"
 import { recomputeReturnColumns, syncCurrentValueFromSnapshots } from "./returnColumns.js"
 
 // ── Types ─────────────────────────────────────────────────────────────────
@@ -345,6 +345,9 @@ export async function refreshQuotes(
   const toBase = await fxTo(authToken, base)
 
   let totalValue = 0
+  // §62 follow-up (2026-09-27): invested = cumulative net EXTERNAL cash flow
+  // (deposits − withdrawals ± transfer legs), NOT the position cost basis —
+  // a fully-invested portfolio has ~0 cash balance but a large invested total.
   let totalInvested = 0
   for (const p of positionRows) {
     const instFrom = (p.instrumentCurrency ?? "USD").toUpperCase()
@@ -354,9 +357,7 @@ export async function refreshQuotes(
     const investedRate = await toBase(instFrom, 1)
     const valueRate = valueFrom === instFrom ? investedRate : await toBase(valueFrom, 1)
     const mv = Number(p.marketValue ?? 0)
-    const cost = Number(p.averageCostBasis) * Number(p.quantity)
     totalValue += mv * valueRate
-    totalInvested += cost * investedRate
     if (process.env.RECALC_DEBUG === "1") {
       console.log(
         `[recalc-debug-quote] pf=${portfolioId} sym=${p.symbol} mv=${mv} mvCcy=${valueFrom}→${base} rate=${valueRate.toFixed(6)} contrib=${(mv * valueRate).toFixed(2)}`,
@@ -368,6 +369,7 @@ export async function refreshQuotes(
   // §62.4 — value includes the current cash total (base currency); netFlow is
   // EXTERNAL flows only (a same-day deposit/withdrawal shows up here).
   const cashBal = await cashBalances(db, authToken, portfolioId)
+  totalInvested = await externalCashInvested(db, authToken, portfolioId, base)
   let totalCash = 0
   for (const [ccy, bal] of cashBal) totalCash += bal * (await toBase(ccy, 1))
   if (process.env.RECALC_DEBUG === "1") {
