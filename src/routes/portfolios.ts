@@ -14,7 +14,7 @@ import { preferredBaseCurrency } from "../services/preferences.js"
 import { refreshQuotes } from "../services/quotes.js"
 import { getPortfolioNews } from "../services/portfolioNews.js"
 import { getPortfolioCalendar } from "../services/portfolioCalendar.js"
-import { runBackfill, runBackfillRecent, getBackfillStatus, buildBenchmarkSeries, forcePortfolioRecalc, hasBackfillableHistory } from "../services/backfill.js"
+import { runBackfill, runBackfillRecent, getBackfillStatus, getGapSymbols, buildBenchmarkSeries, forcePortfolioRecalc, hasBackfillableHistory } from "../services/backfill.js"
 import { cashBalances, dailyExternalFlows } from "../services/cashLedger.js"
 import { buildPortfolioCash } from "./portfolio-cash.js"
 import { computeRiskMetrics } from "../services/riskMetrics.js"
@@ -1070,9 +1070,14 @@ export function createPortfolioRoutes(db?: DB) {
         .map((s) => ({ symbol: s.symbol, name: s.name, timeSeries: s.timeSeries, returnPercent: s.returnPercent, volatility: s.volatility }))
     }
 
+    // §63.8 — held positions the latest backfill pass had no price bar for;
+    // when present the `value` series is a partial sum and the SPA flags it.
+    const gapSymbols = await getGapSymbols(database, id)
+
     return c.json({
       timeframe,
       backfillStatus: "complete",
+      gapSymbols,
       performance: {
         timeSeries,
         totalValue,

@@ -3117,6 +3117,7 @@ export interface components {
                 month?: string;
                 returnPercent?: number;
             }[];
+            gapSymbols?: string[] | null;
         };
         PortfolioSnapshot: {
             allocation?: {

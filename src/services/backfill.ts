@@ -294,6 +294,21 @@ export async function getBackfillStatus(
   return (rows[0]?.status as "pending" | "complete" | "failed") ?? "none"
 }
 
+/**
+ * §63.8 — the held symbols the latest backfill pass had no price bar for (null
+ * when every held symbol was priced). Surfaced by `GET /:id/analytics` so the
+ * SPA can flag the value as a partial sum instead of a wrong total.
+ */
+export async function getGapSymbols(db: DB, portfolioId: string): Promise<string[] | null> {
+  const rows = await db
+    .select({ gap: portfolioBackfillMetadata.gapSymbols })
+    .from(portfolioBackfillMetadata)
+    .where(eq(portfolioBackfillMetadata.portfolioId, portfolioId))
+    .limit(1)
+  const gap = rows[0]?.gap
+  return gap && gap.length > 0 ? gap : null
+}
+
 async function setBackfillStatus(
   db: DB,
   portfolioId: string,

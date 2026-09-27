@@ -3,7 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import { Hono } from "hono"
 import { createPortfolioRoutes, timeframeCutoff } from "./portfolios.js"
 import { makeHarness } from "./test-utils.js"
-import { portfolios, portfolioTransactions, valueSnapshots, portfolioCashTransactions } from "../db/schema.js"
+import { portfolios, portfolioTransactions, valueSnapshots, portfolioCashTransactions, portfolioBackfillMetadata } from "../db/schema.js"
 import { calendarDays } from "../services/backfill.js"
 
 function app(db: Parameters<typeof createPortfolioRoutes>[0]) {
@@ -137,6 +137,38 @@ describe("GET /:id/analytics — benchmarks (D46/D48)", () => {
     expect(body.performance.timeSeries.length).toBe(2)
     // the "invested" line (cumulative net money-in) rides along per point
     expect(body.performance.timeSeries[0].invested).toBe(900)
+  })
+
+  it("surfaces gapSymbols when a held symbol had no price bar (§63.8)", async () => {
+    const { db, user, headers } = await makeHarness("gap-api")
+    const a = app(db)
+    const pf = await seedPortfolio(db, user.id)
+    const days = calendarDays("2026-07-01", "2026-07-03")
+    await seedSnapshots(db, pf.id, days)
+    // a held symbol the last backfill pass couldn't price → the value is partial
+    await db.insert(portfolioBackfillMetadata).values({
+      portfolioId: pf.id,
+      status: "complete",
+      gapSymbols: ["BBB"],
+    })
+
+    const res = await a.request(`/api/portfolios/${pf.id}/analytics?timeframe=1Y`, { headers })
+    expect(res.status).toBe(200)
+    const body = await res.json()
+    expect(body.gapSymbols).toEqual(["BBB"])
+  })
+
+  it("omits gapSymbols (null) when every held symbol is priced", async () => {
+    const { db, user, headers } = await makeHarness("gap-api-clean")
+    const a = app(db)
+    const pf = await seedPortfolio(db, user.id)
+    const days = calendarDays("2026-07-01", "2026-07-03")
+    await seedSnapshots(db, pf.id, days)
+    await db.insert(portfolioBackfillMetadata).values({ portfolioId: pf.id, status: "complete", gapSymbols: null })
+
+    const res = await a.request(`/api/portfolios/${pf.id}/analytics?timeframe=1Y`, { headers })
+    const body = await res.json()
+    expect(body.gapSymbols).toBeNull()
   })
 
   it("accepts benchmarkCalcType param without error", async () => {
