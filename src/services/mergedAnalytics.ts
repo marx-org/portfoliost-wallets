@@ -150,7 +150,7 @@ export function buildMergedPerformance(series: MergedPoint[]) {
   const totalReturn = totalValue - totalInvested
   const totalReturnPercent = totalInvested > 0 ? (totalReturn / totalInvested) * 100 : 0
   return {
-    timeSeries: series.map((p) => ({ date: p.date, value: p.value })),
+    timeSeries: series.map((p) => ({ date: p.date, value: p.value, invested: p.invested })),
     totalValue,
     totalInvested,
     totalReturn,

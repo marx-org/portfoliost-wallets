@@ -1020,6 +1020,9 @@ export function createPortfolioRoutes(db?: DB) {
     const timeSeries = rows.map((r) => ({
       date: r.snapshotDate,
       value: Number(r.value),
+      // Cumulative net money-in (same currency as value) — the "invested"
+      // line the performance chart overlays (value − invested = profit).
+      invested: Number(r.invested),
       cumulativeTwr: r.cumulativeTwr !== null ? Number(r.cumulativeTwr) : undefined,
       cumulativeMwr: r.cumulativeMwr !== null ? Number(r.cumulativeMwr) : undefined,
       cumulativeSimple: r.cumulativeSimple !== null ? Number(r.cumulativeSimple) : undefined,

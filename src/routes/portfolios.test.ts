@@ -370,7 +370,8 @@ describe("GET /api/portfolios/merged (§46, §41 follow-up 1)", () => {
     expect(body.performance.timeSeries).toHaveLength(2)
     // last point: 1100 + 4400 * (1.08 / 4.3) = 1100 + 1104.6511...
     expect(body.performance.timeSeries[1].value).toBeCloseTo(1100 + 4400 * (1.08 / 4.3), 6)
-    expect(body.performance.timeSeries[1].invested).toBeUndefined()
+    // the "invested" line = summed cumulative net money-in (FX-converted): 800 + 4000×rate
+    expect(body.performance.timeSeries[1].invested).toBeCloseTo(800 + 4000 * (1.08 / 4.3), 6)
     expect(body.performance.totalValue).toBeCloseTo(1100 + 4400 * (1.08 / 4.3), 6)
     expect(body.performance.totalInvested).toBeCloseTo(800 + 4000 * (1.08 / 4.3), 6)
     expect(body.performance.monthlyReturns).toEqual([])

@@ -3095,6 +3095,7 @@ export interface components {
                 timeSeries?: {
                     date?: string;
                     value?: number;
+                    invested?: number | null;
                     cumulativeTwr?: number;
                     cumulativeMwr?: number;
                     cumulativeSimple?: number;
@@ -3506,7 +3507,7 @@ export interface components {
             /** Format: uuid */
             portfolioId: string;
             /** @enum {string} */
-            type: "BUY" | "SELL" | "DIVIDEND";
+            type: "BUY" | "SELL" | "DIVIDEND" | "EXPIRATION";
             instrumentSymbol: string;
             instrumentName?: string | null;
             /** @default STOCK */
@@ -3534,7 +3535,7 @@ export interface components {
             /** Format: date-time */
             executedAt?: string | null;
             /**
-             * @description SHORT marks a short-option open (position-creating, regardless of type)
+             * @description SHORT marks a short-option open (position-creating, regardless of type); for type=EXPIRATION it closes the short-option lot at zero value (zero cash effect)
              * @enum {string|null}
              */
             direction?: "LONG" | "SHORT" | null;

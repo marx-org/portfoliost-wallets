@@ -135,6 +135,8 @@ describe("GET /:id/analytics — benchmarks (D46/D48)", () => {
     const body = await res.json()
     expect(body.benchmarks).toEqual([])
     expect(body.performance.timeSeries.length).toBe(2)
+    // the "invested" line (cumulative net money-in) rides along per point
+    expect(body.performance.timeSeries[0].invested).toBe(900)
   })
 
   it("accepts benchmarkCalcType param without error", async () => {

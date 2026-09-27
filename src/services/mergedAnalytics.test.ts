@@ -152,9 +152,10 @@ describe("buildMergedPerformance (§46.1)", () => {
     expect(perf.totalInvested).toBe(800)
     expect(perf.totalReturn).toBe(400)
     expect(perf.totalReturnPercent).toBeCloseTo(50, 6)
+    // the "invested" line (cumulative net money-in) rides along per point
     expect(perf.timeSeries).toEqual([
-      { date: "2026-01-01", value: 1000 },
-      { date: "2026-01-02", value: 1200 },
+      { date: "2026-01-01", value: 1000, invested: 800 },
+      { date: "2026-01-02", value: 1200, invested: 800 },
     ])
     expect(perf.monthlyReturns).toEqual([])
     expect(perf.timeWeightedReturn).toBeNull()
