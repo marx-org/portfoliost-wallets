@@ -11,6 +11,7 @@ import {
   positions,
   portfolioTransactions,
   portfolioCashTransactions,
+  valueSnapshots,
 } from "../db/schema.js"
 import { eq, sql } from "drizzle-orm"
 
@@ -1958,4 +1959,3 @@ describe("§68: instruments + cash == total, everywhere", () => {
     } finally { unmockInstrumentsFx() }
   })
 })
-

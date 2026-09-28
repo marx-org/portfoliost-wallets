@@ -11,6 +11,7 @@ import {
 import { sql } from "drizzle-orm"
 import { __resetBackfillRunnerForTests } from "../services/backfill-runner.js"
 import { mockInstrumentsFx, unmockInstrumentsFx } from "../test-fx-mock.js"
+import { crossRate } from "@marx2/contracts/fx"
 
 function app(db: Parameters<typeof makeHarness>[0] extends string ? never : Parameters<typeof createPortfolioRoutes>[0]) {
   const a = new Hono()
@@ -348,34 +349,64 @@ describe("GET /api/portfolios/merged (§46, §41 follow-up 1)", () => {
     return pf
   }
 
-  it("sums USD + PLN portfolios into USD at latest rates (FX-converted last point)", async () => {
-    const h = await makeHarness("merged-usd-pln")
+  /**
+   * §68.4 — the merged series must be denominated in the SAME aggregate base that
+   * /total-metrics reports. It used to hardcode "USD" in two places, which was
+   * only ever consistent because /total-metrics hardcoded "USD" too; §68.3 made
+   * /total-metrics report the real base, so a hardcoded target here would have
+   * left the chart converting from a currency its numbers were not in.
+   *
+   * The base is made deterministically PLN (two PLN portfolios to one USD) and the
+   * expected values are computed with the SAME `crossRate` helper the FX mock
+   * uses, so this test cannot encode a wrong rate convention of its own.
+   */
+  it("sums mixed-currency portfolios into the dashboard's aggregate base, not a hardcoded USD", async () => {
+    const h = await makeHarness("merged-base")
     const a = app(h.db)
-    // plan §48.3 — the FX data moved to instruments; the stand-in serves the
-    // same EUR-based closes over the internal route.
+    // EUR-quoted table: USD = 1.08 EUR, PLN = 4.3 EUR
     mockInstrumentsFx({ table: { USD: 1.08, PLN: 4.3 }, asOf: "2026-09-18" })
-    await seedPfWithSnapshots(h, "USD pf", "USD", [
-      { snapshotDate: "2026-09-01", value: "1000", invested: "800" },
-      { snapshotDate: "2026-09-02", value: "1100", invested: "800" },
-    ])
-    await seedPfWithSnapshots(h, "PLN pf", "PLN", [
-      { snapshotDate: "2026-09-01", value: "4300", invested: "4000" },
-      { snapshotDate: "2026-09-02", value: "4400", invested: "4000" },
-    ])
+    try {
+      await seedPfWithSnapshots(h, "USD pf", "USD", [
+        { snapshotDate: "2026-09-01", value: "1000", invested: "800" },
+        { snapshotDate: "2026-09-02", value: "1100", invested: "800" },
+      ])
+      await seedPfWithSnapshots(h, "PLN pf A", "PLN", [
+        { snapshotDate: "2026-09-01", value: "4300", invested: "4000" },
+        { snapshotDate: "2026-09-02", value: "4400", invested: "4000" },
+      ])
+      await seedPfWithSnapshots(h, "PLN pf B", "PLN", [
+        { snapshotDate: "2026-09-01", value: "2150", invested: "2000" },
+        { snapshotDate: "2026-09-02", value: "2200", invested: "2000" },
+      ])
 
-    const res = await a.request("/api/portfolios/merged?timeframe=ALL", { headers: h.headers })
-    expect(res.status).toBe(200)
-    const body = await res.json()
-    expect(body.backfillStatus).toBe("complete")
-    expect(body.performance.timeSeries).toHaveLength(2)
-    // last point: 1100 + 4400 * (1.08 / 4.3) = 1100 + 1104.6511...
-    expect(body.performance.timeSeries[1].value).toBeCloseTo(1100 + 4400 * (1.08 / 4.3), 6)
-    // the "invested" line = summed cumulative net money-in (FX-converted): 800 + 4000×rate
-    expect(body.performance.timeSeries[1].invested).toBeCloseTo(800 + 4000 * (1.08 / 4.3), 6)
-    expect(body.performance.totalValue).toBeCloseTo(1100 + 4400 * (1.08 / 4.3), 6)
-    expect(body.performance.totalInvested).toBeCloseTo(800 + 4000 * (1.08 / 4.3), 6)
-    expect(body.performance.monthlyReturns).toEqual([])
-    expect(body.benchmarks).toEqual([])
+      const metrics = await (await a.request("/api/portfolios/total-metrics", { headers: h.headers })).json()
+      // two PLN portfolios beat one USD, so the honest aggregate base is PLN
+      expect(metrics.baseCurrency).toBe("PLN")
+
+      const res = await a.request("/api/portfolios/merged?timeframe=ALL", { headers: h.headers })
+      expect(res.status).toBe(200)
+      const body = await res.json()
+      expect(body.backfillStatus).toBe("complete")
+      expect(body.performance.timeSeries).toHaveLength(2)
+
+      const usdToPln = crossRate("USD", "PLN", { EUR: 1, USD: 1.08, PLN: 4.3 })
+      if (usdToPln == null) throw new Error("test table cannot resolve USD>PLN")
+      // last point, converted INTO the reported base:
+      //  1100 USD x usdToPln  +  4400 PLN  +  2200 PLN
+      const expected = 1100 * usdToPln + 4400 + 2200
+      const last = body.performance.timeSeries[1]
+      expect(last.value).toBeCloseTo(expected, 6)
+      expect(body.performance.totalValue).toBeCloseTo(expected, 6)
+      expect(body.performance.totalInvested).toBeCloseTo(800 * usdToPln + 4000 + 2000, 6)
+
+      // and explicitly NOT the answer a hardcoded "USD" target would have produced
+      const intoUsd = 1100 + 4400 * crossRate("PLN", "USD", { EUR: 1, USD: 1.08, PLN: 4.3 })! + 2200 * crossRate("PLN", "USD", { EUR: 1, USD: 1.08, PLN: 4.3 })!
+      expect(last.value).not.toBeCloseTo(intoUsd, 2)
+      expect(body.performance.monthlyReturns).toEqual([])
+      expect(body.benchmarks).toEqual([])
+    } finally {
+      unmockInstrumentsFx()
+    }
   })
 
   it("is served by the static route — not captured by GET /:id", async () => {

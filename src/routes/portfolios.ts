@@ -1,4 +1,4 @@
-import { Hono } from "hono"
+import { Hono, type Context } from "hono"
 import { and, asc, count as drizzleCount, desc, eq, sql } from "drizzle-orm"
 import { z } from "zod"
 import { userIdentityMiddleware } from "../auth.js"
@@ -270,20 +270,7 @@ export function createPortfolioRoutes(db?: DB) {
     // per-portfolio base amounts, which is why the headline and the card sum
     // could not reconcile (§63.3). Use the user's declared preference instead,
     // and fail loudly rather than degrade 1:1 on a valuation aggregate.
-    let aggregateBase: string | null = null
-    try {
-      aggregateBase = await preferredBaseCurrency(Object.fromEntries(c.req.raw.headers))
-    } catch (e) {
-      // §66.4 — the preference service being down must not 500 the homepage, but
-      // we must not invent a currency either. Fall back to a value derived from
-      // the user's OWN portfolios (their most common base_currency). If they have
-      // none, aggregateBase stays null and the totals are reported as null so the
-      // SPA renders no symbol rather than a wrong one.
-      const tally = new Map<string, number>()
-      for (const p of portfolioRows) tally.set(p.baseCurrency, (tally.get(p.baseCurrency) ?? 0) + 1)
-      aggregateBase = [...tally.entries()].sort((a, b) => b[1] - a[1])[0]?.[0] ?? null
-      console.warn("[total-metrics] base-currency preference unreadable:", e instanceof Error ? e.message : e)
-    }
+    const aggregateBase = await resolveAggregateBase(c, portfolioRows)
     if (!aggregateBase) {
       // no honest aggregate base -> no converted totals
       return c.json({ baseCurrency: null, totalValue: null, totalInvested: null, portfolioBreakdown: [] })
@@ -394,6 +381,41 @@ export function createPortfolioRoutes(db?: DB) {
   })
 
   // ── G1: GET /held-stocks — aggregated open position view ─────────────
+
+/**
+ * §68.4 — the ONE aggregate base for the dashboard.
+ *
+ * Two routes report amounts the SPA then converts, and they must agree on the
+ * currency those amounts are in: /total-metrics and /merged. They did not.
+ * /merged hardcoded "USD" as its conversion target in two places while the SPA
+ * took the merged source to be `total-metrics.baseCurrency` — so the chart was
+ * only ever right because /total-metrics ALSO hardcoded "USD", and the two
+ * hardcodes cancelled out.
+ *
+ * §68.3 fixed /total-metrics to report the real aggregate base, which is exactly
+ * what would have silently broken the chart: real numbers, wrong source currency.
+ * The two have to move together, which is why this is a shared resolver rather
+ * than a second correct value.
+ *
+ * The ladder is §66.4's: declared preference, else the user's own most common
+ * portfolio base, else null — and the caller reports nulls rather than guessing.
+ */
+async function resolveAggregateBase(
+  c: Context,
+  portfolioRows: { baseCurrency: string }[],
+): Promise<string | null> {
+  try {
+    return await preferredBaseCurrency(Object.fromEntries(c.req.raw.headers))
+  } catch (e) {
+    const tally = new Map<string, number>()
+    for (const p of portfolioRows) tally.set(p.baseCurrency, (tally.get(p.baseCurrency) ?? 0) + 1)
+    console.warn(
+      "[aggregate-base] base-currency preference unreadable:",
+      e instanceof Error ? e.message : e,
+    )
+    return [...tally.entries()].sort((a, b) => b[1] - a[1])[0]?.[0] ?? null
+  }
+}
 
   routes.get("/held-stocks", async (c) => {
     const identity = c.get("userIdentity")
@@ -616,8 +638,12 @@ export function createPortfolioRoutes(db?: DB) {
   })
 
   // GET /api/portfolios/merged — combined all-portfolios performance (§46,
-  // §41 follow-up 1). Sums every portfolio's value_snapshots into USD (the
-  // currency the SPA assumes as source via total-metrics.baseCurrency).
+  // §41 follow-up 1). Sums every portfolio's value_snapshots into the SAME
+  // aggregate base /total-metrics reports (was hardcoded "USD" — §68.4).
+  //
+  // The series ALREADY includes cash: value_snapshots.value is written by
+  // snapshotPortfolioValue as instruments + cash, so this chart's value line is
+  // the whole account and needs no separate cash line to agree with the tile.
   // Registered ABOVE "/:id" so "merged" is not parsed as a portfolio id.
   routes.get("/merged", async (c) => {
     const identity = c.get("userIdentity")
@@ -686,9 +712,17 @@ export function createPortfolioRoutes(db?: DB) {
       )
       .orderBy(asc(valueSnapshots.snapshotDate))
 
+    // §68.4 — was hardcoded "USD" in two places. See resolveAggregateBase: this
+    // has to be the same base /total-metrics reports, or the SPA converts the
+    // chart out of a currency the numbers are not in.
+    const aggregateBase = await resolveAggregateBase(c, portfolioRows)
+    const mergedBase = aggregateBase ?? "USD"
+    if (!aggregateBase) {
+      console.warn("[merged] no honest aggregate base; USD for the series only, dashboard reports nulls")
+    }
     const rateMap = await resolveRates(
       c.req.header("Authorization") ?? "",
-      "USD",
+      mergedBase,
       rows.map((r) => r.baseCurrency),
     )
     const series = sumSnapshotsByDateForwardFilled(
@@ -700,7 +734,7 @@ export function createPortfolioRoutes(db?: DB) {
         invested: Number(r.invested),
       })),
       (from) => rateMap.get(from.toUpperCase()) ?? null,
-      "USD",
+      mergedBase,
     )
 
     return c.json({
