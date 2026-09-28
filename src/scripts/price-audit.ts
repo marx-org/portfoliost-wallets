@@ -58,8 +58,6 @@ export interface TradeVerdict {
   deviation: number | null
   tradeCurrency: string
   claimedCurrency: string | null
-  /** "EUR>PLN" when the deviation is almost exactly one pair's rate. */
-  fxHint: string | null
 }
 
 export interface SymbolReport {
@@ -102,32 +100,54 @@ export function pickBar(
   return { close: best.close, carriedDays: gap }
 }
 
+/**
+ * Put a trade's price in the BAR's currency before comparing.
+ *
+ * A trade has two currencies: the one it was PAID in (`currency`) and the one the
+ * instrument TRADES in. They are routinely different, and legitimately so: a
+ * broker will sell a GBP-listed stock priced in PLN and convert internally, so a
+ * Chesnara buy lands as 12.91 PLN against a £2.236 bar. Compared raw that reads
+ * as +477% and is nonsense — the number was never wrong.
+ *
+ * So the comparison converts, at the trade date's rate, from the payment currency
+ * into the bar's own currency. Two things this deliberately does NOT do:
+ *   - it does not fall back to 1:1. A missing rate means the comparison cannot be
+ *     made, and returning the unconverted number would recreate the exact false
+ *     positive this fixes. The trade is reported as unchecked instead.
+ *   - it does not use the position's `instrument_currency`. That field is one of
+ *     the things under suspicion (CRI.WA read CAD on a Warsaw listing), so
+ *     trusting it here would let a corrupt value launder itself into a "clean"
+ *     comparison. The bar's own currency is the independent reference.
+ *
+ * This is why §72.6 does the pricing from bars rather than from
+ * `instrument_currency`: the two must not be able to confirm each other.
+ */
+export function normaliseToBarCurrency(
+  tradePrice: number,
+  tradeCurrency: string,
+  barCurrency: string | null,
+  rateToBar: number | null,
+): { price: number; converted: boolean } {
+  const from = (tradeCurrency ?? "").trim().toUpperCase()
+  const to = (barCurrency ?? "").trim().toUpperCase()
+  if (!from) return { price: Number.NaN, converted: false }
+  // No bar currency: we cannot tell whether the trade's currency is the bar's,
+  // so the comparison cannot be verified. Returning the raw number would compare
+  // a possibly-foreign price to the bar — the false positive this whole function
+  // exists to remove. An unknown bar currency makes the trade UNCHECKED, and the
+  // summary reports how many that is.
+  if (!to) return { price: Number.NaN, converted: false }
+  if (from === to) return { price: tradePrice, converted: false }
+  if (rateToBar == null || !Number.isFinite(rateToBar) || !(rateToBar > 0)) {
+    return { price: Number.NaN, converted: false }
+  }
+  return { price: tradePrice * rateToBar, converted: true }
+}
+
 /** Signed relative difference: +0.05 means the trade was 5% above the bar. */
 export function deviationPct(tradePrice: number, barClose: number): number {
   if (!(barClose > 0)) return Number.NaN
   return tradePrice / barClose - 1
-}
-
-/**
- * Name the currency pair when the trade/bar ratio is almost exactly an FX rate.
- *
- * Valid HERE and not at portfolio level: this is ONE trade against ONE close, so
- * the ratio is a like-for-like quantity. The same heuristic applied to a summed
- * portfolio total is meaningless — see the note in `valuation-audit.ts`, where a
- * single bad position among thirteen moved the total by 0.847 against a
- * CAD→PLN rate of 2.7131, and the heuristic was cut rather than shipped.
- */
-export function fxHint(
-  ratio: number,
-  tradeCurrency: string,
-  claimedCurrency: string | null,
-  rates: Map<string, number>,
-): string | null {
-  if (!claimedCurrency || tradeCurrency === claimedCurrency) return null
-  const key = `${tradeCurrency}>${claimedCurrency}`
-  const rate = rates.get(key)
-  if (rate == null) return null
-  return Math.abs(ratio - rate) <= FX_HINT_TOLERANCE ? key : null
 }
 
 /**
@@ -139,17 +159,20 @@ export function fxHint(
  * accepting one would make it capable of hiding a finding.
  */
 export function assessSymbol(
-  trades: Array<Omit<TradeVerdict, "fxHint">>,
+  trades: TradeVerdict[],
   rates: Map<string, number> = new Map(),
 ): TradeVerdict[] {
   return trades.map((t) => {
-    const deviation = t.barClose == null ? null : deviationPct(t.tradePrice, t.barClose)
-    const ratio = t.barClose ? t.tradePrice / t.barClose : Number.NaN
-    return {
-      ...t,
-      deviation,
-      fxHint: Number.isNaN(ratio) ? null : fxHint(ratio, t.tradeCurrency, t.claimedCurrency, rates),
-    }
+    // §72.10 — the rate to put the PAYMENT currency into the bar's currency.
+    // Absent, we cannot compare rather than compare wrongly.
+    const rateToBar = t.claimedCurrency
+      ? rates.get(`${t.tradeCurrency}>${t.claimedCurrency}`) ?? null
+      : null
+    const norm = normaliseToBarCurrency(t.tradePrice, t.tradeCurrency, t.claimedCurrency, rateToBar)
+    const usable = t.barClose != null && Number.isFinite(norm.price)
+    const deviation = usable ? deviationPct(norm.price, t.barClose!) : null
+    // The hint stays on the RAW ratio: an unconverted gap that IS an FX rate is
+    return { ...t, deviation }
   })
 }
 
@@ -215,6 +238,8 @@ async function fetchNativeBars(
     timestamps?: number[]
     closePrices?: Array<number | null>
     baseCurrency?: string | null
+    currency?: string | null
+    currencySource?: string | null
   }
   const bars = new Map<string, number>()
   for (let i = 0; i < (body.timestamps?.length ?? 0); i++) {
@@ -222,7 +247,14 @@ async function fetchNativeBars(
     if (close == null || !(close > 0)) continue
     bars.set(new Date(body.timestamps![i] * 1000).toISOString().slice(0, 10), close)
   }
-  return { bars, claimedCurrency: body.baseCurrency ?? null }
+  // §72.10 — `currency` is the TARGET (equal to the base here, since no
+  // ?currency= is sent) and `baseCurrency` is the resolved base, which comes back
+  // null whenever instruments could not resolve one. Reading only baseCurrency
+  // left several symbols — INGAKC.TFI among them — with an unknown bar currency,
+  // which after the conversion change would have made them all "unchecked".
+  // Taking whichever the service actually reported keeps them comparable.
+  const claimed = body.baseCurrency ?? (body.currencySource === "unknown" ? null : body.currency) ?? null
+  return { bars, claimedCurrency: typeof claimed === "string" ? claimed.toUpperCase() : null }
 }
 
 async function main() {
@@ -277,13 +309,21 @@ async function main() {
     // Rates only among the currencies the trades themselves used, so an FX hint
     // can only ever name a pair that appears in the data being checked.
     const rates = new Map<string, number>()
-    const ccy = [...new Set(trades.map((t) => (t.currency ?? "").toUpperCase()).filter(Boolean))]
-    for (const c of ccy) {
+    // §72.10 — the rate table must reach BOTH ends of every comparison: the
+    // currency the trade was paid in, and the currency the bar is denominated
+    // in. They are usually different (a .L listing paid in PLN), and keying only
+    // on the trade currencies meant the conversion rate was simply absent, so
+    // those trades could not be compared at all.
+    const tradeCcy = [...new Set(trades.map((t) => (t.currency ?? "").toUpperCase()).filter(Boolean))]
+    const barCcy = [...new Set([...barCache.values()].map((v) => (v.claimedCurrency ?? "").toUpperCase()).filter(Boolean))]
+    const wanted = [...new Set([...tradeCcy, ...barCcy])]
+    for (const from of wanted) {
       try {
-        const r = await resolveRates(token, c, ccy.filter((o) => o !== c))
-        for (const [k, v] of r) if (v != null) rates.set(`${k}>${c}`, v)
+        const r = await resolveRates(token, from, wanted.filter((o) => o !== from))
+        for (const [k, v] of r) if (v != null) rates.set(`${k}>${from}`, v)
       } catch {
-        // a missing pair just means no hint is offered for it
+        // a missing pair just means that conversion is unavailable, and the
+        // trade is then reported unchecked rather than compared wrongly
       }
     }
 
@@ -336,7 +376,9 @@ async function main() {
           console.log(
             `      ${v.date} ${v.portfolioName}: trade ${v.tradePrice} ${v.tradeCurrency} vs bar ${v.barClose}` +
               ` (${(v.deviation! * 100).toFixed(1)}%${v.carriedDays ? `, close is ${v.carriedDays}d older` : ""})` +
-              (v.fxHint ? `  ← ratio is FX ${v.fxHint}: wrong currency` : ""),
+              (v.tradeCurrency !== v.claimedCurrency
+                ? `  [${v.tradePrice} ${v.tradeCurrency} → ${v.claimedCurrency} at that day's rate]`
+                : ""),
           )
         }
         console.log("")

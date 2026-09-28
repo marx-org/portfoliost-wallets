@@ -4,7 +4,7 @@ import {
   MAX_CARRY_DAYS,
   assessSymbol,
   deviationPct,
-  fxHint,
+  normaliseToBarCurrency,
   pickBar,
   resolveInstrumentsToken,
   summarise,
@@ -76,52 +76,61 @@ describe("deviationPct", () => {
   })
 })
 
-describe("fxHint", () => {
-  const rates = new Map([["PLN>CAD", 2.7131]])
+describe("cross-currency trades (§72.10)", () => {
+  const rates = new Map([["PLN>GBP", 0.1773]])
 
-  it("names the pair when the ratio IS that pair's rate (the CRI.WA shape)", () => {
-    // Trade recorded in PLN, bar denominated in CAD: the ratio is the rate.
-    expect(fxHint(2.7131, "PLN", "CAD", rates)).toBe("PLN>CAD")
+  it("converts a trade PAID in one currency into the bar's currency", () => {
+    // The PROD case: a .L listing paid in PLN. 12.91 PLN x 0.1773 = £2.29 against
+    // a £2.236 bar is a 2.3% move. Compared raw it read as +477%, which is how a
+    // correct trade gets reported as a defect.
+    const [v] = assessSymbol(
+      [trade({ tradePrice: 12.91, barClose: 2.236369, tradeCurrency: "PLN", claimedCurrency: "GBP" })],
+      rates,
+    )
+    expect(v.deviation).toBeCloseTo(0.023, 2)
   })
 
-  it("stays quiet for ordinary market movement", () => {
-    expect(fxHint(1.164, "PLN", "CAD", rates)).toBeNull()
+  it("does NOT fall back to 1:1 when the rate is unavailable — the trade is unchecked", () => {
+    // Returning the unconverted number would recreate the exact false positive
+    // the conversion exists to remove.
+    const [v] = assessSymbol(
+      [trade({ tradePrice: 12.91, barClose: 2.236369, tradeCurrency: "PLN", claimedCurrency: "GBP" })],
+      new Map(),
+    )
+    expect(v.deviation).toBeNull()
   })
 
-  it("stays quiet when there is no pair to compare against", () => {
-    expect(fxHint(2.7131, "PLN", "CAD", new Map())).toBeNull()
-  })
-
-  it("does not hint when the trade currency is already the bar currency", () => {
-    expect(fxHint(1, "CAD", "CAD", rates)).toBeNull()
+  it("leaves a same-currency trade untouched", () => {
+    const [v] = assessSymbol(
+      [trade({ tradePrice: 100, barClose: 101, tradeCurrency: "EUR", claimedCurrency: "EUR" })],
+      new Map(),
+    )
+    expect(v.deviation).toBeCloseTo(-0.0099, 3)
   })
 })
 
-describe("assessSymbol — the two PROD shapes", () => {
-  it("flags the currency signature and names the pair", () => {
-    const [v] = assessSymbol(
-      [trade({ tradePrice: 369, barClose: 136, tradeCurrency: "PLN", claimedCurrency: "CAD" })],
-      new Map([["PLN>CAD", 2.7131]]),
-    )
-    // 369 / 136 = 2.7132 — the CAD→PLN factor to four figures.
-    expect(v.deviation).toBeCloseTo(1.7132, 3)
-    expect(v.fxHint).toBe("PLN>CAD")
+describe("normaliseToBarCurrency", () => {
+  it("is a no-op when the currencies already agree", () => {
+    expect(normaliseToBarCurrency(100, "EUR", "EUR", 5)).toEqual({ price: 100, converted: false })
   })
+  it("refuses rather than degrading to 1:1 on a missing rate", () => {
+    expect(normaliseToBarCurrency(100, "PLN", "GBP", null).price).toBeNaN()
+    expect(normaliseToBarCurrency(100, "PLN", "GBP", 0).price).toBeNaN()
+  })
+  it("refuses when the bar currency is unknown", () => {
+    expect(normaliseToBarCurrency(100, "PLN", null, 0.17).price).toBeNaN()
+  })
+})
 
-  it("flags the venue signature and leaves the pair unnamed", () => {
-    // SRT3.DE shape: most trades agree, one is 16% out because the bar is the
-    // wrong share class. No FX rate explains it — a sibling listing does.
+describe("assessSymbol — remaining shapes", () => {
+  it("flags a genuine mismatch in the SAME currency (the venue signature)", () => {
+    // SRT3.DE shape: same currency on both sides, so no conversion applies and
+    // the real 18.9% gap survives to be reported.
     const [v] = assessSymbol(
-      [trade({ tradePrice: 379, barClose: 325.5, tradeCurrency: "EUR", claimedCurrency: "EUR" })],
-      new Map([["PLN>CAD", 2.7131]]),
+      [trade({ tradePrice: 379, barClose: 282.3, tradeCurrency: "EUR", claimedCurrency: "EUR" })],
+      new Map(),
     )
     expect(Math.abs(v.deviation!)).toBeGreaterThan(0.1)
-    expect(v.fxHint).toBeNull()
-  })
-
-  it("leaves fxHint null when there is no bar to divide by", () => {
-    const [v] = assessSymbol([trade({ barClose: null, deviation: null })])
-    expect(v.fxHint).toBeNull()
   })
 })
 
