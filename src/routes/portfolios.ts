@@ -311,15 +311,27 @@ export function createPortfolioRoutes(db?: DB) {
         return {
           id: p.id,
           name: p.name,
+          // Round each component FIRST, then total the ROUNDED parts. Rounding
+          // the raw sum instead leaves totalValue up to a cent away from
+          // instrumentsValue + cashValue in the response — PROD showed IKE Marek
+          // at 27,684.94 + 239.45 = 27,924.39 against a reported 27,924.38. The
+          // contract promises they are equal, so the response has to make that
+          // true, not merely be near it.
           instrumentsValue: Math.round(split.instrumentsValue * 100) / 100,
           cashValue: Math.round(split.cashValue * 100) / 100,
-          totalValue: Math.round(split.totalValue * 100) / 100,
+          totalValue: 0,
           totalInvested: Math.round(totalInvested * 100) / 100,
           returnPercentage: Math.round(returnPct * 100) / 100,
           weight: 0, // filled in after totals computed
         }
       }),
     )
+
+    // Each row's parts are rounded to the cent, so the row total is now exact
+    // rather than a rounding of the raw sum (see the comment on the row literal).
+    for (const row of portfolioBreakdown) {
+      row.totalValue = Math.round((row.instrumentsValue + row.cashValue) * 100) / 100
+    }
 
     // §68 — the aggregate is the sum of the parts, so the headline and the cards
     // cannot disagree: totalValue IS instrumentsValue + cashValue by definition.

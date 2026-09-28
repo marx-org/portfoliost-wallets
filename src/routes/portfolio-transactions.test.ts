@@ -1826,12 +1826,16 @@ describe("§68: instruments + cash == total, everywhere", () => {
       }
 
       const body = await (await a.request("/api/portfolios/total-metrics", { headers: h.headers })).json()
-      expect(body.totalValue).toBeCloseTo(body.instrumentsValue + body.cashValue, 2)
-      const sumRows = body.portfolioBreakdown.reduce((s: number, p: any) => s + p.totalValue, 0)
-      expect(body.totalValue).toBeCloseTo(sumRows, 2)
+      // EXACT equality, not toBeCloseTo: PROD caught a cent of drift here
+      // (IKE Marek 27,684.94 + 239.45 reported as 27,924.38) because the route
+      // rounded the raw sum instead of the rounded parts. The contract promises
+      // these are equal, so the response has to make that literally true.
+      expect(body.totalValue).toBe(body.instrumentsValue + body.cashValue)
+      const sumRows = Math.round(body.portfolioBreakdown.reduce((s: number, p: any) => s + p.totalValue, 0) * 100) / 100
+      expect(body.totalValue).toBe(sumRows)
       // every row carries its own split, and it is internally consistent
       for (const p of body.portfolioBreakdown) {
-        expect(p.totalValue).toBeCloseTo(p.instrumentsValue + p.cashValue, 2)
+        expect(p.totalValue).toBe(Math.round((p.instrumentsValue + p.cashValue) * 100) / 100)
       }
     } finally { unmockInstrumentsFx() }
   })
