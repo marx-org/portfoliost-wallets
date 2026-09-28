@@ -46,6 +46,7 @@ export interface TradeRow {
   price: number
   currency: string
   instrumentCurrency: string | null
+  exchangeRate?: number | null
 }
 
 export interface TradeVerdict {
@@ -58,6 +59,10 @@ export interface TradeVerdict {
   deviation: number | null
   tradeCurrency: string
   claimedCurrency: string | null
+  /** The rate the IMPORT actually applied, when it applied one. */
+  storedRate: number | null
+  /** True when the trade row recorded two DIFFERENT currencies. */
+  importConverted: boolean
 }
 
 export interface SymbolReport {
@@ -165,9 +170,22 @@ export function assessSymbol(
   return trades.map((t) => {
     // §72.10 — the rate to put the PAYMENT currency into the bar's currency.
     // Absent, we cannot compare rather than compare wrongly.
-    const rateToBar = t.claimedCurrency
-      ? rates.get(`${t.tradeCurrency}>${t.claimedCurrency}`) ?? null
-      : null
+    // §72.11 — the trade row already carries the rate the IMPORT applied, and it
+    // is the authority when the import actually converted: it is what the user
+    // paid, including any custom or manual rate.
+    //
+    // It is NOT usable when the import recorded one currency twice. All 1193
+    // trades carry an `exchange_rate`, but for CSN.L 2025-01-22 — a .L listing
+    // paid in PLN — `currency` and `instrument_currency` are both PLN, so the
+    // stored rate is 1.0 by construction and encodes the mis-recording rather
+    // than a conversion. Trusting it there compares 12.91 "GBP" to a £2.236 bar
+    // and reproduces the 477% the conversion exists to remove. Hence: honour the
+    // stored rate only when the two currencies actually differ.
+    const rateToBar = t.importConverted
+      ? t.storedRate
+      : t.claimedCurrency
+        ? rates.get(`${t.tradeCurrency}>${t.claimedCurrency}`) ?? null
+        : null
     const norm = normaliseToBarCurrency(t.tradePrice, t.tradeCurrency, t.claimedCurrency, rateToBar)
     const usable = t.barClose != null && Number.isFinite(norm.price)
     const deviation = usable ? deviationPct(norm.price, t.barClose!) : null
@@ -274,7 +292,8 @@ async function main() {
              t.instrument_symbol as symbol,
              to_char(t.executed_at at time zone 'UTC', 'YYYY-MM-DD') as date,
              t.price::float8 as price, t.currency as currency,
-             t.instrument_currency as "instrumentCurrency"
+             t.instrument_currency as "instrumentCurrency",
+             t.exchange_rate::float8 as "exchangeRate"
       from portfolios.transactions t
       join portfolios.portfolios pf on pf.id = t.portfolio_id
       where t.type in ('BUY','SELL') and t.price is not null and t.price <> 0
@@ -302,6 +321,11 @@ async function main() {
         deviation: hit ? deviationPct(t.price, hit.close) : null,
         tradeCurrency: (t.currency ?? "").toUpperCase(),
         claimedCurrency,
+        storedRate: t.exchangeRate ?? null,
+        importConverted: Boolean(
+          t.instrumentCurrency &&
+            (t.currency ?? "").toUpperCase() !== t.instrumentCurrency.toUpperCase(),
+        ),
       })
       bySymbol.set(t.symbol, list)
     }

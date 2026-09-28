@@ -22,7 +22,7 @@ import {
  */
 const bar = (d: string, c: number): Map<string, number> => new Map([[d, c]])
 
-const trade = (o: Partial<TradeVerdict> = {}): Omit<TradeVerdict, "fxHint"> => ({
+const trade = (o: Partial<TradeVerdict> = {}): TradeVerdict => ({
   portfolioName: "IKE Marek",
   symbol: "X",
   date: "2026-09-27",
@@ -32,6 +32,8 @@ const trade = (o: Partial<TradeVerdict> = {}): Omit<TradeVerdict, "fxHint"> => (
   deviation: 0,
   tradeCurrency: "PLN",
   claimedCurrency: "PLN",
+  storedRate: 1,
+  importConverted: false,
   ...o,
 })
 
@@ -98,6 +100,39 @@ describe("cross-currency trades (§72.10)", () => {
       new Map(),
     )
     expect(v.deviation).toBeNull()
+  })
+
+  it("§72.11: honours the rate the IMPORT applied, when it applied one", () => {
+    // The user is right that we store it: all 1193 trades carry exchange_rate.
+    // When the import recorded two different currencies, that rate is the
+    // authority — it is what was actually paid, manual/custom included. The
+    // derived rate below is deliberately wrong, so the result proves which was used.
+    const [v] = assessSymbol(
+      [trade({
+        tradePrice: 12.91, barClose: 2.236369,
+        tradeCurrency: "PLN", claimedCurrency: "GBP",
+        storedRate: 0.1773, importConverted: true,
+      })],
+      new Map([["PLN>GBP", 0.25]]), // wrong on purpose
+    )
+    // 12.91 x 0.1773 = 2.289 → +2.3%. Had the derived 0.25 been used it would
+    // have been 3.23 → +44%.
+    expect(v.deviation).toBeCloseTo(0.023, 2)
+  })
+
+  it("§72.11: ignores a stored 1.0 when the import recorded ONE currency twice", () => {
+    // CSN.L 2025-01-22: currency=PLN AND instrument_currency=PLN, so the stored
+    // rate is 1.0 by construction and encodes the mis-recording. Preferring it
+    // would compare 12.91 "GBP" to a £2.236 bar — the exact 477% being removed.
+    const [v] = assessSymbol(
+      [trade({
+        tradePrice: 12.91, barClose: 2.236369,
+        tradeCurrency: "PLN", claimedCurrency: "GBP",
+        storedRate: 1.0, importConverted: false,
+      })],
+      new Map([["PLN>GBP", 0.1773]]),
+    )
+    expect(v.deviation).toBeCloseTo(0.023, 2)
   })
 
   it("leaves a same-currency trade untouched", () => {
