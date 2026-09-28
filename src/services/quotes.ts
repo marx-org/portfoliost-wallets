@@ -15,7 +15,7 @@
 import { and, eq, sql } from "drizzle-orm"
 import type { DB } from "../db/index.js"
 import { positions, portfolios, valueSnapshots } from "../db/schema.js"
-import { fxTo } from "./instruments-fx.js"
+import { fxTo, instrumentsAuthHeaders } from "./instruments-fx.js"
 import { cashBalances, dailyExternalFlows, externalCashInvested } from "./cashLedger.js"
 import { recomputeReturnColumns, syncCurrentValueFromSnapshots } from "./returnColumns.js"
 import { splitPortfolioValue } from "./valuation.js"
@@ -70,13 +70,32 @@ function instrumentsBase(): string {
 }
 
 // ── Fetchers ──────────────────────────────────────────────────────────────
+//
+// §71 — these send their credential via `instrumentsAuthHeaders`, NOT a bare
+// `Authorization` header. Instruments' `serviceOrUserMiddleware` reads the
+// scheduled sweep's credential from `X-Service-Token`; a `Bearer` token goes in
+// `Authorization` instead. Both fetchers used to hardcode `Authorization`, so
+// the service token went to the wrong header and every scheduled quote and
+// profile call returned 401.
+//
+// That failed SILENTLY, which is the worst way: `refreshQuotes` never throws and
+// treats an instruments error as "keep stored values, mark priceSource
+// 'fallback'". So `snapshots-sync` reported every portfolio as "priced" twice a
+// day while writing no prices at all, and 12 of IKE Marek's 13 positions sat on
+// `fallback` with stale values — SRT.F among them, valued in the wrong currency.
+// User-driven refreshes were unaffected (a real user JWT is a Bearer token, and
+// Bearer is what Authorization expects), which is exactly why it took a PROD
+// audit to surface rather than a failing test.
+//
+// A credential in the wrong header is indistinguishable from "no data", so it
+// must never be the difference.
 
 async function fetchQuote(symbol: string, authToken: string): Promise<CachedQuote | null> {
   const base = instrumentsBase()
   if (!base) return null
   try {
     const res = await fetch(`${base}/api/instruments/${symbol}/quote`, {
-      headers: { Authorization: authToken },
+      headers: instrumentsAuthHeaders(authToken),
     })
     if (!res.ok) return null
     const data = (await res.json()) as Record<string, unknown>
@@ -101,7 +120,7 @@ async function fetchProfile(symbol: string, authToken: string): Promise<CachedPr
   if (!base) return null
   try {
     const res = await fetch(`${base}/api/instruments/${symbol}/profile`, {
-      headers: { Authorization: authToken },
+      headers: instrumentsAuthHeaders(authToken),
     })
     if (!res.ok) return null
     const data = (await res.json()) as Record<string, unknown>

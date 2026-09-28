@@ -217,6 +217,56 @@ describe("refreshQuotes (D58)", () => {
     expect(updated.country).toBe("GB")
   })
 
+  it("§71: presents a SERVICE token in X-Service-Token, not Authorization", async () => {
+    // instruments' serviceOrUserMiddleware reads the scheduled sweep's
+    // credential from X-Service-Token and only falls back to a Bearer JWT in
+    // Authorization. Both fetchers used to hardcode Authorization, so the sweep's
+    // token went to the wrong header and every scheduled refresh 401'd — silently,
+    // because refreshQuotes treats an instruments error as "keep stored values,
+    // mark fallback". The job logged "priced" twice a day while writing nothing.
+    const { db, user } = await makeHarness("q-user-hdr")
+    const { pf } = await seedPortfolioAndPosition(db, user.id, { qty: 1, avg: 100 })
+    const seen: Array<Record<string, string>> = []
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockImplementation((url: string, init: { headers?: Record<string, string> }) => {
+        seen.push(init?.headers ?? {})
+        return Promise.resolve({
+          ok: true,
+          json: async () => ({ symbol: "SRT.F", currentPrice: 208, change: 1, percentChange: 0.5, currency: "EUR" }),
+        })
+      }),
+    )
+
+    await refreshQuotes(db, user.id, pf.id, "svc-not-a-bearer-token")
+
+    expect(seen.length).toBeGreaterThan(0)
+    for (const h of seen) {
+      expect(h["X-Service-Token"]).toBe("svc-not-a-bearer-token")
+      expect(h["Authorization"]).toBeUndefined()
+    }
+  })
+
+  it("§71: a user JWT still goes in Authorization", async () => {
+    const { db, user } = await makeHarness("q-user-hdr2")
+    const { pf } = await seedPortfolioAndPosition(db, user.id, { qty: 1, avg: 100 })
+    const seen: Array<Record<string, string>> = []
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockImplementation((url: string, init: { headers?: Record<string, string> }) => {
+        seen.push(init?.headers ?? {})
+        return Promise.resolve({ ok: true, json: async () => ({ symbol: "ASML", currentPrice: 1743, change: 1, percentChange: 0.5, currency: "EUR" }) })
+      }),
+    )
+
+    await refreshQuotes(db, user.id, pf.id, "Bearer user-jwt")
+
+    for (const h of seen) {
+      expect(h["Authorization"]).toBe("Bearer user-jwt")
+      expect(h["X-Service-Token"]).toBeUndefined()
+    }
+  })
+
   it("§39: still overwrites instrumentCurrency when the quote carries an ISO code", async () => {
     const { db, user } = await makeHarness("q-user-gbp2")
     const { pf, pos } = await seedPortfolioAndPosition(db, user.id, { qty: 10, avg: 150 })
