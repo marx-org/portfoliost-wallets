@@ -75,11 +75,15 @@ export function findCurrencyMismatches(
       // Only a genuine contradiction counts. A position with no currency-bearing
       // trade history cannot be checked and says nothing either way.
       //
-      // Partial disagreement counts too: a position reading PLN against trades in
-      // PLN *and* EUR is just as inconsistent as one matching none of them, and
-      // is the more interesting case to look at by hand.
+      // The test is "the position cites a currency NONE of its trades used" —
+      // not "some trade differs". I widened it to the latter and the first PROD
+      // run returned 11 findings of which 8 were noise: these accounts buy
+      // foreign listings paying in PLN, so AVGO reads USD against trades in
+      // PLN/USD and 0M6S.IL reads EUR against EUR/PLN. Both are correct. Being
+      // paid in a different currency than a stock trades in is the normal case,
+      // not a defect, and a rule that flags it is worse than no rule.
       if (stored === "" || seen.size === 0) return false
-      return [...seen].some((c) => c !== stored)
+      return !seen.has(stored)
     })
     .map((r) => ({
       kind: "currency-mismatch" as const,

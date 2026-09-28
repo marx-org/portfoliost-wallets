@@ -48,10 +48,20 @@ describe("valuation audit — currency consistency", () => {
     expect(findCurrencyMismatches([row({ transactionCurrencies: ["  "] })])).toEqual([])
   })
 
-  it("reports a mismatch when only SOME of the trades agree", () => {
-    const found = findCurrencyMismatches([row({ storedCurrency: "PLN", transactionCurrencies: ["PLN", "EUR"] })])
+  it("does NOT flag a position paid in a currency other than the one it trades in", () => {
+    // These accounts buy foreign listings paying in PLN, so a position can
+    // legitimately read USD against trades in PLN *and* USD. The first PROD run
+    // flagged 8 findings of exactly this shape; they are the normal case, and a
+    // rule that cries wolf on them stops being read.
+    expect(findCurrencyMismatches([row({ storedCurrency: "USD", transactionCurrencies: ["PLN", "USD"] })])).toEqual([])
+    expect(findCurrencyMismatches([row({ storedCurrency: "EUR", transactionCurrencies: ["EUR", "PLN"] })])).toEqual([])
+  })
+
+  it("flags when the position cites a currency none of its trades used", () => {
+    // SRT.F shape: a Frankfurt listing reading GBP against EUR-only trades.
+    const found = findCurrencyMismatches([row({ symbol: "SRT.F", storedCurrency: "GBP", transactionCurrencies: ["EUR"] })])
     expect(found).toHaveLength(1)
-    expect(found[0].transactionCurrencies).toEqual(["EUR", "PLN"])
+    expect(found[0]).toMatchObject({ symbol: "SRT.F", storedCurrency: "GBP", transactionCurrencies: ["EUR"] })
   })
 })
 
