@@ -181,6 +181,8 @@ async function upsertImportPositionOnBuy(
     currency: string
     assetType: string
     feesSettled: number
+    /** §72.13 — the TRADE's date, which is when the lot opened. */
+    executedAt: Date
     direction?: "LONG" | "SHORT" | null
     optionType?: "CALL" | "PUT" | null
     contractSize?: number | null
@@ -214,6 +216,11 @@ async function upsertImportPositionOnBuy(
     const [updated] = await tx
       .update(positions)
       .set({
+        // §72.13 — a later BUY must not push the lot's opening forward. Rows
+        // can arrive out of order, and the opening date is what the historical
+        // rebuild anchors the position's existence to.
+        openedAt:
+          body.executedAt < existing.openedAt ? body.executedAt : existing.openedAt,
         quantity: String(newQty),
         averageCostBasis: String(newAvgCost),
         companyName: body.instrumentName ?? existing.companyName,
@@ -249,7 +256,15 @@ async function upsertImportPositionOnBuy(
       country: body.country ?? "Other",
       fees: String(body.feesSettled),
       isOpen: true,
-      openedAt: new Date(),
+      // §72.13 — was `new Date()`, i.e. the import's own timestamp. Every one of
+      // the 269 positions in the database opened on 2026-09-28, the day of the
+      // import, while their first trades go back to 2019. The rebuild computes
+      // what a position was worth on each day by testing whether it was open
+      // yet, so a lot that "opened" in 2026 contributed NOTHING to every
+      // snapshot before it — the whole series was cash-only, and the final day,
+      // priced by a different path, was the only point that included it. That
+      // is the spike on Equate+; it is on every portfolio, not just that one.
+      openedAt: body.executedAt,
     })
     .returning()
   return created
@@ -268,6 +283,8 @@ async function processImportSell(
     quantity: number
     price: number
     feesSettled: number
+    /** §72.13 — the SELL's date, which is when the lot closed. */
+    executedAt: Date
     /** Close the lot with this direction (undefined = default NULL/LONG lot). */
     direction?: "LONG" | "SHORT" | null
   },
@@ -318,7 +335,10 @@ async function processImportSell(
   }
   if (newQty < 1e-9) {
     updateData.isOpen = false
-    updateData.closedAt = new Date()
+    // §72.13 — same defect as openedAt: the import timestamp, not the trade's.
+    // Equate+'s five closed SAP.DE option lots all "closed" on 2026-09-28
+    // although they were sold in 2022.
+    updateData.closedAt = body.executedAt
   }
 
   const [updated] = await tx
@@ -1009,6 +1029,7 @@ async function insertImportPortfolioTx(
       currency: txCcy,
       assetType: ptx.assetType,
       feesSettled,
+      executedAt,
       direction: ptx.direction ?? null,
       optionType: ptx.optionType ?? null,
       contractSize: ptx.contractSize ?? null,
@@ -1023,6 +1044,7 @@ async function insertImportPortfolioTx(
       quantity: ptx.quantity,
       price: ptx.type === "EXPIRATION" ? 0 : ptx.price,
       feesSettled: ptx.type === "EXPIRATION" ? 0 : feesSettled,
+      executedAt,
       // SELL rows that reach this branch are always default-lot closes (a
       // SHORT-direction SELL is an open, handled above) — so the default
       // NULL/LONG lot filter. EXPIRATION closes the SHORT option lot.

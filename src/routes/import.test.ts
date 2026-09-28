@@ -1179,3 +1179,65 @@ describe("§69.3: the bulk import queues a re-backfill for what it touched", () 
   })
 })
 
+
+describe("§72.13 — position dates come from the trade, not the import", () => {
+  // Every one of the 269 positions in PROD opened on 2026-09-28, the import
+  // date, while their first trades go back to 2019. The rebuild tests whether a
+  // position was open yet to decide what it was worth on each day, so a lot that
+  // "opened" in 2026 contributed nothing to every earlier snapshot: the whole
+  // series was cash-only and only the final day included the position. That is
+  // the Equate+ spike, and it is on every portfolio.
+  it("stamps openedAt with the BUY's date, years before the import", async () => {
+    const h = await boot()
+    const { portfolioId } = await seedPortfolio(h)
+
+    const res = await postTransactions(h, [buyRow(portfolioId)])
+    expect(res.status).toBe(200)
+
+    const [pos] = await h.db.select().from(positions).where(eq(positions.portfolioId, portfolioId))
+    expect(pos.openedAt.toISOString()).toBe("2024-01-15T10:00:00.000Z")
+  })
+
+  it("keeps the EARLIEST date when a later BUY lands on the same lot", async () => {
+    const h = await boot()
+    const { portfolioId } = await seedPortfolio(h)
+
+    // Out of order on purpose: rows can arrive shuffled, and the opening date is
+    // what the historical rebuild anchors to.
+    await postTransactions(h, [
+      buyRow(portfolioId, { executedAt: "2024-06-01T10:00:00.000Z", quantity: 5 }),
+      buyRow(portfolioId, { executedAt: "2024-01-15T10:00:00.000Z", quantity: 10 }),
+    ])
+
+    const rows = await h.db.select().from(positions).where(eq(positions.portfolioId, portfolioId))
+    expect(rows).toHaveLength(1)
+    expect(rows[0].openedAt.toISOString()).toBe("2024-01-15T10:00:00.000Z")
+  })
+
+  it("stamps closedAt with the SELL's date, not the import's", async () => {
+    const h = await boot()
+    const { portfolioId } = await seedPortfolio(h)
+
+    await postTransactions(h, [buyRow(portfolioId, { executedAt: "2022-05-26T10:00:00.000Z" })])
+    const sell = {
+      externalId: `sell-${Math.random().toString(36).slice(2, 8)}`,
+      portfolioName: "Transakcje",
+      executedAt: "2022-09-26T10:00:00.000Z",
+      portfolioTx: {
+        portfolioId,
+        type: "SELL",
+        instrumentSymbol: "AAPL",
+        assetType: "STOCK",
+        quantity: 10,
+        price: 120,
+        currency: "USD",
+      },
+    }
+    const res = await postTransactions(h, [sell])
+    expect(res.status).toBe(200)
+
+    const [pos] = await h.db.select().from(positions).where(eq(positions.portfolioId, portfolioId))
+    expect(pos.isOpen).toBe(false)
+    expect(pos.closedAt?.toISOString()).toBe("2022-09-26T10:00:00.000Z")
+  })
+})
