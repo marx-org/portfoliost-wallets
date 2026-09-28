@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it } from "vitest"
 import { makeHarness } from "../routes/test-utils.js"
-import { snapshotRate, splitPortfolioValue } from "./valuation.js"
+import { dominantPriceSource, oldestPriceAsOf, snapshotRate, splitPortfolioValue } from "./valuation.js"
 import { mockInstrumentsFx, unmockInstrumentsFx } from "../test-fx-mock.js"
 
 afterEach(() => unmockInstrumentsFx())
@@ -96,6 +96,63 @@ describe("§70: no market value is never valued at cost", () => {
     )
     expect(r.cashValue).toBe(250)
     expect(r.totalValue).toBe(250)
+  })
+})
+
+/**
+ * §70.2 — provenance. The aggregate must be able to say how old it is, and
+ * "oldest", not "newest".
+ */
+describe("§70.2: price provenance", () => {
+  const at = (iso: string) => new Date(iso)
+
+  it("reports the OLDEST price, not the freshest", () => {
+    expect(
+      oldestPriceAsOf([
+        { marketValue: "1", priceAsOf: at("2026-09-28T09:00:00Z") },
+        { marketValue: "1", priceAsOf: at("2026-09-20T09:00:00Z") },
+        { marketValue: "1", priceAsOf: at("2026-09-27T09:00:00Z") },
+      ]),
+    ).toBe("2026-09-20T09:00:00.000Z")
+  })
+
+  it("ignores unpriced positions rather than reporting a false age", () => {
+    // an unpriced row has no price to be stale; it is counted separately
+    expect(
+      oldestPriceAsOf([
+        { marketValue: "1", priceAsOf: at("2026-09-28T09:00:00Z") },
+        { marketValue: null, priceAsOf: null },
+      ]),
+    ).toBe("2026-09-28T09:00:00.000Z")
+  })
+
+  it("is null when nothing could be priced", () => {
+    expect(oldestPriceAsOf([{ marketValue: null, priceAsOf: null }])).toBeNull()
+    expect(dominantPriceSource([{ marketValue: null, priceSource: null }])).toBeNull()
+  })
+
+  it("'fallback' wins over 'quote' — one remembered price is worth surfacing", () => {
+    expect(
+      dominantPriceSource([
+        { marketValue: "1", priceSource: "quote" },
+        { marketValue: "1", priceSource: "fallback" },
+      ]),
+    ).toBe("fallback")
+    expect(
+      dominantPriceSource([
+        { marketValue: "1", priceSource: "quote" },
+        { marketValue: "1", priceSource: "quote" },
+      ]),
+    ).toBe("quote")
+  })
+
+  it("accepts ISO strings as well as Dates (drizzle may hand back either)", () => {
+    expect(
+      oldestPriceAsOf([
+        { marketValue: "1", priceAsOf: "2026-09-21T09:00:00Z" },
+        { marketValue: "1", priceAsOf: "2026-09-25T09:00:00Z" },
+      ]),
+    ).toBe("2026-09-21T09:00:00.000Z")
   })
 })
 

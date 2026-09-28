@@ -30,6 +30,7 @@
 import { getDb, closeDb } from "../db/index.js"
 import { portfolios } from "../db/schema.js"
 import { runBackfillRecent } from "../services/backfill.js"
+import { refreshQuotes } from "../services/quotes.js"
 import { resolveServiceToken } from "../services/instruments-fx.js"
 
 async function main() {
@@ -38,7 +39,7 @@ async function main() {
   const token = resolveServiceToken()
   const db = getDb()
   const rows = await db
-    .select({ id: portfolios.id, name: portfolios.name })
+    .select({ id: portfolios.id, name: portfolios.name, userId: portfolios.userId })
     .from(portfolios)
     .orderBy(portfolios.name)
 
@@ -47,6 +48,25 @@ async function main() {
   let failed = 0
   for (const p of rows) {
     try {
+      // §70 — PRICE FIRST, then snapshot.
+      //
+      // This job used to call only `runBackfillRecent`, so nothing in the
+      // scheduled pipeline ever wrote `positions.market_value`. The only writer
+      // is `refreshQuotes`, which ran solely when a user OPENED a portfolio. So
+      // after any re-import every position was unpriced, and the aggregate
+      // quietly reported each one's COST as its market value — the dashboard
+      // understated net worth by ~261k PLN on PROD while looking entirely
+      // plausible (two PLN funds sat exactly on their cost to the złoty).
+      //
+      // `refreshQuotes` never throws (instruments errors keep stored values and
+      // mark priceSource 'fallback'), so this cannot fail the job. The backfill
+      // then values positions off prices that are actually fresh.
+      //
+      // Reuses the existing writer rather than adding a second one: a second
+      // path that populates the same column is how the two drifted in the first
+      // place.
+      await refreshQuotes(db, p.userId, p.id, token)
+      console.log(`[snapshotsync] ${p.name} (${p.id}) priced`)
       // Resolves when the serialized pass has been consumed. Rejections are
       // swallowed by runBackfillCore (status → 'failed'), so a credential or
       // transport problem shows up in portfolio_backfill_metadata, not here.

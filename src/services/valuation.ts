@@ -105,3 +105,48 @@ export async function splitPortfolioValue(
   return { instrumentsValue, cashValue, totalValue: instrumentsValue + cashValue, unpricedPositions }
 }
 
+/**
+ * §70.2 — provenance helpers for a set of position rows.
+ *
+ * `oldestPriceAsOf` reports the OLDEST resolved price, not the newest, on
+ * purpose. A total is only as fresh as its stalest input, and "last updated"
+ * phrased against the freshest one implies the whole figure is current — which
+ * is precisely the misleading claim §70 exists to stop. If NN TFI PPK is quoted
+ * hourly and a Warsaw-listed position is carried over from yesterday, the
+ * aggregate is a yesterday number wearing today's timestamp.
+ *
+ * Positions with no price at all are ignored rather than treated as infinitely
+ * stale: they are already excluded from the value and counted in
+ * `unpricedPositions`, and folding them in here would report a false age for a
+ * figure that does not include them.
+ */
+export function oldestPriceAsOf(
+  rows: { marketValue: string | number | null; priceAsOf: Date | string | null }[],
+): string | null {
+  let oldest: number | null = null
+  for (const r of rows) {
+    if (r.marketValue == null || r.priceAsOf == null) continue
+    const t = r.priceAsOf instanceof Date ? r.priceAsOf.getTime() : Date.parse(String(r.priceAsOf))
+    if (Number.isNaN(t)) continue
+    if (oldest === null || t < oldest) oldest = t
+  }
+  return oldest === null ? null : new Date(oldest).toISOString()
+}
+
+/**
+ * The dominant provenance across valued positions: 'fallback' wins ties, because
+ * a single remembered price among fresh ones is the case worth surfacing.
+ * Null when nothing could be priced.
+ */
+export function dominantPriceSource(
+  rows: { marketValue: string | number | null; priceSource: string | null }[],
+): string | null {
+  const seen = new Set<string>()
+  for (const r of rows) {
+    if (r.marketValue == null) continue
+    if (r.priceSource) seen.add(r.priceSource)
+  }
+  if (seen.size === 0) return null
+  return seen.has("fallback") ? "fallback" : "quote"
+}
+

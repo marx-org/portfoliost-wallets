@@ -2941,10 +2941,40 @@ export interface components {
                 totalInvested: number;
                 returnPercentage?: number;
                 weight?: number;
+                /** @description Open positions with no market value */
+                unpricedPositions?: number;
+                /**
+                 * Format: date-time
+                 * @description Oldest resolved price timestamp for this portfolio's positions.
+                 */
+                priceAsOf?: string | null;
+                /** @description 'quote' or 'fallback' — whether the value is a live price or a remembered one. */
+                priceSource?: string | null;
             }[];
             externalCapitalReturnPercent?: number | null;
             externalCapitalReturnAmount?: number | null;
             externalCapitalBasis?: number | null;
+            /**
+             * @description Open positions excluded from `instrumentsValue` because no market value is known (§70).
+             *     They are NOT valued at their cost basis — a cost is not a price, and a plausible
+             *     wrong number is worse than an admitted gap. Non-zero means the pricing pipeline
+             *     has not caught up (nothing used to maintain `positions.market_value` on a schedule).
+             */
+            unpricedPositions?: number;
+            /**
+             * Format: date-time
+             * @description OLDEST resolved price timestamp across the positions included in this aggregate.
+             *     The newest quote can be minutes old while the oldest is a day old, and a total built
+             *     from mixed ages is only as fresh as its stalest input — so the headline reports the
+             *     oldest. Null when no position could be priced at all.
+             */
+            priceAsOf?: string | null;
+            /**
+             * @description Dominant price provenance — 'quote' (resolved from instruments) or 'fallback'
+             *     (a stored price reused because instruments could not be reached). 'fallback' means
+             *     the figure is a remembered price, not a current one.
+             */
+            priceSource?: string | null;
             externalCapitalBasisSource?: string | null;
             externalCapitalSuppressedReason?: string | null;
             externalCapitalReturnBasisKind?: string | null;
@@ -3287,6 +3317,18 @@ export interface components {
             dayChangePercent: number;
             /** Format: date-time */
             dayChangeDate: string;
+            /**
+             * @description Open positions excluded from `totalValue` because no market value is known (§70).
+             *     They are NOT valued at their cost basis — a cost is not a price.
+             */
+            unpricedPositions?: number;
+            /**
+             * Format: date-time
+             * @description Oldest resolved price timestamp across this portfolio's open positions.
+             */
+            priceAsOf?: string | null;
+            /** @description 'quote' or 'fallback' — whether the value is a live price or a remembered one. */
+            priceSource?: string | null;
             externalCapitalReturnPercent?: number | null;
             externalCapitalReturnAmount?: number | null;
             externalCapitalBasis?: number | null;

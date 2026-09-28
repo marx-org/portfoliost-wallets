@@ -11,7 +11,7 @@ import {
   valueSnapshots,
 } from "../db/schema.js"
 import { preferredBaseCurrency } from "../services/preferences.js"
-import { splitPortfolioValue } from "../services/valuation.js"
+import { dominantPriceSource, oldestPriceAsOf, splitPortfolioValue } from "../services/valuation.js"
 import { refreshQuotes } from "../services/quotes.js"
 import { getPortfolioNews } from "../services/portfolioNews.js"
 import { getPortfolioCalendar } from "../services/portfolioCalendar.js"
@@ -294,6 +294,10 @@ export function createPortfolioRoutes(db?: DB) {
             quantity: positions.quantity,
             averageCostBasis: positions.averageCostBasis,
             instrumentCurrency: positions.instrumentCurrency,
+            // §70.2 — provenance, so a value can be shown as stale rather than
+            // asserted as current.
+            priceAsOf: positions.priceAsOf,
+            priceSource: positions.priceSource,
           })
           .from(positions)
           .where(and(sql`${positions.portfolioId} = ${p.id}`, eq(positions.isOpen, true)))
@@ -336,6 +340,11 @@ export function createPortfolioRoutes(db?: DB) {
           totalInvested: Math.round(totalInvested * 100) / 100,
           returnPercentage: Math.round(returnPct * 100) / 100,
           weight: 0, // filled in after totals computed
+          unpricedPositions: split.unpricedPositions,
+          // OLDEST price among the positions we DID value — the stalest input
+          // decides whether this row can be trusted, not the freshest.
+          priceAsOf: oldestPriceAsOf(posRows),
+          priceSource: dominantPriceSource(posRows),
         }
       }),
     )
@@ -383,6 +392,14 @@ export function createPortfolioRoutes(db?: DB) {
       instrumentsValue: Math.round(totalInstruments * 100) / 100,
       cashValue: totalCash,
       totalValue,
+      // §70.2 — the aggregate is only as fresh as its stalest portfolio, so the
+      // headline reports the OLDEST priceAsOf across rows, never the newest.
+      unpricedPositions: portfolioBreakdown.reduce((s, p) => s + (p.unpricedPositions ?? 0), 0),
+      priceAsOf: portfolioBreakdown
+        .map((p) => p.priceAsOf)
+        .filter((v): v is string => !!v)
+        .sort()[0] ?? null,
+      priceSource: portfolioBreakdown.some((p) => p.priceSource === "fallback") ? "fallback" : null,
       totalInvested,
       totalGainLoss,
       returnPercentage,
@@ -974,6 +991,7 @@ async function resolveAggregateBase(
         `(market_value IS NULL) and are EXCLUDED from totalValue — not valued at cost.`,
       )
     }
+    const pricedRows = posRows.filter((r) => r.marketValue != null)
     const totalCostBasis = posRows.reduce(
       (s, p) => s + Number(p.quantity) * Number(p.averageCostBasis),
       0,
@@ -1033,6 +1051,10 @@ async function resolveAggregateBase(
       // makes the split explicit so a card can render both without a second call.
       totalValue: Math.round(totalValue * 100) / 100,
       cashValue: Math.round(cashTotal * 100) / 100,
+      // §70.2 — provenance, so the card can say how old this value is.
+      unpricedPositions,
+      priceAsOf: oldestPriceAsOf(pricedRows),
+      priceSource: dominantPriceSource(pricedRows),
       totalInvested: Math.round(totalInvested * 100) / 100,
       costBasis: Math.round(totalCostBasis * 100) / 100,
       positionValue: Math.round(positionValue * 100) / 100,
