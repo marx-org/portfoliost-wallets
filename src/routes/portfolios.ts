@@ -731,11 +731,11 @@ async function resolveAggregateBase(
       .from(portfolios)
       .where(sql`${portfolios.userId} = ${identity.id}`)
 
-    // Backfill gate: any portfolio with < 2 snapshots AND a backfillable
-    // history (a BUY/SELL on or before yesterday) keeps the merged series
-    // pending (mirror /:id/analytics fire-and-forget path). Portfolios whose
-    // trades all start today can never produce snapshots — they are complete,
-    // not pending (§48.4).
+    // §72.7 — a READ, kept deliberately: the dashboard must be able to say a
+    // portfolio is mid-rebuild. What was removed is the `runBackfill` this used
+    // to fire here (see below) — reporting pending state is fine, mutating from
+    // a GET is not. Portfolios whose trades all start today can never produce
+    // snapshots — they are complete, not pending (§48.4).
     const pendingIds: string[] = []
     for (const p of portfolioRows) {
       const [{ n }] = await database
@@ -745,13 +745,25 @@ async function resolveAggregateBase(
       if (n < 2 && (await hasBackfillableHistory(database, p.id))) pendingIds.push(p.id)
     }
     if (pendingIds.length > 0) {
-      const authToken = c.req.header("Authorization") ?? ""
-      for (const id of pendingIds) {
-        const status = await getBackfillStatus(database, id)
-        if (status !== "pending") {
-          void runBackfill(database, id, authToken).catch(() => undefined)
-        }
-      }
+      // §72.7 — this used to fire a backfill from a GET. Removed deliberately:
+      // browsing a page should not mutate state, and it was actively harmful.
+      //
+      // `enqueueBackfill` keys its queue by portfolioId and REPLACES a queued
+      // pass's run function. So loading the dashboard mid-rebuild silently
+      // downgraded the import's `recalcPortfolioHistory` (which ends with a
+      // pricing pass, §72.6) to a plain `runBackfill` (which does not). During
+      // the 2026-09-28 wipe that is why 8 of 10 portfolios came back with a full
+      // snapshot history and 51 positions still unpriced: the two whose recalc
+      // was already RUNNING survived, and every one still QUEUED was replaced.
+      //
+      // Nothing needs this to seed a new portfolio: POST /:id/positions calls
+      // notifyTransactionsChanged, which enqueues the full recalc. What is lost
+      // is read-side self-healing for a portfolio whose history is empty for
+      // some other reason — that now takes an explicit POST /:id/recompute,
+      // which is the right place for a rebuild to be asked for.
+      //
+      // The pending check stays: reporting that a portfolio is mid-rebuild is a
+      // read, and the UI needs it to say so.
       return c.json({
         timeframe,
         backfillStatus: "pending",
