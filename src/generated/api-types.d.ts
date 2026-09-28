@@ -2891,17 +2891,54 @@ export interface components {
             currency?: string;
             isPublic?: boolean;
         };
+        /**
+         * @description The dashboard headline aggregate, all amounts in `baseCurrency`.
+         *
+         *     §68 — the four headline figures, and what `totalValue` means changed:
+         *
+         *       instrumentsValue  positions only
+         *       cashValue         the cash BALANCE (not a flow)
+         *       totalValue        instrumentsValue + cashValue
+         *       totalInvested     net external cash flow (see below)
+         *
+         *     `totalValue` previously excluded cash, which made the headline disagree
+         *     with the portfolio cards by exactly the cash balance (§63.3). It now
+         *     means the whole account.
+         */
         PortfolioTotalMetrics: {
-            totalValue?: number;
-            totalInvested?: number;
+            /** @description Open-position market value only, cash excluded, converted into baseCurrency. Σ of each position's own instrument currency at its own rate — never a raw cross-currency sum. */
+            instrumentsValue: number;
+            /** @description Cash balance across all portfolios in baseCurrency (Σ per-currency balances converted). Renamed from `totalCash` in §68 — a balance, not a flow. May be negative on a margin account, and must not be clamped. */
+            cashValue: number;
+            /** @description The whole account: instrumentsValue + cashValue. CHANGED in §68 — this used to be positions-only, which is what made the headline miss cash. */
+            totalValue: number;
+            /**
+             * @description Net external cash flow in baseCurrency: DEPOSIT − WITHDRAWAL ± TRANSFER legs, each at its own historical rate
+             *     (the §62 `externalCashInvested` basis, reported by `externalCapitalBasisSource`).
+             *
+             *     Transfers are part of this definition, not excluded. The honest
+             *     consequence: a transfer between two of the user's own portfolios
+             *     RAISES one portfolio's invested figure and LOWERS the other's. The
+             *     aggregate is unaffected because the legs net to zero, but a
+             *     per-portfolio number on this basis is not "capital you put in".
+             */
+            totalInvested: number;
+            /** @description totalValue − totalInvested. Moves with §68's change to totalValue. */
             totalGainLoss?: number;
+            /** @description totalGainLoss / totalInvested. Moves with §68's change to totalValue. */
             returnPercentage?: number;
-            baseCurrency?: string;
-            portfolioBreakdown?: {
-                id?: string;
-                name?: string;
-                totalValue?: number;
-                totalInvested?: number;
+            baseCurrency: string;
+            /** @description Per-portfolio rows. §68 — each carries the same cash/instruments split, so Σ breakdown == the headline and a card can render its own split without a second request. */
+            portfolioBreakdown: {
+                id: string;
+                name: string;
+                /** @description This portfolio's open positions only, converted into baseCurrency. */
+                instrumentsValue: number;
+                /** @description This portfolio's cash balance in baseCurrency. May be negative. */
+                cashValue: number;
+                /** @description instrumentsValue + cashValue for this portfolio. */
+                totalValue: number;
+                totalInvested: number;
                 returnPercentage?: number;
                 weight?: number;
             }[];
@@ -2911,8 +2948,6 @@ export interface components {
             externalCapitalBasisSource?: string | null;
             externalCapitalSuppressedReason?: string | null;
             externalCapitalReturnBasisKind?: string | null;
-            /** @description Total cash across all portfolios */
-            totalCash?: number;
             /** @description Per-currency cash summary (dashboard cash card) */
             cashBreakdown?: {
                 currency: string;
@@ -3233,13 +3268,17 @@ export interface components {
         PortfolioSummaryMetrics: {
             /** @description The portfolio's base currency (ISO-4217). Every amount on this object is denominated in it. */
             currency: string;
+            /** @description positionValue + cashValue (cash included */
             totalValue: number;
+            /** @description This portfolio's cash balance in `currency`. May be negative on a margin account. */
+            cashValue: number;
             totalInvested: number;
             simpleReturnPercent: number;
             investmentReturnPercent: number;
             currencyImpactPercent: number;
             cumulativeDividends: number;
             totalDividends: number;
+            /** @description Open-position value only */
             positionValue: number;
             realizedGain: number;
             costBasis: number;
