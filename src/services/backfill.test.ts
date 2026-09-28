@@ -1000,3 +1000,97 @@ describe("§69.4: invested includes capital deposited before the window", () => 
   })
 })
 
+
+describe("§72.14 — option-premium legs do not reduce the share count", () => {
+  beforeEach(() => {
+    process.env.INSTRUMENTS_URL = "http://instruments:3000"
+  })
+  afterEach(() => {
+    vi.unstubAllGlobals()
+    delete process.env.INSTRUMENTS_URL
+    __resetBackfillRunnerForTests()
+  })
+
+  // Equate+ / SAP.DE: 481.77 shares bought against 976 sold once option legs are
+  // counted — a net of -494.23, which `Math.max(0, cum)` clamps to ZERO for the
+  // rest of history. Every snapshot then valued the position at nothing and the
+  // whole series was cash-only.
+  async function seedOptionPair(
+    db: Awaited<ReturnType<typeof makeHarness>>["db"],
+    userId: string,
+    portfolioId: string,
+    date: string,
+  ) {
+    const base = `opt-${date}`
+    await db.insert(portfolioTransactions).values([
+      {
+        userId, portfolioId, type: "SELL", instrumentSymbol: "AAPL",
+        quantity: "100", price: "1.25", currency: "USD", instrumentCurrency: "USD",
+        totalAmount: "125", externalId: base, executedAt: new Date(`${date}T12:00:00Z`),
+      },
+      {
+        userId, portfolioId, type: "EXPIRATION", instrumentSymbol: "AAPL",
+        quantity: "100", price: "0", currency: "USD", instrumentCurrency: "USD",
+        totalAmount: "0", externalId: `${base}#e`, executedAt: new Date(`${date}T12:00:00Z`),
+      },
+    ])
+  }
+
+  it("keeps the position valued across an option leg", async () => {
+    const { db, user } = await makeHarness("opt-user-1")
+    const pf = await seedPortfolio(db, user.id)
+    __resetBackfillRunnerForTests()
+
+    await seedBuy(db, user.id, pf.id, "AAPL", 100, 150, "2026-07-01")
+    await seedPosition(db, user.id, pf.id, "AAPL", 100, 150)
+    // 100 "shares" sold as an option premium — the lot ledger closes this
+    // against a SHORT option lot, so the equity lot is untouched.
+    await seedOptionPair(db, user.id, pf.id, "2026-07-02")
+
+    mockPriceBars({ AAPL: { dates: ["2026-07-01", "2026-07-02", "2026-07-03"], closes: [150, 151, 152] } })
+
+    await runBackfill(db, pf.id, "Bearer test", new Date("2026-07-04T00:00:00Z"))
+
+    const rows = await db
+      .select()
+      .from(valueSnapshots)
+      .where(eq(valueSnapshots.portfolioId, pf.id))
+      .orderBy(valueSnapshots.snapshotDate)
+    const v = rows.map((r) => Number(r.value))
+
+    // 100 × 152 position + the 125 premium the option leg paid out as cash.
+    // Before the fix the SELL drove the running quantity to 0 and the value
+    // collapsed to that 125 of cash alone — the position vanished from history
+    // on the day the option was traded.
+    expect(rows).toHaveLength(3)
+    expect(v[0]).toBeCloseTo(15000, 0)
+    expect(v[2]).toBeCloseTo(15325, 0)
+  })
+
+  it("a SELL with no EXPIRATION sibling still closes the position", async () => {
+    const { db, user } = await makeHarness("opt-user-2")
+    const pf = await seedPortfolio(db, user.id)
+    __resetBackfillRunnerForTests()
+
+    await seedBuy(db, user.id, pf.id, "AAPL", 100, 150, "2026-07-01")
+    await seedPosition(db, user.id, pf.id, "AAPL", 100, 150)
+    await seedSell(db, user.id, pf.id, "AAPL", 100, 160, "2026-07-02")
+
+    mockPriceBars({ AAPL: { dates: ["2026-07-01", "2026-07-02", "2026-07-03"], closes: [150, 160, 165] } })
+
+    await runBackfill(db, pf.id, "Bearer test", new Date("2026-07-04T00:00:00Z"))
+
+    const rows = await db
+      .select()
+      .from(valueSnapshots)
+      .where(eq(valueSnapshots.portfolioId, pf.id))
+      .orderBy(valueSnapshots.snapshotDate)
+    // The lot is closed from 07-02, so those days carry only the 16,000 of sale
+    // proceeds and no position value. Had §72.14 wrongly exempted this SELL the
+    // day would read 16,000 + 100×160 = 32,000.
+    const byDate = new Map(rows.map((r) => [r.snapshotDate, Number(r.value)]))
+    expect(byDate.get("2026-07-01")).toBeCloseTo(15000, 0)
+    expect(byDate.get("2026-07-02")).toBeCloseTo(16000, 0)
+    expect(byDate.get("2026-07-03")).toBeCloseTo(16000, 0)
+  })
+})

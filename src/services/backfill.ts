@@ -652,6 +652,7 @@ export async function computeSnapshotBatch(
       quantity: portfolioTransactions.quantity,
       executedAt: portfolioTransactions.executedAt,
       instrumentCurrency: portfolioTransactions.instrumentCurrency,
+      externalId: portfolioTransactions.externalId,
     })
     .from(portfolioTransactions)
     .where(
@@ -678,12 +679,41 @@ export async function computeSnapshotBatch(
     if (tx.symbol) symbolCcy.set(tx.symbol, tx.instrumentCurrency)
   }
 
+  // 2b. §72.14 — option-premium legs are not share disposals.
+  //
+  // An option trade arrives as a pair: a SELL of 100 at the premium (1.04-1.30)
+  // and an EXPIRATION at 0 whose externalId is the SELL's plus "#e". The lot
+  // ledger closes both against a SHORT option lot, but summing raw quantities
+  // counts the SELL as selling 100 shares of the UNDERLYING.
+  //
+  // On Equate+ (SAP.DE) that is 481.77 shares bought against 976 sold: a net of
+  // -494.23, which `Math.max(0, cum)` clamps to ZERO for the rest of history.
+  // Every snapshot valued the position at 0, so the whole series was cash-only
+  // and the final day — priced from the lot ledger, which has the position right
+  // at 5.765762 shares — was the only point that included it. That is the
+  // spike, and `heldCount`/gapSymbols cannot report it because they key on the
+  // same quantity that had gone to zero.
+  const optionLegIds = new Set<string>()
+  const expRows = await db
+    .select({ externalId: portfolioTransactions.externalId })
+    .from(portfolioTransactions)
+    .where(
+      and(
+        eq(portfolioTransactions.portfolioId, portfolioId),
+        eq(portfolioTransactions.type, "EXPIRATION"),
+      ),
+    )
+  for (const r of expRows) {
+    if (r.externalId) optionLegIds.add(r.externalId.replace(/#e$/, ""))
+  }
+
   // 3. Build cumulative qty_held per symbol per day.
   //    For each symbol: sorted list of (date, deltaQty) then accumulated.
   type QtyEvent = { date: string; delta: number }
   const symbolEvents = new Map<string, QtyEvent[]>()
   for (const tx of txRows) {
     if (!tx.symbol) continue
+      if (tx.type === "SELL" && tx.externalId && optionLegIds.has(tx.externalId)) continue
       const delta =
         tx.type === "BUY" ? Number(tx.quantity) : -Number(tx.quantity)
       const date = toDateStr(tx.executedAt) ?? ""
