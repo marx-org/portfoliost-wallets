@@ -2982,6 +2982,15 @@ export interface components {
             cashBreakdown?: {
                 currency: string;
                 balance: number;
+                /**
+                 * @description Share of GROSS cash exposure in this currency, 0–100, summing to 100 (§70.5).
+                 *     Deliberately NOT `balance / net`: IBKR holds +64,898 EUR against
+                 *     −45,434 USD, so the net nearly cancels and net-based weights explode to
+                 *     +648% / −398%. The signed `balance` still reports direction — the mixed
+                 *     signs are real (currency conversions the broker performs without recording
+                 *     them) — while the weight answers "how much of this account's cash is in this
+                 *     currency", which is well defined whatever the signs do.
+                 */
                 weight?: number | null;
             }[];
         };

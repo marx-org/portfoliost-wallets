@@ -771,7 +771,29 @@ export async function computeSnapshotBatch(
   // flow up to that day (deposits − withdrawals ± transfer legs, base ccy) —
   // "money put in". Position cost basis is NOT the invested basis (a fully
   // invested portfolio has ~0 cash balance but a large invested total).
+  // §69.4 — SEED the cumulative flow with capital invested BEFORE the window.
+  //
+  // The window starts at the first BUY/SELL date, so any cash row dated earlier
+  // is outside it. Accumulating from zero therefore dropped it from EVERY
+  // historical day, while `snapshotPortfolioValue` (the live path) calls
+  // `externalCashInvested` over ALL history and keeps it. The two then disagreed
+  // by exactly the pre-window capital, and because the live snapshot is the last
+  // point of the series it surfaced as a vertical spike on the final day — PROD,
+  // IKE Marek, 2026-09-28: `invested` read 38,771 for the whole series and 54,548
+  // on the last row, a step of 15,777 from a deposit dated 2021-10-18. Return is
+  // computed from this pair, so the step showed as a sudden jump in the chart.
+  //
+  // The fix is to start the accumulator where the money actually started rather
+  // than at the window edge. Same basis as the live path, by construction.
+  const windowStartDate = new Date(`${from}T00:00:00.000Z`)
+  const dayBeforeWindow = toDateStr(new Date(windowStartDate.getTime() - 86_400_000))
   let cumulativeFlow = 0
+  if (dayBeforeWindow) {
+    const preWindowFlows = await dailyExternalFlows(
+      db, authToken, portfolioId, "0000-01-01", dayBeforeWindow, base, { strict: true },
+    )
+    for (const v of preWindowFlows.values()) cumulativeFlow += v
+  }
   const cumulativeFlows = new Map<string, number>()
   for (const day of days) {
     cumulativeFlow += dailyFlows.get(day) ?? 0

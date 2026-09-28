@@ -950,3 +950,53 @@ describe("§62.4 — snapshots include cash; netFlow is external-only", () => {
     }
   })
 })
+
+/**
+ * §69.4 — a cash row dated BEFORE the window's first trade must still count
+ * towards `invested` on every historical day.
+ *
+ * The backfill window starts at the first BUY/SELL date, and the cumulative flow
+ * used to accumulate from ZERO at that edge. Anything deposited earlier was
+ * therefore dropped from the whole series, while `snapshotPortfolioValue` — the
+ * live path, and the LAST point of the series — kept it. PROD: IKE Marek read
+ * `invested` 38,771 for every day and 54,548 on the final row, a 15,777 step from
+ * a deposit dated 2021-10-18. Return derives from this pair, so it drew a
+ * vertical spike on the chart's last day.
+ */
+describe("§69.4: invested includes capital deposited before the window", () => {
+  beforeEach(() => { process.env.INSTRUMENTS_URL = "http://instruments:3000" })
+  afterEach(() => { delete process.env.INSTRUMENTS_URL })
+
+  it("a pre-window DEPOSIT is in the first historical row, not only the last", async () => {
+    const { db, user } = await makeHarness("preseed-694")
+    const pf = await seedPortfolio(db, user.id, "PLN")
+
+    // 15,777 deposited long before the first trade — the PROD shape
+    await db.insert(portfolioCashTransactions).values({
+      userId: user.id, portfolioId: pf.id, type: "DEPOSIT",
+      amount: "15777", currency: "PLN", transactionDate: "2021-10-18",
+    })
+    // first (and only) trade is much later; seedBuy also deposits for the buy
+    await seedBuy(db, user.id, pf.id, "AAA", 10, 100, "2026-07-01", "PLN")
+    await seedPosition(db, user.id, pf.id, "AAA", 10, 100, "PLN")
+
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input)
+      if (url.includes("/api/internal/fx-rates")) return new Response(JSON.stringify({ rate: 1, asOf: "2026-09-21" }), { status: 200 })
+      if (url.includes("/price-bars")) {
+        return new Response(JSON.stringify({ dates: ["2026-07-01", "2026-07-02"], closes: [100, 100], currency: "PLN" }), { status: 200 })
+      }
+      return new Response("not found", { status: 404 })
+    }))
+
+    const batch = await computeSnapshotBatch(db, pf.id, "Bearer t", new Date("2026-07-03T00:00:00Z"))
+    expect(batch.rows.length).toBeGreaterThan(1)
+    const first = batch.rows[0]
+    // 15,777 pre-window + 1,000 funded by the buy — on the VERY FIRST row
+    expect(Number(first.invested)).toBeCloseTo(16777, 2)
+    // and it must not grow day to day (no new flows), i.e. no step at the end
+    const last = batch.rows[batch.rows.length - 1]
+    expect(Number(last.invested)).toBeCloseTo(Number(first.invested), 2)
+  })
+})
+

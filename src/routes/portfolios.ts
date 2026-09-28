@@ -378,12 +378,28 @@ export function createPortfolioRoutes(db?: DB) {
     // §68 — the aggregate cash is the Σ of the same per-portfolio splits above,
     // so the card and the tile read the same number by construction.
     const totalCash = totalCashValue
+    // §70.5 — weights are shares of GROSS exposure, not of the signed net.
+    //
+    // `converted / net` is only meaningful while the net is comfortably away
+    // from zero, and it stops being meaningful exactly when it matters: IBKR
+    // holds +64,898 EUR against −45,434 USD, so the net nearly cancels and each
+    // share explodes (PROD showed +648% and −398%, weights that cannot sum to
+    // 100% because several of them are negative). The signed BALANCE is kept
+    // exactly as it was — the user confirms the mixed signs are real, from
+    // currency conversions IBKR performs but never registers in the sheet — so
+    // direction is still reported. The weight instead answers the question a
+    // reader actually has: how much of this account's cash sits in this currency.
+    // That is well defined whatever the signs do, and always sums to 100%.
+    const grossCash = [...cashConverted.values()].reduce((s, v) => s + Math.abs(v), 0)
     const cashBreakdown = [...cashByCcy.entries()]
       .sort((a, b) => a[0].localeCompare(b[0]))
       .map(([currency, balance]) => ({
         currency,
         balance: Math.round(balance * 1e8) / 1e8,
-        weight: totalCash !== 0 ? Math.round((cashConverted.get(currency)! / totalCash) * 10000) / 100 : 0,
+        weight:
+          grossCash > 0
+            ? Math.round((Math.abs(cashConverted.get(currency)!) / grossCash) * 10000) / 100
+            : 0,
       }))
 
     return c.json({
