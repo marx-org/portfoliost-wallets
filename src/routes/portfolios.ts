@@ -305,6 +305,19 @@ export function createPortfolioRoutes(db?: DB) {
         const cashBal = await cashBalances(database, c.req.header("Authorization") ?? "", p.id)
         cashByPortfolio.set(p.id, cashBal)
         const split = await splitPortfolioValue(toBase, posRows, cashBal)
+        if (split.unpricedPositions > 0) {
+          // §70 — loud on purpose. Before this, an unpriced position silently
+          // contributed its COST and the total looked plausible. The count is
+          // the signal that `positions.market_value` is not being maintained:
+          // nothing in the scheduled pipeline writes that column (only opening a
+          // portfolio refreshes quotes), so after any re-import every position
+          // is unpriced until someone visits it.
+          console.warn(
+            `[total-metrics] ${p.name}: ${split.unpricedPositions} open position(s) have no market value ` +
+            `(market_value IS NULL) and are EXCLUDED from the total — not valued at cost. ` +
+            `Run a quote refresh for this portfolio.`,
+          )
+        }
 
         const gainLoss = split.totalValue - totalInvested
         const returnPct = totalInvested > 0 ? (gainLoss / totalInvested) * 100 : 0
@@ -949,11 +962,18 @@ async function resolveAggregateBase(
     // in one currency the two coincide, which is why it was never noticed; on a
     // multi-currency portfolio the declared currency was a lie. One shared split,
     // each position converted out of its own currency at its own rate.
-    const { instrumentsValue: positionValue, cashValue: cashTotal, totalValue } = await splitPortfolioValue(
-      (ccy) => sumToBase(ccy, 1),
-      posRows,
-      cashBal,
-    )
+    const { instrumentsValue: positionValue, cashValue: cashTotal, totalValue, unpricedPositions } =
+      await splitPortfolioValue(
+        (ccy) => sumToBase(ccy, 1),
+        posRows,
+        cashBal,
+      )
+    if (unpricedPositions > 0) {
+      console.warn(
+        `[summary-metrics] ${portfolioId}: ${unpricedPositions} open position(s) have no market value ` +
+        `(market_value IS NULL) and are EXCLUDED from totalValue — not valued at cost.`,
+      )
+    }
     const totalCostBasis = posRows.reduce(
       (s, p) => s + Number(p.quantity) * Number(p.averageCostBasis),
       0,

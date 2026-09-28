@@ -3,7 +3,7 @@ import { Hono } from "hono"
 import { createPortfolioRoutes } from "./portfolios.js"
 import { createPublicShareRoutes } from "./portfolios.js"
 import { createCrossPortfolioTransactionsRoute } from "./portfolio-transactions.js"
-import { makeHarness } from "./test-utils.js"
+import { makeHarness, priceOpenPositions } from "./test-utils.js"
 import { mockInstrumentsFx, unmockInstrumentsFx } from "../test-fx-mock.js"
 import { crossRate } from "@marx2/contracts/fx"
 import {
@@ -1265,6 +1265,8 @@ describe("Aggregates & metrics (§15 Phase G)", () => {
       body: JSON.stringify(BUY_BODY),
     })
 
+    // §70 — the BUY leaves the position unpriced; give it a market price.
+    await priceOpenPositions(h.db, pid, 150)
     const res = await a.request("/api/portfolios/total-metrics", { headers: h.headers })
     expect(res.status).toBe(200)
     const body = await res.json()
@@ -1297,6 +1299,7 @@ describe("Aggregates & metrics (§15 Phase G)", () => {
         headers: h.headers,
         body: JSON.stringify({ symbol: "SNT.WA", quantity: 10, price: 150, currency: "PLN" }),
       })
+      await priceOpenPositions(h.db, pln.id, 150) // §70
 
       // Plain USD portfolio (identity rate) for the cross-currency sum.
       await a.request("/api/portfolios", {
@@ -1315,6 +1318,7 @@ describe("Aggregates & metrics (§15 Phase G)", () => {
         headers: h.headers,
         body: JSON.stringify(BUY_BODY),
       })
+      await priceOpenPositions(h.db, usd.id, 150) // §70: BUY leaves it unpriced
 
       const res = await a.request("/api/portfolios/total-metrics", { headers: h.headers })
       expect(res.status).toBe(200)
@@ -1387,6 +1391,7 @@ describe("Aggregates & metrics (§15 Phase G)", () => {
       amount: "1504.99",
       currency: "USD",
     })
+    await priceOpenPositions(h.db, portfolio.id, 150) // §70: BUY leaves it unpriced
 
     const res = await a.request(`/api/portfolios/${portfolio.id}/summary-metrics`, { headers: h.headers })
     expect(res.status).toBe(200)
@@ -1793,6 +1798,10 @@ describe("§68: instruments + cash == total, everywhere", () => {
         method: "POST", headers: h.headers,
         body: JSON.stringify({ symbol: "SNT.WA", quantity: 10, price: 100, currency: "PLN" }),
       })
+      // §70 — a position is inserted UNPRICED; state its market price explicitly.
+      // Valued at cost it would coincidentally be 100 too, which is exactly why
+      // the cost fallback went unnoticed: buy price == market price on day one.
+      await priceOpenPositions(h.db, id, 100)
 
       const m = await (await a.request(`/api/portfolios/${id}/summary-metrics`, { headers: h.headers })).json()
       expect(m.cashValue).toBe(1500)
@@ -1808,7 +1817,7 @@ describe("§68: instruments + cash == total, everywhere", () => {
     const a = app(h.db)
     mockInstrumentsFx({ table: { USD: 1.08, PLN: 4.3 } })
     try {
-      for (const [name, cash, mv] of [["A", 1000, 0], ["B", 300, 700]] as const) {
+      for (const [name, cash, mv] of [["A", 1000, 0], ["B", 300, 700]] as const) {  // §70: price B below
         const res = await a.request("/api/portfolios", {
           method: "POST", headers: h.headers,
           body: JSON.stringify({ name, currency: "USD", baseCurrency: "PLN" }),
@@ -1822,6 +1831,7 @@ describe("§68: instruments + cash == total, everywhere", () => {
             method: "POST", headers: h.headers,
             body: JSON.stringify({ symbol: "SNT.WA", quantity: 1, price: mv, currency: "PLN" }),
           })
+          await priceOpenPositions(h.db, id, mv)
         }
       }
 
@@ -1910,6 +1920,9 @@ describe("§68: instruments + cash == total, everywhere", () => {
           body: JSON.stringify({ symbol, quantity: qty, price, currency: ccy }),
         })
       }
+      // §70 — market prices, distinct from the cost basis where it matters, so
+      // the test proves CONVERSION rather than accidentally proving the fallback.
+      await priceOpenPositions(h.db, id, 100)
       const m = await (await a.request(`/api/portfolios/${id}/summary-metrics`, { headers: h.headers })).json()
       const rate = crossRate("USD", "PLN", { EUR: 1, USD: 1.08, PLN: 4.3 })!
       const expected = 1000 * rate + 1000

@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it } from "vitest"
 import { makeHarness } from "../routes/test-utils.js"
-import { snapshotRate } from "./valuation.js"
+import { snapshotRate, splitPortfolioValue } from "./valuation.js"
 import { mockInstrumentsFx, unmockInstrumentsFx } from "../test-fx-mock.js"
 
 afterEach(() => unmockInstrumentsFx())
@@ -28,3 +28,74 @@ describe("snapshotRate (D21)", () => {
     expect(r.rate).toBeCloseTo(1.08, 8)
   })
 })
+
+/**
+ * §70 — a position with no market value is worth an UNKNOWN amount, not its
+ * purchase price.
+ *
+ * `splitPortfolioValue` used to fall back to `quantity × average_cost_basis`,
+ * which reported the position's COST as its market value. On PROD that
+ * understated the headline by ~261k PLN: 75 of 85 open positions had
+ * `market_value` NULL, because the BUY path never sets it and nothing in the
+ * scheduled pipeline maintains it — only opening a portfolio refreshes quotes.
+ *
+ * These tests assert the ABSENCE of a value. A test that asserted the fallback
+ * returned *some* number would have passed with the lie in place, which is
+ * exactly what the old suite did.
+ */
+describe("§70: no market value is never valued at cost", () => {
+  const toBase = async () => 1 // same-currency, so conversion is identity
+
+  it("excludes an unpriced position and counts it", async () => {
+    const r = await splitPortfolioValue(
+      toBase,
+      [{ marketValue: null, quantity: "10", averageCostBasis: "500", instrumentCurrency: "PLN" }],
+      new Map(),
+    )
+    // 10 × 500 = 5000 of cost must NOT appear
+    expect(r.instrumentsValue).toBe(0)
+    expect(r.unpricedPositions).toBe(1)
+  })
+
+  it("still counts the priced ones alongside it", async () => {
+    const r = await splitPortfolioValue(
+      toBase,
+      [
+        { marketValue: "1000", quantity: "10", averageCostBasis: "500", instrumentCurrency: "PLN" },
+        { marketValue: null, quantity: "10", averageCostBasis: "500", instrumentCurrency: "PLN" },
+        { marketValue: "300", quantity: "1", averageCostBasis: "999", instrumentCurrency: "PLN" },
+      ],
+      new Map(),
+    )
+    expect(r.instrumentsValue).toBe(1300)
+    expect(r.unpricedPositions).toBe(1)
+  })
+
+  it("distinguishes a market value of 0 from a missing one", async () => {
+    // 0 is a real value (a delisted/worthless position); null is unknown.
+    const zero = await splitPortfolioValue(
+      toBase,
+      [{ marketValue: "0", quantity: "10", averageCostBasis: "500", instrumentCurrency: "PLN" }],
+      new Map(),
+    )
+    const missing = await splitPortfolioValue(
+      toBase,
+      [{ marketValue: null, quantity: "10", averageCostBasis: "500", instrumentCurrency: "PLN" }],
+      new Map(),
+    )
+    expect(zero.instrumentsValue).toBe(0)
+    expect(zero.unpricedPositions).toBe(0)
+    expect(missing.unpricedPositions).toBe(1)
+  })
+
+  it("cash is unaffected by unpriced positions", async () => {
+    const r = await splitPortfolioValue(
+      toBase,
+      [{ marketValue: null, quantity: "10", averageCostBasis: "500", instrumentCurrency: "PLN" }],
+      new Map([["PLN", 250]]),
+    )
+    expect(r.cashValue).toBe(250)
+    expect(r.totalValue).toBe(250)
+  })
+})
+

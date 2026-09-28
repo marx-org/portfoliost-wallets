@@ -41,6 +41,20 @@ export interface PortfolioValueSplit {
   cashValue: number
   /** instrumentsValue + cashValue — the whole account. */
   totalValue: number
+  /**
+   * §70 — open positions with no market value. They contribute NOTHING to
+   * `instrumentsValue` and are counted here instead.
+   *
+   * This used to fall back to `quantity × averageCostBasis`, which reported the
+   * position's COST as its market value: PROD had 75 of 85 open positions with
+   * `market_value` NULL (nothing in the scheduled pipeline maintains that
+   * column — only opening a portfolio refreshes it), and the headline
+   * understated net worth by ~261k PLN. A cost basis is not a market value, and
+   * it is not a safe default: it is plausible, which is exactly why it went
+   * unnoticed. §66.2's rule — a number we do not have is rendered unresolved,
+   * never invented.
+   */
+  unpricedPositions: number
 }
 
 export interface PositionValueRow {
@@ -59,18 +73,27 @@ export async function splitPortfolioValue(
    * without keeping a second copy of the arithmetic. §68 — the debug output was
    * the only thing the duplicated loop in quotes.ts was really for.
    */
-  onPosition?: (info: { valueCcy: string; mv: number; contrib: number }) => void,
+  onPosition?: (info: { valueCcy: string; mv: number | null; contrib: number; unpriced: boolean }) => void,
 ): Promise<PortfolioValueSplit> {
   let instrumentsValue = 0
+  let unpricedPositions = 0
   for (const p of positions) {
-    const mv = p.marketValue != null ? Number(p.marketValue) : Number(p.quantity ?? 0) * Number(p.averageCostBasis ?? 0)
+    // §70 — NO cost-basis fallback. An unpriced position is worth an unknown
+    // amount, not its purchase price, and reporting the purchase price as the
+    // value is a lie that looks like a number.
+    if (p.marketValue == null) {
+      unpricedPositions++
+      onPosition?.({ valueCcy: (p.instrumentCurrency ?? "").toUpperCase(), mv: null, contrib: 0, unpriced: true })
+      continue
+    }
+    const mv = Number(p.marketValue)
     // A position with no instrument currency is passed through to the strict
     // converter, which throws rather than valuing it at face value in the base
     // currency (§66.4). A number is never invented here.
     const valueCcy = (p.instrumentCurrency ?? "").toUpperCase()
     const contrib = mv * (await toBase(valueCcy))
     instrumentsValue += contrib
-    onPosition?.({ valueCcy, mv, contrib })
+    onPosition?.({ valueCcy, mv, contrib, unpriced: false })
   }
   let cashValue = 0
   for (const [ccy, balance] of cashBalances) cashValue += balance * (await toBase(ccy))
@@ -79,6 +102,6 @@ export async function splitPortfolioValue(
   // function made snapshotPortfolioValue disagree with the backfill pipeline
   // (§53.6 asserts the two agree to 7 decimal places). Each route rounds its own
   // response; this returns what the arithmetic actually produced.
-  return { instrumentsValue, cashValue, totalValue: instrumentsValue + cashValue }
+  return { instrumentsValue, cashValue, totalValue: instrumentsValue + cashValue, unpricedPositions }
 }
 
