@@ -299,11 +299,34 @@ async function main() {
     if (asJson) {
       console.log(JSON.stringify({ tolerance, flagged: flagged.length, reports }, null, 2))
     } else {
+      const checked = reports.reduce((n, r) => n + r.trades.filter((t) => t.barClose != null).length, 0)
+      const unverifiable = reports.filter((r) => r.unverifiable)
       console.log(
         `[price-audit] ${trades.length} BUY/SELL trades across ${symbols.length} symbols ` +
           `(tolerance ${(tolerance * 100).toFixed(0)}%)\n`,
       )
-      if (flagged.length === 0) console.log("[price-audit] every trade reconciles with its bar.\n")
+      // §72.8 — a missing credential 401s, and a 401 is indistinguishable from
+      // "this symbol has no bars". The first PROD run therefore reported
+      // "every trade reconciles" over 219 symbols it had checked NONE of, and
+      // "0 symbols need a fix" — a clean bill of health for a run that measured
+      // nothing. Never claim reconciliation without saying what was compared.
+      if (checked === 0) {
+        console.log(
+          `[price-audit] CHECKED NOTHING: 0 of ${trades.length} trades had a price bar. ` +
+            `That is not a clean result — it means every bar read failed. Check the ` +
+            `credential (INSTRUMENTS_AUTH_TOKEN must arrive as "Bearer <jwt>" so it is ` +
+            `sent in Authorization; anything else goes as X-Service-Token and is rejected).\n`,
+        )
+      } else if (unverifiable.length > 0) {
+        console.log(
+          `[price-audit] WARNING: ${unverifiable.length} symbol(s) have no bars and were NOT checked ` +
+            `(${unverifiable.reduce((n, r) => n + r.checked, 0)} trades). ` +
+            `A symbol with no data is unverified, not clean.\n`,
+        )
+      }
+      if (flagged.length === 0 && checked > 0) {
+        console.log(`[price-audit] all ${checked} checked trades reconcile with their bar.\n`)
+      }
       for (const r of flagged) {
         console.log(
           `  ${r.symbol.padEnd(12)} ${r.unreconciled}/${r.checked} off · worst ${(r.worstDeviation * 100).toFixed(1)}% · ` +

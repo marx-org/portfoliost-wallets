@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest"
+import { instrumentsAuthHeaders } from "../services/instruments-fx.js"
 import {
   MAX_CARRY_DAYS,
   assessSymbol,
@@ -174,5 +175,41 @@ describe("resolveInstrumentsToken", () => {
     // Every bar read would be a 401 that looks like "no data", and an audit that
     // cannot check must never report clean.
     expect(() => resolveInstrumentsToken({} as NodeJS.ProcessEnv)).toThrow(/INSTRUMENTS_SERVICE_TOKEN/)
+  })
+})
+
+/**
+ * §72.8 — the credential decides which HEADER the token lands in, and a wrong
+ * header is a 401 that is indistinguishable from "this symbol has no data".
+ *
+ * `instrumentsAuthHeaders` routes on the "Bearer " prefix: Bearer goes to
+ * `Authorization`, anything else is sent as `X-Service-Token` and compared
+ * against INSTRUMENTS_SERVICE_TOKEN. The admin job therefore has to hand the
+ * token over WITH its prefix — sheets-sync strips it because its own client
+ * re-prepends, and copying that pattern here silently sent a user JWT to
+ * X-Service-Token. The first PROD run then reported "every trade reconciles"
+ * over 219 symbols it had checked none of.
+ *
+ * These use the real header builder, not a stub, because the bug lived in the
+ * space between "the token is correct" and "the header is correct".
+ */
+describe("credential → header routing (§72.8)", () => {
+  it("a caller JWT sent WITH the prefix lands in Authorization", () => {
+    const h = instrumentsAuthHeaders("Bearer eyJhbGciOi.payload.sig")
+    expect(h["Authorization"]).toBe("Bearer eyJhbGciOi.payload.sig")
+    expect(h["X-Service-Token"]).toBeUndefined()
+  })
+
+  it("a service token lands in X-Service-Token", () => {
+    const h = instrumentsAuthHeaders("a".repeat(64))
+    expect(h["X-Service-Token"]).toBe("a".repeat(64))
+    expect(h["Authorization"]).toBeUndefined()
+  })
+
+  it("a JWT stripped of its prefix is misrouted — the exact PROD failure", () => {
+    // This is what the job passed. The JWT is perfectly valid; the header is not.
+    const h = instrumentsAuthHeaders("eyJhbGciOi.payload.sig")
+    expect(h["Authorization"]).toBeUndefined()
+    expect(h["X-Service-Token"]).toBe("eyJhbGciOi.payload.sig")
   })
 })
