@@ -21,6 +21,9 @@ function mockFetch(price: number, change = 2, percentChange = 1.5) {
             country: "US",
             finnhubIndustry: "Technology",
             currency: "USD",
+            // instruments always tags how it resolved the currency
+            // (toInstrumentDetail threads the §47.4 resolution through).
+            currencySource: "provider",
           }),
         })
       }
@@ -224,7 +227,11 @@ describe("refreshQuotes (D58)", () => {
         if (u.includes("/profile")) {
           return Promise.resolve({
             ok: true,
-            json: async () => ({ ticker: "CSN.L", name: "Chesnara plc", country: "GB", currency: "GBP" }),
+            // currencySource: "provider" — a real upstream declaration. This is
+            // the case where overwriting IS correct: `market_value` is stored in
+            // the QUOTE's currency, so a provider-confirmed currency that
+            // disagrees with the position has to win or the value is misconverted.
+            json: async () => ({ ticker: "CSN.L", name: "Chesnara plc", country: "GB", currency: "GBP", currencySource: "provider" }),
           })
         }
         return Promise.resolve({
@@ -239,6 +246,78 @@ describe("refreshQuotes (D58)", () => {
     const [updated] = await db.select().from(positions).where(eq(positions.id, pos.id))
     expect(updated.instrumentCurrency).toBe("GBP")
     expect(Number(updated.currentPrice)).toBeCloseTo(3.575)
+  })
+
+  // ── §71 — provenance decides whether a currency may overwrite a stored one ──
+
+  it("§71: an ESTIMATED currency never overwrites a stored one (PROD CRI.WA)", async () => {
+    // The incident: the import wrote the true currency (PLN — still on both of
+    // CRI.WA's BUY transactions), then every quote refresh replaced it with the
+    // locally-inferred CAD. `market_value` is multiplied by this label, so the
+    // live headline overstated that position by 16,190 PLN — an 18% divergence
+    // from the stored series that reconciled fine everywhere else.
+    const { db, user } = await makeHarness("q-user-cri71")
+    const { pf, pos } = await seedPortfolioAndPosition(db, user.id, { qty: 13, avg: 234.38 })
+    await db.update(positions).set({ instrumentCurrency: "PLN" }).where(eq(positions.id, pos.id))
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockImplementation((url: string) => {
+        const u = String(url)
+        if (u.includes("/profile")) {
+          return Promise.resolve({
+            ok: true,
+            json: async () => ({
+              ticker: "CRI.WA",
+              name: "Creotech Instruments S.A.",
+              country: "PL",
+              currency: "CAD",
+              currencySource: "estimated", // instruments guessed, from a TSXV listing
+            }),
+          })
+        }
+        return Promise.resolve({
+          ok: true,
+          json: async () => ({ symbol: "CRI.WA", currentPrice: 727, change: -17, percentChange: -2.28, currency: "CAD" }),
+        })
+      }),
+    )
+
+    await refreshQuotes(db, user.id, pf.id, "Bearer test-token")
+
+    const [updated] = await db.select().from(positions).where(eq(positions.id, pos.id))
+    expect(updated.instrumentCurrency).toBe("PLN")
+    // the price is still refreshed — only the label is protected
+    expect(Number(updated.currentPrice)).toBeCloseTo(727)
+  })
+
+  it("§71: an estimated currency still fills a position that has none", async () => {
+    // Nothing to protect, so the estimate is better than nothing — it is tagged
+    // `estimated` on the wire, which is what the SPA badge reads. (The column is
+    // NOT NULL, so "unset" is the empty string, not null.)
+    const { db, user } = await makeHarness("q-user-cri71b")
+    const { pf, pos } = await seedPortfolioAndPosition(db, user.id, { qty: 5, avg: 100 })
+    await db.update(positions).set({ instrumentCurrency: "" }).where(eq(positions.id, pos.id))
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockImplementation((url: string) => {
+        const u = String(url)
+        if (u.includes("/profile")) {
+          return Promise.resolve({
+            ok: true,
+            json: async () => ({ ticker: "NEW.WA", name: "Newco", country: "PL", currency: "PLN", currencySource: "estimated" }),
+          })
+        }
+        return Promise.resolve({
+          ok: true,
+          json: async () => ({ symbol: "NEW.WA", currentPrice: 50, change: 1, percentChange: 2, currency: "PLN" }),
+        })
+      }),
+    )
+
+    await refreshQuotes(db, user.id, pf.id, "Bearer test-token")
+
+    const [updated] = await db.select().from(positions).where(eq(positions.id, pos.id))
+    expect(updated.instrumentCurrency).toBe("PLN")
   })
 
   it("45.3: a null-currency profile keeps the stored instrumentCurrency (no USD clobber)", async () => {

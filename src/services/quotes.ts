@@ -37,6 +37,13 @@ interface CachedProfile {
   sector: string | null
   country: string | null
   instrumentCurrency: string | null
+  /**
+   * §71 — how instruments derived `instrumentCurrency`: "provider" (a real
+   * upstream declaration), "estimated" (the local resolver inferred it from
+   * reference data), or "unknown". This was on the wire and thrown away, which
+   * is what let a guess overwrite a known-good value.
+   */
+  currencySource: "provider" | "estimated" | "unknown"
   fetchedAt: number
 }
 
@@ -112,6 +119,13 @@ async function fetchProfile(symbol: string, authToken: string): Promise<CachedPr
           ? data.country
           : null,
       instrumentCurrency: isIsoCurrency(data.currency) ? data.currency.toUpperCase() : null,
+      // §71 — carried through, not dropped. Without it the refresh could not
+      // tell a provider-confirmed currency from a locally inferred one, and so
+      // treated them alike when deciding what to persist.
+      currencySource:
+        data.currencySource === "provider" || data.currencySource === "estimated"
+          ? data.currencySource
+          : "unknown",
       fetchedAt: Date.now(),
     }
     profileCache.set(symbol, entry)
@@ -240,7 +254,37 @@ export async function refreshQuotes(
           profileUpdate.industry = profile.sector
         }
         if (profile.country !== null && missesEnrichment(p.country)) profileUpdate.country = profile.country
-        if (profile.instrumentCurrency !== null) profileUpdate.instrumentCurrency = profile.instrumentCurrency
+        // §71 — a currency is a label that MULTIPLIES a number, so a wrong one
+        // does not fail, it silently inflates the position. This line used to
+        // overwrite unconditionally, which is how CRI.WA lost a correct "PLN"
+        // (written by the import, and still on both of its BUY transactions) to
+        // instruments' locally-inferred "CAD": the live headline overstated that
+        // one position by 16,190 PLN, an 18% divergence from the stored series
+        // that no test and no card/chart reconciliation caught, because a
+        // confident-looking number is what a wrong currency produces.
+        //
+        // So a value is only ever written when it can be trusted to overwrite:
+        // the provider declared it, or the position has nothing to lose. An
+        // "estimated" or "unknown" currency never displaces a stored one — the
+        // stored value came from the user's own import and is the more reliable
+        // of the two.
+        if (profile.instrumentCurrency !== null) {
+          // `instrument_currency` is char(3): Postgres blank-pads, so "unset" is
+          // whitespace, never "". A char column makes a naive `=== ""` check dead
+          // code, which would silently make every blank position un-fillable.
+          const stored = (p.instrumentCurrency ?? "").trim()
+          const confirmed = profile.currencySource === "provider"
+          if (confirmed || stored === "") {
+            profileUpdate.instrumentCurrency = profile.instrumentCurrency
+          } else if (profile.instrumentCurrency !== stored) {
+            console.warn(
+              `[quotes] pf=${portfolioId} ${p.symbol}: instruments reports ` +
+                `${profile.instrumentCurrency} (${profile.currencySource}) but the position already has ` +
+                `${stored} — keeping the stored value. A currency discrepancy here ` +
+                `changes this position's value by the FX factor.`,
+            )
+          }
+        }
       }
 
       // ── Quote fields ────────────────────────────────────────────────────
