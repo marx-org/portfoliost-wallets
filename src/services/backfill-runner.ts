@@ -132,6 +132,19 @@ async function pump(): Promise<void> {
 }
 
 /** Test-only: clear queue/active so suites don't leak across cases. */
+/**
+ * Test-only: is any pass queued or running?
+ *
+ * The §72.7 hazard is the ENQUEUE, not any particular call site: a GET that
+ * replaces a queued pass's run function downgrades a full recalc (which prices)
+ * to a backfill (which does not). Asserting "we stopped calling runBackfill" does
+ * not hold that property — a future GET could enqueue by another route and pass
+ * such a test. This answers the question that actually matters.
+ */
+export function __backfillRunnerEnqueuedForTests(): boolean {
+  return active !== null || queued.length > 0
+}
+
 export function __resetBackfillRunnerForTests(): void {
   active?.controller.abort()
   if (active) {

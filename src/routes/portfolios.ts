@@ -14,7 +14,7 @@ import { preferredBaseCurrency } from "../services/preferences.js"
 import { dominantPriceSource, oldestPriceAsOf, splitPortfolioValue } from "../services/valuation.js"
 import { getPortfolioNews } from "../services/portfolioNews.js"
 import { getPortfolioCalendar } from "../services/portfolioCalendar.js"
-import { runBackfill, runBackfillRecent, getBackfillStatus, getGapSymbols, buildBenchmarkSeries, forcePortfolioRecalc, hasBackfillableHistory } from "../services/backfill.js"
+import { runBackfillRecent, getGapSymbols, buildBenchmarkSeries, forcePortfolioRecalc, hasBackfillableHistory } from "../services/backfill.js"
 import { cashBalances, dailyExternalFlows } from "../services/cashLedger.js"
 import { debugEnabled, debugLog } from "../services/debug.js"
 import { buildPortfolioCash } from "./portfolio-cash.js"
@@ -1186,11 +1186,20 @@ async function resolveAggregateBase(
       .where(eq(valueSnapshots.portfolioId, id))
 
     if (n < 2 && (await hasBackfillableHistory(database, id))) {
-      const status = await getBackfillStatus(database, id)
-      if (status !== "pending") {
-        // Trigger backfill fire-and-forget
-        void runBackfill(database, id, c.req.header("Authorization") ?? "").catch(() => undefined)
-      }
+      // §72.7 — this fired a backfill from a GET too; removed for the same reason
+      // as the dashboard, and with the same consequence. `enqueueBackfill` keys
+      // its queue by portfolioId and REPLACES a queued pass's run function, so
+      // opening a portfolio's CHART mid-rebuild would downgrade the import's
+      // `recalcPortfolioHistory` (which ends with a pricing pass, §72.6) to a
+      // plain `runBackfill` (which does not) — the exact shape that left 51
+      // positions unpriced on 2026-09-28. Fixing only the dashboard was not
+      // enough: this route is a GET too, and it is the one a user hits when they
+      // click into a portfolio while the rebuild is still running.
+      //
+      // The pending DETECTION stays — reporting "still rebuilding" is a read, and
+      // the chart needs it to render an empty state rather than a wrong series.
+      // A portfolio whose history is genuinely empty is repaired by
+      // POST /:id/recompute, which is where asking for a rebuild belongs.
       return c.json({
         timeframe,
         backfillStatus: "pending",

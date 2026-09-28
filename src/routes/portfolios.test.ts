@@ -9,7 +9,7 @@ import {
   valueSnapshots,
 } from "../db/schema.js"
 import { sql } from "drizzle-orm"
-import { __resetBackfillRunnerForTests } from "../services/backfill-runner.js"
+import { __resetBackfillRunnerForTests, __backfillRunnerEnqueuedForTests } from "../services/backfill-runner.js"
 import { mockInstrumentsFx, unmockInstrumentsFx } from "../test-fx-mock.js"
 import { crossRate } from "@marx2/contracts/fx"
 
@@ -502,7 +502,41 @@ describe("GET /api/portfolios/merged (§46, §41 follow-up 1)", () => {
     expect(body.performance.timeSeries).toEqual([])
     expect(body.benchmarks).toEqual([])
 
-    // Clean up: the fire-and-forget enqueue must not leak into other tests.
+    // Clean up: nothing should have been enqueued, but keep the runner state
+    // isolated regardless.
+    __resetBackfillRunnerForTests()
+  })
+
+  it("§72.7: neither GET /merged nor GET /:id/analytics enqueues a backfill", async () => {
+    // A GET must not mutate, and here it was not merely impolite: enqueueBackfill
+    // keys its queue by portfolioId and REPLACES a queued pass's run function, so
+    // browsing mid-rebuild downgraded the import's recalcPortfolioHistory (which
+    // ends with a pricing pass) to a plain runBackfill (which does not). That is
+    // why 51 positions came back unpriced on 2026-09-28 — the two portfolios
+    // already RUNNING survived, every one still QUEUED was replaced.
+    //
+    // Asserting on the queue rather than on a spy: the hazard is the enqueue, and
+    // "we stopped calling the function we called" is not the property that matters.
+    const h = await makeHarness("no-get-backfill")
+    const a = app(h.db)
+    const empty = await (
+      await a.request("/api/portfolios", {
+        method: "POST", headers: h.headers, body: JSON.stringify({ name: "Hollow", currency: "USD" }),
+      })
+    ).json()
+    await h.db.insert(portfolioTransactions).values({
+      userId: h.user.id, portfolioId: empty.id, type: "BUY", instrumentSymbol: "AAPL",
+      quantity: "1", price: "150", currency: "USD", totalAmount: "150",
+      executedAt: new Date("2026-09-01T12:00:00Z"),
+    })
+
+    for (const url of ["/api/portfolios/merged", `/api/portfolios/${empty.id}/analytics`]) {
+      const res = await a.request(url, { headers: h.headers })
+      expect(res.status, url).toBe(200)
+      // It still REPORTS the pending state — that part is a read and the UI needs it.
+      expect((await res.json()).backfillStatus, url).toBe("pending")
+    }
+    expect(__backfillRunnerEnqueuedForTests(), "no backfill may be enqueued by a GET").toBe(false)
     __resetBackfillRunnerForTests()
   })
 
