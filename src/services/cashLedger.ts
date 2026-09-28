@@ -18,6 +18,7 @@ import { and, eq, inArray, sql } from "drizzle-orm"
 import type { DB } from "../db/index.js"
 import { portfolioCashTransactions, portfolioTransactions } from "../db/schema.js"
 import { FxRateUnavailableError, fxToOnDay, resolvedFxRate } from "./instruments-fx.js"
+import { debugEnabled, debugLog, fmtCcyMap, fmtCcyRateMap } from "./debug.js"
 const TRADE_CASH_TYPES = ["BUY", "SELL", "DIVIDEND"] as const
 
 /**
@@ -116,6 +117,15 @@ export async function cashBalances(
   for (const r of ext) {
     const ccy = (r.currency ?? "").toUpperCase()
     balances.set(ccy, (balances.get(ccy) ?? 0) + Number(r.amount ?? 0))
+  }
+
+  // RECALC_DEBUG — the live/as-of leg of the cash replay. Pairs with
+  // `cash-balance-series` below so the two can be diffed on the same day; the
+  // counts make an as-of filter that silently dropped rows obvious.
+  if (debugEnabled()) {
+    debugLog(
+      `cash-balances pf=${portfolioId} asOf=${asOf ?? "latest"} trades=${trades.length} ext=${ext.length} | ${fmtCcyMap(balances)}`,
+    )
   }
 
   return balances
@@ -218,10 +228,20 @@ export async function cashBalanceSeries(
   for (const day of days) {
     const toBase = await fxToOnDay(authToken, base, day, new Map(), opts)
     let total = 0
+    const legs = new Map<string, { amount: number; rate: number }>()
     for (const [ccy, bal] of perDayBal.get(day) ?? new Map()) {
-      total += await toBase(ccy, bal)
+      const rate = await toBase(ccy)
+      total += bal * rate
+      legs.set(ccy, { amount: bal, rate })
     }
     series.set(day, total)
+    // RECALC_DEBUG — the historical leg of the cash replay. The per-leg rates
+    // matter: a base total with no visible FX inputs cannot be reconciled
+    // against `cash-balances`, which converts at the LATEST rate instead of the
+    // day's. `fx` is 1.000000 for the base currency itself.
+    if (debugEnabled()) {
+      debugLog(`cash-balance-series pf=${portfolioId} day=${day} base=${base} | ${fmtCcyRateMap(legs)} | total=${total.toFixed(2)}`)
+    }
   }
   return series
 }
@@ -325,11 +345,22 @@ export async function externalCashInvested(
     .where(eq(portfolioCashTransactions.portfolioId, portfolioId))
 
   let total = 0
+  const legs = new Map<string, { amount: number; rate: number }>()
   for (const r of rows) {
     const day = toDateStr(r.transactionDate) ?? new Date().toISOString().slice(0, 10)
     const ccy = (r.currency ?? base).toUpperCase()
     const toBase = await rateToBase(authToken, ccy, base, day, opts)
-    total += Number(r.amount ?? 0) * toBase
+    const amount = Number(r.amount ?? 0)
+    total += amount * toBase
+    const prev = legs.get(ccy) ?? { amount: 0, rate: toBase }
+    prev.amount += amount
+    legs.set(ccy, prev)
+  }
+  // RECALC_DEBUG — "money actually put in", the `invested` figure. Grouped per
+  // currency at each leg's OWN historical rate, so a wrong `invested` is
+  // attributable to a currency rather than to an opaque total.
+  if (debugEnabled()) {
+    debugLog(`cash-invested pf=${portfolioId} base=${base} rows=${rows.length} strict=${opts.strict === true} | ${fmtCcyRateMap(legs)} | total=${total.toFixed(2)}`)
   }
   return total
 }

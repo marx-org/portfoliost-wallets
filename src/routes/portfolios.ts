@@ -17,6 +17,7 @@ import { getPortfolioNews } from "../services/portfolioNews.js"
 import { getPortfolioCalendar } from "../services/portfolioCalendar.js"
 import { runBackfill, runBackfillRecent, getBackfillStatus, getGapSymbols, buildBenchmarkSeries, forcePortfolioRecalc, hasBackfillableHistory } from "../services/backfill.js"
 import { cashBalances, dailyExternalFlows } from "../services/cashLedger.js"
+import { debugEnabled, debugLog } from "../services/debug.js"
 import { buildPortfolioCash } from "./portfolio-cash.js"
 import { computeRiskMetrics } from "../services/riskMetrics.js"
 import { resolveRates, fxTo } from "../services/instruments-fx.js"
@@ -309,6 +310,17 @@ export function createPortfolioRoutes(db?: DB) {
         const cashBal = await cashBalances(database, c.req.header("Authorization") ?? "", p.id)
         cashByPortfolio.set(p.id, cashBal)
         const split = await splitPortfolioValue(toBase, posRows, cashBal)
+        // RECALC_DEBUG — the LIVE path's composition. Reads against
+        // `cash-balances` and `cash-balance-series` for the same portfolio: this
+        // is the line that shows which cash figure produced which total, so a
+        // live-vs-snapshot divergence is a one-line diff instead of a rebuild.
+        if (debugEnabled()) {
+          debugLog(
+            `total-metrics pf=${p.id} name=${p.name} base=${p.baseCurrency} positions=${posRows.length} ` +
+            `INSTRUMENTS=${split.instrumentsValue.toFixed(2)} CASH=${split.cashValue.toFixed(2)} ` +
+            `TOTAL=${split.totalValue.toFixed(2)} invested=${totalInvested.toFixed(2)} unpriced=${split.unpricedPositions}`,
+          )
+        }
         if (split.unpricedPositions > 0) {
           // §70 — loud on purpose. Before this, an unpriced position silently
           // contributed its COST and the total looked plausible. The count is

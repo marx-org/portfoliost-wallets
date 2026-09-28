@@ -846,6 +846,15 @@ export async function computeSnapshotBatch(
         `[recalc-debug] pf=${portfolioId} day=${day} CASH=${cashDay.toFixed(2)} TOTAL=${totalValue.toFixed(2)} invested=${totalInvested.toFixed(2)}`,
       )
     }
+    // RECALC_DEBUG — the SNAPSHOT path's composition, at the window's last day
+    // only. `cash-balance-series` already narrates every day of the window, so
+    // the two together answer "why does the stored total differ from the live
+    // one" without re-running a backfill or querying the DB by hand.
+    if (recalcDebug && day === days[days.length - 1]) {
+      console.log(
+        `[recalc-debug] pf=${portfolioId} day=${day} SNAPSHOT instruments=${(totalValue - cashDay).toFixed(2)} cash=${cashDay.toFixed(2)} total=${totalValue.toFixed(2)} invested=${totalInvested.toFixed(2)} base=${base} symbols=${symbols.length} gapSymbols=[${gapSymbols.join(",")}]`,
+      )
+    }
     if (totalValue !== 0) {
       snapBatch.push({
         portfolioId,

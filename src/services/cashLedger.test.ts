@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it } from "vitest"
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import crypto from "node:crypto"
 import { makeHarness, type Harness } from "../routes/test-utils.js"
 import { portfolios, portfolioTransactions, portfolioCashTransactions } from "../db/schema.js"
@@ -290,6 +290,60 @@ describe("§68.2: externalCashInvested counts transfers, and they net to zero", 
     // ...and the aggregate is untouched, because the legs cancel. This is exactly
     // the caveat the contract description states rather than hides.
     expect(from + to).toBe(2000)
+  })
+})
+
+/**
+ * §71 — the two cash replays disagreeing on PROD was undebuggable because
+ * neither narrated itself; reconciling them meant hand-written `psql` queries
+ * that were lossy and gone by the next investigation. These lock the contract
+ * that the logs answer the question: with `RECALC_DEBUG=1` on, both replays
+ * report their per-currency inputs AND the FX rate each leg was converted at,
+ * and with it off they stay silent.
+ */
+describe("RECALC_DEBUG cash replay logging", () => {
+  let logs: string[]
+  let spy: ReturnType<typeof vi.spyOn>
+
+  beforeEach(async () => {
+    h = await makeHarness()
+    await seedPortfolio()
+    logs = []
+    spy = vi.spyOn(console, "log").mockImplementation((...args: unknown[]) => {
+      logs.push(args.map(String).join(" "))
+    })
+  })
+
+  afterEach(() => {
+    spy.mockRestore()
+    delete process.env.RECALC_DEBUG
+  })
+
+  it("narrates both replays with per-currency balances and the rates used", async () => {
+    process.env.RECALC_DEBUG = "1"
+    await ext({ type: "DEPOSIT", amount: 1000, currency: "PLN", transactionDate: "2024-06-01" })
+    await ext({ type: "DEPOSIT", amount: 500, currency: "USD", transactionDate: "2024-06-01" })
+    await trade({ type: "BUY", totalAmount: 200, feesSettled: 5, currency: "USD", executedAt: "2024-06-02T10:00:00.000Z" })
+
+    await cashBalances(h.db, null, portfolioId)
+    await cashBalanceSeries(h.db, null, portfolioId, "2024-06-01", "2024-06-02", "PLN")
+    await externalCashInvested(h.db, null, portfolioId, "PLN")
+
+    // the live/as-of path: row counts + the per-currency result
+    expect(logs).toContainEqual(expect.stringContaining("cash-balances"))
+    expect(logs.some((l) => l.includes("cash-balances") && l.includes("PLN 1000.00") && l.includes("USD 295.00"))).toBe(true)
+    // the historical path: the rate each leg was converted at, and the total
+    expect(logs.some((l) => l.includes("cash-balance-series") && l.includes("day=2024-06-02") && l.includes("PLN 1000.00@1.000000"))).toBe(true)
+    // "money actually put in", grouped per currency
+    expect(logs.some((l) => l.includes("cash-invested") && l.includes("PLN 1000.00") && l.includes("USD 500.00"))).toBe(true)
+  })
+
+  it("stays silent by default", async () => {
+    await ext({ type: "DEPOSIT", amount: 1000, currency: "PLN", transactionDate: "2024-06-01" })
+    await cashBalances(h.db, null, portfolioId)
+    await cashBalanceSeries(h.db, null, portfolioId, "2024-06-01", "2024-06-01", "PLN")
+    await externalCashInvested(h.db, null, portfolioId, "PLN")
+    expect(logs).toEqual([])
   })
 })
 
