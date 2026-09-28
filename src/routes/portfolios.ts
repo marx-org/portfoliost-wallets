@@ -11,6 +11,7 @@ import {
   valueSnapshots,
 } from "../db/schema.js"
 import { preferredBaseCurrency } from "../services/preferences.js"
+import { splitPortfolioValue } from "../services/valuation.js"
 import { refreshQuotes } from "../services/quotes.js"
 import { getPortfolioNews } from "../services/portfolioNews.js"
 import { getPortfolioCalendar } from "../services/portfolioCalendar.js"
@@ -289,6 +290,9 @@ export function createPortfolioRoutes(db?: DB) {
     }
     const toBase = await fxTo(c.req.header("Authorization") ?? "", aggregateBase, new Map(), { strict: true })
 
+    // §68 — the per-portfolio cash balances, collected here so the cash card below
+    // reuses the SAME ledger replay the split used instead of replaying it again.
+    const cashByPortfolio = new Map<string, Map<string, number>>()
     // Compute actual totals from positions + transactions rather than
     // stale denormalized columns.
     const portfolioBreakdown = await Promise.all(
@@ -307,24 +311,22 @@ export function createPortfolioRoutes(db?: DB) {
           .from(positions)
           .where(and(sql`${positions.portfolioId} = ${p.id}`, eq(positions.isOpen, true)))
 
-        let currentValue = 0
-        for (const r of posRows) {
-          const mv =
-            r.marketValue != null
-              ? Number(r.marketValue)
-              : Number(r.quantity) * Number(r.averageCostBasis)
-          // §66.4 — no guessed source currency: a null instrument_currency is
-          // passed through, and the strict fxTo above throws rather than
-          // valuing it at face value in the base currency.
-          currentValue += mv * (await toBase(r.instrumentCurrency ?? ""))
-        }
+        // §68 — the same split the recalc path and /summary-metrics compute. This
+        // loop previously summed positions ONLY, which is precisely why the
+        // headline missed the cash balance by exactly the cash balance (§63.3),
+        // and it did so while /summary-metrics already included cash.
+        const cashBal = await cashBalances(database, c.req.header("Authorization") ?? "", p.id)
+        cashByPortfolio.set(p.id, cashBal)
+        const split = await splitPortfolioValue(toBase, posRows, cashBal)
 
-        const gainLoss = currentValue - totalInvested
+        const gainLoss = split.totalValue - totalInvested
         const returnPct = totalInvested > 0 ? (gainLoss / totalInvested) * 100 : 0
         return {
           id: p.id,
           name: p.name,
-          totalValue: Math.round(currentValue * 100) / 100,
+          instrumentsValue: Math.round(split.instrumentsValue * 100) / 100,
+          cashValue: Math.round(split.cashValue * 100) / 100,
+          totalValue: Math.round(split.totalValue * 100) / 100,
           totalInvested: Math.round(totalInvested * 100) / 100,
           returnPercentage: Math.round(returnPct * 100) / 100,
           weight: 0, // filled in after totals computed
@@ -332,7 +334,11 @@ export function createPortfolioRoutes(db?: DB) {
       }),
     )
 
-    const totalValue = portfolioBreakdown.reduce((s, p) => s + p.totalValue, 0)
+    // §68 — the aggregate is the sum of the parts, so the headline and the cards
+    // cannot disagree: totalValue IS instrumentsValue + cashValue by definition.
+    const totalInstruments = portfolioBreakdown.reduce((s, p) => s + p.instrumentsValue, 0)
+    const totalCashValue = portfolioBreakdown.reduce((s, p) => s + p.cashValue, 0)
+    const totalValue = Math.round((totalInstruments + totalCashValue) * 100) / 100
     const totalInvested = portfolioBreakdown.reduce((s, p) => s + p.totalInvested, 0)
     const totalGainLoss = totalValue - totalInvested
     const returnPercentage = totalInvested > 0 ? (totalGainLoss / totalInvested) * 100 : 0
@@ -343,15 +349,14 @@ export function createPortfolioRoutes(db?: DB) {
 
     // §62 — aggregate cash across all portfolios (per-currency Σ, base-converted)
     const cashByCcy = new Map<string, number>()
-    for (const p of portfolioRows) {
-      const bal = await cashBalances(database, c.req.header("Authorization") ?? "", p.id)
+    for (const bal of cashByPortfolio.values()) {
       for (const [ccy, amt] of bal) cashByCcy.set(ccy, (cashByCcy.get(ccy) ?? 0) + amt)
     }
-    let totalCash = 0
     const cashConverted = new Map<string, number>()
     for (const [ccy, balance] of cashByCcy) cashConverted.set(ccy, balance * (await toBase(ccy)))
-    for (const conv of cashConverted.values()) totalCash += conv
-    totalCash = Math.round(totalCash * 100) / 100
+    // §68 — the aggregate cash is the Σ of the same per-portfolio splits above,
+    // so the card and the tile read the same number by construction.
+    const totalCash = totalCashValue
     const cashBreakdown = [...cashByCcy.entries()]
       .sort((a, b) => a[0].localeCompare(b[0]))
       .map(([currency, balance]) => ({
@@ -361,13 +366,22 @@ export function createPortfolioRoutes(db?: DB) {
       }))
 
     return c.json({
+      // §68 — instruments + cash. `totalValue` CHANGED meaning: it used to be
+      // positions-only here while /summary-metrics already included cash.
+      instrumentsValue: Math.round(totalInstruments * 100) / 100,
+      cashValue: totalCash,
       totalValue,
       totalInvested,
       totalGainLoss,
       returnPercentage,
-      // plan §48.6e B5 — the aggregate denomination every portfolio value
-      // above has been converted into (the SPA treats it as the FX source).
-      baseCurrency: "USD",
+      // §66.4 left this hardcoded as "USD" while line ~274 computed a real
+      // `aggregateBase` and converted into it. Invisible only while the
+      // preference was unset, because the sanctioned default happens to BE
+      // "USD" — and §67.1's write-through is exactly what makes the user's
+      // chosen base arrive here, at which point reporting USD while every number
+      // was PLN would have mislabelled the whole dashboard. Report what we
+      // converted into.
+      baseCurrency: aggregateBase,
       portfolioBreakdown,
       externalCapitalReturnPercent: returnPercentage,
       externalCapitalReturnAmount: totalGainLoss,
@@ -375,7 +389,6 @@ export function createPortfolioRoutes(db?: DB) {
       externalCapitalBasisSource: "none",
       externalCapitalSuppressedReason: null,
       externalCapitalReturnBasisKind: "inception",
-      totalCash,
       cashBreakdown,
     } satisfies PortfolioTotalMetrics)
   })
@@ -881,17 +894,20 @@ export function createPortfolioRoutes(db?: DB) {
         ),
       )
 
-    const positionValue = posRows.reduce(
-      (s, p) => s + (p.marketValue != null ? Number(p.marketValue) : Number(p.quantity) * Number(p.averageCostBasis)),
-      0,
-    )
-    // §62.4 — totalValue includes the current cash total (base currency);
-    // positionValue stays positions-only.
     const cashBal = await cashBalances(database, c.req.header("Authorization") ?? "", portfolioId)
     const sumToBase = await fxTo(c.req.header("Authorization") ?? "", portfolio.baseCurrency, new Map(), { strict: true })
-    let cashTotal = 0
-    for (const [ccy, bal] of cashBal) cashTotal += bal * (await sumToBase(ccy, 1))
-    const totalValue = positionValue + cashTotal
+    // §68 — this route used to `reduce` marketValue straight into positionValue
+    // with NO per-position FX conversion, while the very same response declared
+    // `currency: portfolio.baseCurrency` and the contract said every amount on it
+    // was denominated in that currency. For a portfolio whose positions are all
+    // in one currency the two coincide, which is why it was never noticed; on a
+    // multi-currency portfolio the declared currency was a lie. One shared split,
+    // each position converted out of its own currency at its own rate.
+    const { instrumentsValue: positionValue, cashValue: cashTotal, totalValue } = await splitPortfolioValue(
+      (ccy) => sumToBase(ccy, 1),
+      posRows,
+      cashBal,
+    )
     const totalCostBasis = posRows.reduce(
       (s, p) => s + Number(p.quantity) * Number(p.averageCostBasis),
       0,
@@ -947,7 +963,10 @@ export function createPortfolioRoutes(db?: DB) {
       // currency; the contract now requires saying so, because the SPA was
       // guessing (and rendering PLN with a $).
       currency: portfolio.baseCurrency,
+      // §68 — positionValue is the instruments component; cashValue is new and
+      // makes the split explicit so a card can render both without a second call.
       totalValue: Math.round(totalValue * 100) / 100,
+      cashValue: Math.round(cashTotal * 100) / 100,
       totalInvested: Math.round(totalInvested * 100) / 100,
       costBasis: Math.round(totalCostBasis * 100) / 100,
       positionValue: Math.round(positionValue * 100) / 100,

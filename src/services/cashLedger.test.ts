@@ -9,6 +9,7 @@ import {
   cashBalances,
   cashBalanceSeries,
   dailyExternalFlows,
+  externalCashInvested,
 } from "./cashLedger.js"
 
 beforeEach(() => mockInstrumentsFx({ table: { USD: 1.08, EUR: 1.08, PLN: 4.3 }, asOf: "2024-12-31" }))
@@ -231,3 +232,64 @@ describe("§66.4: cash-ledger FX respects opts.strict", () => {
     expect(flows.get("2024-06-01")).toBeCloseTo(100 * rate, 6)
   })
 })
+
+/**
+ * §68.2 — Total Invested is cash inflow / outflow / TRANSFER, confirmed by the
+ * user. `externalCashInvested` already summed every cash row with no type
+ * filter, so the definition needed no code change — but the honest consequence
+ * did need asserting, because it is easy to believe the number is "capital you
+ * put in" when it is not.
+ *
+ * The route-level counterpart of this lives in portfolio-transactions.test.ts.
+ * It is here instead because /total-metrics reads the DENORMALIZED
+ * portfolios.total_integrested column, not this function, so a route test would
+ * have been asserting the column rather than the basis the contract names.
+ */
+describe("§68.2: externalCashInvested counts transfers, and they net to zero", () => {
+  beforeEach(async () => {
+    mockInstrumentsFx({ table: { USD: 1.08, PLN: 4.3 } })
+    h = await makeHarness()
+    await seedPortfolio()
+  })
+
+  async function row(type: "DEPOSIT" | "WITHDRAWAL" | "TRANSFER", amount: string, date = "2024-06-01") {
+    await h.db.insert(portfolioCashTransactions).values({
+      userId, portfolioId, type, amount, currency: "PLN", transactionDate: date,
+    })
+  }
+
+  it("deposits and withdrawals net; the sign lives in `amount`", async () => {
+    await row("DEPOSIT", "1000")
+    await row("WITHDRAWAL", "-400")
+    const v = await externalCashInvested(h.db, null, portfolioId, "PLN")
+    expect(v).toBe(600)
+  })
+
+  it("a transfer leg counts, which is what the user asked for", async () => {
+    await row("DEPOSIT", "1000")
+    await row("TRANSFER", "250")
+    const v = await externalCashInvested(h.db, null, portfolioId, "PLN")
+    expect(v).toBe(1250)
+  })
+
+  it("the two legs of an internal transfer net to zero at the aggregate", async () => {
+    const other = crypto.randomUUID()
+    await h.db.insert(portfolios).values({ userId, id: other, name: "To", baseCurrency: "PLN" })
+    await row("DEPOSIT", "1000")
+    await h.db.insert(portfolioCashTransactions).values({
+      userId, portfolioId: other, type: "DEPOSIT", amount: "1000", currency: "PLN", transactionDate: "2024-06-01",
+    })
+    await row("TRANSFER", "-400") // out of this portfolio...
+    await h.db.insert(portfolioCashTransactions).values({
+      userId, portfolioId: other, type: "TRANSFER", amount: "400", currency: "PLN", transactionDate: "2024-06-01",
+    })
+    const from = await externalCashInvested(h.db, null, portfolioId, "PLN")
+    const to = await externalCashInvested(h.db, null, other, "PLN")
+    expect(from).toBe(600)
+    expect(to).toBe(1400)
+    // ...and the aggregate is untouched, because the legs cancel. This is exactly
+    // the caveat the contract description states rather than hides.
+    expect(from + to).toBe(2000)
+  })
+})
+

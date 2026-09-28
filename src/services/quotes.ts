@@ -18,6 +18,7 @@ import { positions, portfolios, valueSnapshots } from "../db/schema.js"
 import { fxTo } from "./instruments-fx.js"
 import { cashBalances, dailyExternalFlows, externalCashInvested } from "./cashLedger.js"
 import { recomputeReturnColumns, syncCurrentValueFromSnapshots } from "./returnColumns.js"
+import { splitPortfolioValue } from "./valuation.js"
 
 // ── Types ─────────────────────────────────────────────────────────────────
 
@@ -354,36 +355,40 @@ export async function refreshQuotes(
   // (deposits − withdrawals ± transfer legs), NOT the position cost basis —
   // a fully-invested portfolio has ~0 cash balance but a large invested total.
   let totalInvested = 0
-  for (const p of positionRows) {
-    // §66.4 — no guessed source currency; strict fxTo throws if it is unknown.
-    const instFrom = (p.instrumentCurrency ?? "").toUpperCase()
-    // Market value is denominated in the quote's currency (live) or the
-    // instrument currency (fallback / legacy stored MV).
-    const valueFrom = (p.quoteCurrency ?? p.instrumentCurrency ?? "").toUpperCase()
-    const investedRate = await toBase(instFrom, 1)
-    const valueRate = valueFrom === instFrom ? investedRate : await toBase(valueFrom, 1)
-    const mv = Number(p.marketValue ?? 0)
-    totalValue += mv * valueRate
-    if (process.env.RECALC_DEBUG === "1") {
-      console.log(
-        `[recalc-debug-quote] pf=${portfolioId} sym=${p.symbol} mv=${mv} mvCcy=${valueFrom}→${base} rate=${valueRate.toFixed(6)} contrib=${(mv * valueRate).toFixed(2)}`,
-      )
-    }
-  }
+  // §68 — the positions→value arithmetic now lives in splitPortfolioValue, the
+  // same function /total-metrics and /summary-metrics use. It previously had its
+  // own copy here, which is how this path ended up adding cash to totalValue
+  // while the headline route did not.
+  //
+  // Market value is denominated in the QUOTE's currency (live) or the instrument
+  // currency (fallback / legacy stored MV), so the value currency is resolved
+  // here and handed over as the row's `instrumentCurrency`.
+  const debug = process.env.RECALC_DEBUG === "1"
+  const { instrumentsValue, cashValue: totalCash, totalValue: splitTotal } = await splitPortfolioValue(
+    toBase,
+    positionRows.map((p) => ({ ...p, instrumentCurrency: p.quoteCurrency ?? p.instrumentCurrency })),
+    await cashBalances(db, authToken, portfolioId),
+    debug
+      ? ({ valueCcy, mv, contrib }) =>
+          console.log(
+            `[recalc-debug-quote] pf=${portfolioId} mv=${mv} mvCcy=${valueCcy}→${base} contrib=${contrib.toFixed(2)}`,
+          )
+      : undefined,
+  )
+  totalValue = instrumentsValue
 
   const snapshotDate = now.toISOString().slice(0, 10)
   // §62.4 — value includes the current cash total (base currency); netFlow is
   // EXTERNAL flows only (a same-day deposit/withdrawal shows up here).
-  const cashBal = await cashBalances(db, authToken, portfolioId)
   totalInvested = await externalCashInvested(db, authToken, portfolioId, base)
-  let totalCash = 0
-  for (const [ccy, bal] of cashBal) totalCash += bal * (await toBase(ccy, 1))
-  if (process.env.RECALC_DEBUG === "1") {
+  if (debug) {
     console.log(
-      `[recalc-debug-quote] pf=${portfolioId} CASH=${totalCash.toFixed(2)} value=${totalValue.toFixed(2)} invested=${totalInvested.toFixed(2)} base=${base}`,
+      `[recalc-debug-quote] pf=${portfolioId} CASH=${totalCash.toFixed(2)} INSTRUMENTS=${instrumentsValue.toFixed(2)} value=${splitTotal.toFixed(2)} invested=${totalInvested.toFixed(2)} base=${base}`,
     )
   }
-  totalValue += totalCash
+  // totalValue is instruments + cash by construction (§68) — not a second
+  // hand-written addition, which is how the two paths drifted apart.
+  totalValue = splitTotal
   const todayFlows = await dailyExternalFlows(db, authToken, portfolioId, snapshotDate, snapshotDate, base)
   await db
     .insert(valueSnapshots)

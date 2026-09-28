@@ -5,6 +5,7 @@ import { createPublicShareRoutes } from "./portfolios.js"
 import { createCrossPortfolioTransactionsRoute } from "./portfolio-transactions.js"
 import { makeHarness } from "./test-utils.js"
 import { mockInstrumentsFx, unmockInstrumentsFx } from "../test-fx-mock.js"
+import { crossRate } from "@marx2/contracts/fx"
 import {
   portfolios,
   positions,
@@ -1761,3 +1762,200 @@ describe("Portfolio dividends (§49)", () => {
     expect(sell.taxes).toBeNull()
   })
 })
+
+/**
+ * §68 — cash is a first-class citizen: the headline total is instruments + cash.
+ *
+ * These exist because the three code paths that answered "what is this
+ * portfolio worth" had already drifted — quotes.ts added cash, /total-metrics did
+ * not (so the dashboard headline missed the cash balance by exactly the cash
+ * balance, §63.3), and /summary-metrics summed positions with no FX conversion
+ * at all while declaring the portfolio's base currency on the same object.
+ */
+describe("§68: instruments + cash == total, everywhere", () => {
+  it("a portfolio with positions AND cash: currentValue == instrumentsValue + cashValue", async () => {
+    const h = await makeHarness()
+    const a = app(h.db)
+    mockInstrumentsFx({ table: { USD: 1.08, PLN: 4.3 } })
+    try {
+      const res = await a.request("/api/portfolios", {
+        method: "POST", headers: h.headers,
+        body: JSON.stringify({ name: "P", currency: "USD", baseCurrency: "PLN" }),
+      })
+      const { id } = await res.json()
+      // deposit, then spend only part of it so cash remains
+      await h.db.insert(portfolioCashTransactions).values([
+        { userId: h.user.id, portfolioId: id, type: "DEPOSIT", amount: "2000", currency: "PLN" },
+        { userId: h.user.id, portfolioId: id, type: "WITHDRAWAL", amount: "500", currency: "PLN" },
+      ])
+      await a.request(`/api/portfolios/${id}/positions`, {
+        method: "POST", headers: h.headers,
+        body: JSON.stringify({ symbol: "SNT.WA", quantity: 10, price: 100, currency: "PLN" }),
+      })
+
+      const m = await (await a.request(`/api/portfolios/${id}/summary-metrics`, { headers: h.headers })).json()
+      expect(m.cashValue).toBe(1500)
+      expect(m.positionValue).toBe(1000)
+      expect(m.totalValue).toBe(2500)
+      // the identity the whole section exists to enforce
+      expect(m.totalValue).toBeCloseTo(m.positionValue + m.cashValue, 2)
+    } finally { unmockInstrumentsFx() }
+  })
+
+  it("the headline total equals Σ per-portfolio totals, and equals instruments + cash", async () => {
+    const h = await makeHarness()
+    const a = app(h.db)
+    mockInstrumentsFx({ table: { USD: 1.08, PLN: 4.3 } })
+    try {
+      for (const [name, cash, mv] of [["A", 1000, 0], ["B", 300, 700]] as const) {
+        const res = await a.request("/api/portfolios", {
+          method: "POST", headers: h.headers,
+          body: JSON.stringify({ name, currency: "USD", baseCurrency: "PLN" }),
+        })
+        const { id } = await res.json()
+        await h.db.insert(portfolioCashTransactions).values({
+          userId: h.user.id, portfolioId: id, type: "DEPOSIT", amount: String(cash), currency: "PLN",
+        })
+        if (mv > 0) {
+          await a.request(`/api/portfolios/${id}/positions`, {
+            method: "POST", headers: h.headers,
+            body: JSON.stringify({ symbol: "SNT.WA", quantity: 1, price: mv, currency: "PLN" }),
+          })
+        }
+      }
+
+      const body = await (await a.request("/api/portfolios/total-metrics", { headers: h.headers })).json()
+      expect(body.totalValue).toBeCloseTo(body.instrumentsValue + body.cashValue, 2)
+      const sumRows = body.portfolioBreakdown.reduce((s: number, p: any) => s + p.totalValue, 0)
+      expect(body.totalValue).toBeCloseTo(sumRows, 2)
+      // every row carries its own split, and it is internally consistent
+      for (const p of body.portfolioBreakdown) {
+        expect(p.totalValue).toBeCloseTo(p.instrumentsValue + p.cashValue, 2)
+      }
+    } finally { unmockInstrumentsFx() }
+  })
+
+  it("a cash-only portfolio reports instrumentsValue 0 and is not dropped from the total", async () => {
+    // PROD shape: Crypto holds 887.74 PLN of cash and nothing else, and the old
+    // weights floored it at 0 / -100% while its card read +1.65%.
+    const h = await makeHarness()
+    const a = app(h.db)
+    mockInstrumentsFx({ table: { USD: 1.08, PLN: 4.3 } })
+    try {
+      const res = await a.request("/api/portfolios", {
+        method: "POST", headers: h.headers,
+        body: JSON.stringify({ name: "Crypto", currency: "USD", baseCurrency: "PLN" }),
+      })
+      const { id } = await res.json()
+      await h.db.insert(portfolioCashTransactions).values({
+        userId: h.user.id, portfolioId: id, type: "DEPOSIT", amount: "887.74", currency: "PLN",
+      })
+      const body = await (await a.request("/api/portfolios/total-metrics", { headers: h.headers })).json()
+      const row = body.portfolioBreakdown[0]
+      expect(row.instrumentsValue).toBe(0)
+      expect(row.cashValue).toBe(887.74)
+      expect(row.totalValue).toBe(887.74)
+      // it must carry weight, not floor at zero
+      expect(row.weight).toBeGreaterThan(0)
+    } finally { unmockInstrumentsFx() }
+  })
+
+  it("NEGATIVE cash reduces the total and is not clamped (§68.3)", async () => {
+    // XTB and IKE Beata are margin accounts: the cash ledger goes below zero.
+    const h = await makeHarness()
+    const a = app(h.db)
+    mockInstrumentsFx({ table: { USD: 1.08, PLN: 4.3 } })
+    try {
+      const res = await a.request("/api/portfolios", {
+        method: "POST", headers: h.headers,
+        body: JSON.stringify({ name: "XTB", currency: "USD", baseCurrency: "PLN" }),
+      })
+      const { id } = await res.json()
+      // the sign lives in `amount`, not in `type` — the replay sums amount as-is.
+      // PROD shape: IBKR's negative balance is 5 WITHDRAWAL rows totalling -121130.
+      await h.db.insert(portfolioCashTransactions).values({
+        userId: h.user.id, portfolioId: id, type: "WITHDRAWAL", amount: "-1200", currency: "PLN",
+      })
+      const m = await (await a.request(`/api/portfolios/${id}/summary-metrics`, { headers: h.headers })).json()
+      expect(m.cashValue).toBe(-1200)
+      expect(m.instrumentsValue ?? m.positionValue).toBe(0)
+      expect(m.totalValue).toBe(-1200) // negative, NOT clamped to 0
+      const body = await (await a.request("/api/portfolios/total-metrics", { headers: h.headers })).json()
+      expect(body.cashValue).toBe(-1200)
+      expect(body.totalValue).toBe(-1200)
+    } finally { unmockInstrumentsFx() }
+  })
+
+  it("multi-currency positions are each converted; a raw cross-currency sum is not (§68.3)", async () => {
+    // positionsValue used to `reduce` marketValue with NO fx, while the same
+    // response declared `currency: PLN`.
+    const h = await makeHarness()
+    const a = app(h.db)
+    // EUR-quoted: USD=1.08, PLN=4.3  =>  USD->PLN = 1.08/4.3
+    mockInstrumentsFx({ table: { USD: 1.08, PLN: 4.3 } })
+    try {
+      const res = await a.request("/api/portfolios", {
+        method: "POST", headers: h.headers,
+        body: JSON.stringify({ name: "Multi", currency: "USD", baseCurrency: "PLN" }),
+      })
+      const { id } = await res.json()
+      for (const [symbol, qty, price, ccy] of [["AAPL", 10, 100, "USD"], ["SNT.WA", 10, 100, "PLN"]] as const) {
+        await a.request(`/api/portfolios/${id}/positions`, {
+          method: "POST", headers: h.headers,
+          body: JSON.stringify({ symbol, quantity: qty, price, currency: ccy }),
+        })
+      }
+      const m = await (await a.request(`/api/portfolios/${id}/summary-metrics`, { headers: h.headers })).json()
+      const rate = crossRate("USD", "PLN", { EUR: 1, USD: 1.08, PLN: 4.3 })!
+      const expected = 1000 * rate + 1000
+      expect(m.positionValue).toBeCloseTo(expected, 1)
+      // the naive raw sum would have been 2000 — i.e. wrong whenever the
+      // portfolio holds positions in more than one currency
+      expect(m.positionValue).not.toBeCloseTo(2000, 0)
+    } finally { unmockInstrumentsFx() }
+  })
+
+  it("a missing FX rate THROWS rather than valuing 1:1 (§66.4 on the split path)", async () => {
+    const h = await makeHarness()
+    const a = app(h.db)
+    mockInstrumentsFx({ table: {} }) // only EUR known: every USD->PLN pair 404s
+    try {
+      const res = await a.request("/api/portfolios", {
+        method: "POST", headers: h.headers,
+        body: JSON.stringify({ name: "P", currency: "USD", baseCurrency: "PLN" }),
+      })
+      const { id } = await res.json()
+      await a.request(`/api/portfolios/${id}/positions`, {
+        method: "POST", headers: h.headers,
+        body: JSON.stringify({ symbol: "AAPL", quantity: 1, price: 100, currency: "USD" }),
+      })
+      // must fail loudly — not report 100 "PLN"
+      const res2 = await a.request(`/api/portfolios/${id}/summary-metrics`, { headers: h.headers })
+      expect(res2.status).not.toBe(200)
+    } finally { unmockInstrumentsFx() }
+  })
+
+  it("the reported baseCurrency is the one the numbers were converted into (§66.4 residual)", async () => {
+    // This response used to report a hardcoded "USD" while converting into the
+    // real aggregate base — invisible while the preference defaulted to USD, and
+    // exactly what §67.1's write-through would have made visible.
+    const h = await makeHarness()
+    const a = app(h.db)
+    mockInstrumentsFx({ table: { USD: 1.08, PLN: 4.3 } })
+    try {
+      const res = await a.request("/api/portfolios", {
+        method: "POST", headers: h.headers,
+        body: JSON.stringify({ name: "PLN P", currency: "USD", baseCurrency: "PLN" }),
+      })
+      const { id } = await res.json()
+      await h.db.insert(portfolioCashTransactions).values({
+        userId: h.user.id, portfolioId: id, type: "DEPOSIT", amount: "1000", currency: "PLN",
+      })
+      const body = await (await a.request("/api/portfolios/total-metrics", { headers: h.headers })).json()
+      // every portfolio is PLN-based, so the honest aggregate base is PLN — and it
+      // must not be reported as USD
+      expect(body.baseCurrency).toBe("PLN")
+    } finally { unmockInstrumentsFx() }
+  })
+})
+
