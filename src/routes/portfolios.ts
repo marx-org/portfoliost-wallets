@@ -399,7 +399,14 @@ export function createPortfolioRoutes(db?: DB) {
         .map((p) => p.priceAsOf)
         .filter((v): v is string => !!v)
         .sort()[0] ?? null,
-      priceSource: portfolioBreakdown.some((p) => p.priceSource === "fallback") ? "fallback" : null,
+      // 'quote' rather than null when nothing fell back: the contract documents
+      // this field as 'quote' | 'fallback', and null here would read as "unknown
+      // provenance" when in fact every position was priced live.
+      priceSource: portfolioBreakdown.some((p) => p.priceSource === "fallback")
+        ? "fallback"
+        : portfolioBreakdown.some((p) => p.priceSource === "quote")
+          ? "quote"
+          : null,
       totalInvested,
       totalGainLoss,
       returnPercentage,
