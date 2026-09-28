@@ -32,7 +32,7 @@ import {
 } from "./instruments-fx.js"
 import { cashBalanceSeries, dailyExternalFlows } from "./cashLedger.js"
 import { enqueueBackfill } from "./backfill-runner.js"
-import { refreshQuotes } from "./quotes.js"
+import { refreshQuotesUnlocked } from "./quotes.js"
 import {
   recomputeReturnColumns,
   syncCurrentValueFromSnapshots,
@@ -953,8 +953,10 @@ export async function recalcPortfolioHistory(
     // 18,488-row history and 99 of 99 open positions still had `market_value` NULL,
     // so the headline excluded all of them and warned "96 positions could not be
     // priced". Two paths answer "what is this worth" and, after an import, only
-    // one of them had a writer — `refreshQuotes` fires on portfolio-open or the
-    // 13:00/17:20 crons, and an import triggers neither.
+    // one of them had a writer — `refreshQuotes` fires on the 13:00/17:20 sweeps
+    // and on any transaction mutation, and an import triggers neither. (It used
+    // to also fire on portfolio-open; D58 removed that, and this comment outlived
+    // the change.)
     //
     // This is §70's shape one level up: two code paths answering the same
     // question, and the one that is not maintained is the one the user sees.
@@ -966,7 +968,7 @@ export async function recalcPortfolioHistory(
     //   - it must run BEFORE `syncCurrentValueFromSnapshots`, or `current_value`
     //     is synced from yesterday while the positions carry today's prices.
     //
-    // `refreshQuotes` upserts today's snapshot itself (snapshot-on-read) and never
+    // `refreshQuotesUnlocked` upserts today's snapshot itself (snapshot-on-read) and never
     // throws, so this cannot fail a pass — a portfolio that cannot be priced ends
     // up marked `fallback`, which is visible, rather than absent.
     //
@@ -979,7 +981,7 @@ export async function recalcPortfolioHistory(
       .where(eq(portfolios.id, portfolioId))
       .limit(1)
     if (owner) {
-      await refreshQuotes(db, owner.userId, portfolioId, authToken)
+      await refreshQuotesUnlocked(db, owner.userId, portfolioId, authToken)
       throwIfAborted(signal)
     }
 

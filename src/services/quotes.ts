@@ -18,6 +18,7 @@ import { positions, portfolios, valueSnapshots } from "../db/schema.js"
 import { fxTo, instrumentsAuthHeaders } from "./instruments-fx.js"
 import { cashBalances, dailyExternalFlows, externalCashInvested } from "./cashLedger.js"
 import { recomputeReturnColumns, syncCurrentValueFromSnapshots } from "./returnColumns.js"
+import { enqueueBackfill } from "./backfill-runner.js"
 import { splitPortfolioValue } from "./valuation.js"
 
 // ── Types ─────────────────────────────────────────────────────────────────
@@ -210,6 +211,32 @@ function needsProfileRefresh(pos: { companyName: string | null; updatedAt: Date 
  * Never throws. Instruments errors → keep stored values, mark priceSource 'fallback'.
  */
 export async function refreshQuotes(
+  db: DB,
+  userId: string,
+  portfolioId: string,
+  authToken: string,
+): Promise<void> {
+  // §72.12 — take the same lock the rebuilds take.
+  //
+  // This writes TODAY's snapshot row, and the rebuild's own tail does the same,
+  // so two of them running at once is a torn series, not just a stale one. The
+  // unguarded callers were the 13:00/17:20 sweeps (snapshots-sync, which visits
+  // EVERY portfolio) and every transaction mutation. A sweep landing in the
+  // middle of a DELETE+rebuild would have its row deleted out from under it, or
+  // the reverse, and which one survived depended on timing.
+  await enqueueBackfill(portfolioId, () => refreshQuotesUnlocked(db, userId, portfolioId, authToken))
+}
+
+/**
+ * The pricing pass itself, WITHOUT taking the lock.
+ *
+ * Only for a caller that already holds it. `recalcPortfolioHistory` runs this at
+ * the tail of a pass it owns: routing that through `refreshQuotes` would enqueue
+ * a task behind the very pass awaiting it, and the single-flight pump could
+ * never start it — a self-deadlock, not a slow queue. Everything else calls
+ * `refreshQuotes`.
+ */
+export async function refreshQuotesUnlocked(
   db: DB,
   userId: string,
   portfolioId: string,

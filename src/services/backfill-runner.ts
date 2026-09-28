@@ -36,9 +36,26 @@ const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms))
 
 /**
  * Enqueue a recompute pass for a portfolio. At most one slot per portfolio:
- * re-enqueueing replaces the pending run (latest state wins). If a pass for
- * the portfolio is already active, only its run fn is replaced — the active
- * pass runs to completion (use `abortActiveBackfill` to kill a stale one).
+ * re-enqueueing replaces the pending run (latest state wins), which also caps
+ * the queue at one entry per portfolio.
+ *
+ * §72.12 — a request arriving while a pass for the SAME portfolio is ACTIVE is
+ * queued behind it, rather than dropped. It used to take this branch:
+ *
+ *   if (active && active.task.portfolioId === portfolioId) {
+ *     active.task.run = run   // reassigns a property nobody reads any more
+ *     done()                  // ...and tells the caller it was handled
+ *     return donePromise
+ *   }
+ *
+ * `pump()` had already called `task.run(signal)` and was awaiting it, so the
+ * reassignment changed nothing: the new work never ran. `done()` resolved all
+ * the same, and the HTTP route answered `{ backfillStatus: "pending" }` — so a
+ * transaction edit landing mid-rebuild was reported as accepted and silently
+ * dropped, and the rebuilt series never reflected it. Worse than a slow queue:
+ * the caller had no way to find out. Queueing is what "one pass at a time"
+ * was always supposed to mean.
+ *
  * Returns a promise that resolves once the enqueued slot has been consumed.
  */
 export function enqueueBackfill(
@@ -49,12 +66,6 @@ export function enqueueBackfill(
   const donePromise = new Promise<void>((resolve) => {
     done = resolve
   })
-
-  if (active && active.task.portfolioId === portfolioId) {
-    active.task.run = run
-    done()
-    return donePromise
-  }
 
   const existing = queued.find((t) => t.portfolioId === portfolioId)
   if (existing) {

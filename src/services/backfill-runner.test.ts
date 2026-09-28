@@ -54,10 +54,11 @@ describe("backfill-runner (serialized recompute passes)", () => {
     expect(order).toEqual(["a-start", "a-end", "b-start"])
   })
 
-  it("re-enqueue while active replaces the run fn without starting a second pass", async () => {
+  it("§72.12: a request arriving mid-pass runs AFTER it, and is not reported done early", async () => {
     const calls: number[] = []
     let release: () => void = () => {}
     const gate = new Promise<void>((r) => (release = r))
+    let secondResolved = false
 
     const first = enqueueBackfill("pf", async () => {
       calls.push(1)
@@ -65,14 +66,43 @@ describe("backfill-runner (serialized recompute passes)", () => {
     })
     const second = enqueueBackfill("pf", async () => {
       calls.push(2)
+    }).then(() => {
+      secondResolved = true
     })
 
     await vi.advanceTimersByTimeAsync(0)
-    expect(calls).toEqual([1])
+    expect(calls).toEqual([1]) // the new request waits its turn
+
+    // The bug: `active.task.run = run; done()` resolved this immediately while
+    // the work never ran, so the HTTP route answered "pending" for a rebuild
+    // that would never reflect the edit that triggered it.
+    expect(secondResolved).toBe(false)
 
     release()
     await Promise.all([first, second])
-    expect(calls).toEqual([1]) // completed pass is not re-run automatically
+    expect(calls).toEqual([1, 2])
+    expect(secondResolved).toBe(true)
+  })
+
+  it("§72.12: a mid-pass request for a DIFFERENT portfolio also waits", async () => {
+    // The old branch keyed on `active.task.portfolioId === portfolioId`, so it
+    // only ever swallowed same-portfolio work. Serialisation is global.
+    const calls: string[] = []
+    let release: () => void = () => {}
+    const gate = new Promise<void>((r) => (release = r))
+
+    const a = enqueueBackfill("pf-a", async () => {
+      calls.push("a")
+      await gate
+    })
+    const b = enqueueBackfill("pf-b", async () => {
+      calls.push("b")
+    })
+
+    await vi.advanceTimersByTimeAsync(0)
+    release()
+    await Promise.all([a, b])
+    expect(calls).toEqual(["a", "b"])
   })
 
   it("abortActiveBackfill re-runs the replaced pass after the grace period", async () => {
@@ -151,5 +181,56 @@ describe("backfill-runner (serialized recompute passes)", () => {
     })
     expect(ran).toBe(true)
     errSpy.mockRestore()
+  })
+})
+
+describe("§72.12 — refreshQuotes is a queued writer, not a free one", () => {
+  it("waits behind an in-flight rebuild instead of writing the row concurrently", async () => {
+    // Both write TODAY's snapshot. Unserialised, a 13:00 sweep landing inside a
+    // DELETE+rebuild has its row deleted out from under it — or the reverse —
+    // and which survived depended on timing. That seam is the Equate+ chart.
+    const order: string[] = []
+    let release: () => void = () => {}
+    const gate = new Promise<void>((r) => (release = r))
+
+    const rebuild = enqueueBackfill("pf", async () => {
+      order.push("rebuild-start")
+      await gate
+      order.push("rebuild-end")
+    })
+    const refresh = enqueueBackfill("pf", async () => {
+      order.push("refresh")
+    })
+
+    await vi.advanceTimersByTimeAsync(0)
+    expect(order).toEqual(["rebuild-start"])
+
+    release()
+    await Promise.all([rebuild, refresh])
+    expect(order).toEqual(["rebuild-start", "rebuild-end", "refresh"])
+  })
+
+  it("holds at most one queued slot per portfolio however often it is called", async () => {
+    // snapshots-sync sweeps every portfolio on a schedule; without the cap a
+    // burst of mutations plus a sweep would grow the queue without bound.
+    const order: number[] = []
+    let release: () => void = () => {}
+    const gate = new Promise<void>((r) => (release = r))
+
+    const first = enqueueBackfill("pf", async () => {
+      order.push(1)
+      await gate
+    })
+    const rest = [2, 3, 4].map((n) =>
+      enqueueBackfill("pf", async () => {
+        order.push(n)
+      }),
+    )
+
+    await vi.advanceTimersByTimeAsync(0)
+    release()
+    await Promise.all([first, ...rest])
+    // latest state wins: the three extra requests collapse to one pass
+    expect(order).toEqual([1, 4])
   })
 })
