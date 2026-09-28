@@ -32,6 +32,7 @@ import {
 } from "./instruments-fx.js"
 import { cashBalanceSeries, dailyExternalFlows } from "./cashLedger.js"
 import { enqueueBackfill } from "./backfill-runner.js"
+import { refreshQuotes } from "./quotes.js"
 import {
   recomputeReturnColumns,
   syncCurrentValueFromSnapshots,
@@ -944,6 +945,44 @@ export async function recalcPortfolioHistory(
     })
 
     throwIfAborted(signal)
+    // §72.6 — a rebuild must leave the portfolio PRICED, not merely charted.
+    //
+    // The batch above is computed from price BARS, so it never reads
+    // `positions.market_value`. That made a rebuild look complete while the live
+    // headline stayed wrong: after the 2026-09-28 wipe every portfolio had a full
+    // 18,488-row history and 99 of 99 open positions still had `market_value` NULL,
+    // so the headline excluded all of them and warned "96 positions could not be
+    // priced". Two paths answer "what is this worth" and, after an import, only
+    // one of them had a writer — `refreshQuotes` fires on portfolio-open or the
+    // 13:00/17:20 crons, and an import triggers neither.
+    //
+    // This is §70's shape one level up: two code paths answering the same
+    // question, and the one that is not maintained is the one the user sees.
+    //
+    // Ordering is load-bearing and NOT cosmetic:
+    //   - it must run AFTER the DELETE+rebuild above, because that transaction
+    //     removes every snapshot for the portfolio; refreshing first would have
+    //     its today-row deleted underneath it.
+    //   - it must run BEFORE `syncCurrentValueFromSnapshots`, or `current_value`
+    //     is synced from yesterday while the positions carry today's prices.
+    //
+    // `refreshQuotes` upserts today's snapshot itself (snapshot-on-read) and never
+    // throws, so this cannot fail a pass — a portfolio that cannot be priced ends
+    // up marked `fallback`, which is visible, rather than absent.
+    //
+    // The price is then fresh for STALE_MS (15 min), so the next portfolio-open
+    // skips the per-position instruments fetch entirely — which is why this is
+    // slower now and faster afterwards rather than just slower.
+    const [owner] = await db
+      .select({ userId: portfolios.userId })
+      .from(portfolios)
+      .where(eq(portfolios.id, portfolioId))
+      .limit(1)
+    if (owner) {
+      await refreshQuotes(db, owner.userId, portfolioId, authToken)
+      throwIfAborted(signal)
+    }
+
     await recomputeReturnColumns(db, portfolioId)
     // §53.5 — keep portfolios.current_value in step (0 when history cleared)
     await syncCurrentValueFromSnapshots(db, portfolioId)

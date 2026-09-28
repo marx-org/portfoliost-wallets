@@ -12,7 +12,6 @@ import {
 } from "../db/schema.js"
 import { preferredBaseCurrency } from "../services/preferences.js"
 import { dominantPriceSource, oldestPriceAsOf, splitPortfolioValue } from "../services/valuation.js"
-import { refreshQuotes } from "../services/quotes.js"
 import { getPortfolioNews } from "../services/portfolioNews.js"
 import { getPortfolioCalendar } from "../services/portfolioCalendar.js"
 import { runBackfill, runBackfillRecent, getBackfillStatus, getGapSymbols, buildBenchmarkSeries, forcePortfolioRecalc, hasBackfillableHistory } from "../services/backfill.js"
@@ -846,8 +845,22 @@ async function resolveAggregateBase(
     metrics.totalReturnAmount = Number(p.currentValue) - metrics.totalInvested
     metrics.returnBasis = metrics.totalInvested
 
-    // D58: refresh live quotes before building position summaries
-    await refreshQuotes(database, identity.id, p.id, c.req.header("Authorization") ?? "")
+    // D58 used to `await refreshQuotes(...)` here, so every portfolio open paid
+    // two instruments calls per open position (quote + profile) inside the
+    // request. That is the read path: it made browsing a portfolio cost a
+    // network round trip per holding, on a page the user may open repeatedly,
+    // to move a number by a few percent.
+    //
+    // Prices now come from the writers, and the route reports what they last
+    // stored: the 13:00/17:20 scheduled syncs, and every rebuild (§72.6, which
+    // prices at the end of a recalc — so a wipe-and-reimport leaves the portfolio
+    // fully priced instead of 99 unpriced positions). `priceAsOf` and
+    // `priceSource` already travel with each position, so a figure that has not
+    // moved since yesterday says so rather than pretending otherwise — which is
+    // §70's rule applied to freshness: label it, do not fabricate it.
+    //
+    // The summaries below are built entirely from stored columns, so nothing
+    // here depends on a refresh having just run.
 
     // Fetch position summaries
     const posRows = await database

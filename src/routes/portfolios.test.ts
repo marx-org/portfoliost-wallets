@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from "vitest"
+import { afterEach, describe, expect, it, vi } from "vitest"
 import { Hono } from "hono"
 import { createPortfolioRoutes } from "./portfolios.js"
 import { makeHarness } from "./test-utils.js"
@@ -156,6 +156,51 @@ describe("Portfolio CRUD (§15 Phase B)", () => {
     expect(body.positionCount).toBe(1)
     expect(body.metrics.positionCount).toBe(1)
     expect(body.metrics.openPositions).toBe(1)
+  })
+
+  it("GET /api/portfolios/:id — the read path does NOT call instruments (§72.6)", async () => {
+    // Opening a portfolio used to await refreshQuotes, costing two instruments
+    // calls per open position inside the request. Freshness now belongs to the
+    // writers (the 13:00/17:20 syncs and every rebuild), and the route reports
+    // what they last stored. A test that fails if the fetch comes back, because
+    // "it is only one extra call" is how a read path grows a network dependency.
+    const h = await makeHarness()
+    const a = app(h.db)
+    const created = await (
+      await a.request("/api/portfolios", {
+        method: "POST",
+        headers: h.headers,
+        body: JSON.stringify({ name: "NoFetch", currency: "USD" }),
+      })
+    ).json()
+    await h.db.insert(positions).values({
+      userId: h.user.id,
+      portfolioId: created.id,
+      symbol: "AAPL",
+      companyName: "Apple Inc",
+      quantity: "10",
+      averageCostBasis: "150",
+      instrumentCurrency: "USD",
+      // a stored price from an earlier writer, deliberately older than STALE_MS
+      currentPrice: "181.20",
+      marketValue: "1812.00",
+      priceSource: "quote",
+      priceAsOf: new Date("2026-09-20T09:00:00Z"),
+    })
+
+    const fetchSpy = vi.fn(() => Promise.resolve(new Response("{}", { status: 200 })))
+    vi.stubGlobal("fetch", fetchSpy)
+
+    const res = await a.request(`/api/portfolios/${created.id}`, { headers: h.headers })
+    expect(res.status).toBe(200)
+    expect(fetchSpy, "portfolio open must not reach instruments").not.toHaveBeenCalled()
+
+    // …and it still serves the last stored price, with its provenance, rather
+    // than nulling the position because nothing was fetched.
+    const [pos] = (await res.json()).positions
+    expect(pos.marketValue).toBe(1812)
+    expect(pos.currentPrice).toBe(181.2)
+    vi.unstubAllGlobals()
   })
 
   it("GET /api/portfolios/:id — foreign portfolio → 404", async () => {
