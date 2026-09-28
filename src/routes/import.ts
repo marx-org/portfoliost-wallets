@@ -21,6 +21,7 @@ import {
 import { preferredBaseCurrency } from "../services/preferences.js"
 import { nextPaletteColor } from "./labels.js"
 import { ISO_CURRENCY } from "../services/currency.js"
+import { notifyTransactionsChanged } from "../services/recalc-queue.js"
 import type { components } from "../generated/api-types.js"
 
 type ImportPortfolioBootstrapResponse = components["schemas"]["ImportPortfolioBootstrapResponse"]
@@ -583,6 +584,35 @@ export function createImportRoutes(db?: DB) {
         },
       })
       .returning()
+
+    // §69.3 — a bulk import MUST re-backfill what it touched.
+    //
+    // The single-transaction routes in portfolio-transactions.ts all call
+    // notifyTransactionsChanged, but this bulk route did not — and this is the
+    // route sheets-sync actually uses. So after a wipe & re-import nothing
+    // rebuilt history: the only automatic revaluation was the twice-daily
+    // snapshotsync, which re-values the LAST TWO DAYS. A backdated row inserted
+    // by an import therefore had its whole cumulative effect stamped onto
+    // whichever snapshot happened to be written next, producing a cliff in the
+    // series and a step in the return (2026-09-28, PROD: a 15,777 PLN deposit
+    // missing since 2021 appearing all at once on the 09-27 row, in two
+    // portfolios at the same time).
+    //
+    // One notify per affected portfolio, AFTER the batches commit — not per row.
+    // The queue holds one slot per portfolio and the runner is serialized, so
+    // 10 portfolios cost 10 sequential rebuilds (~2 min measured), while a
+    // per-row notify would thrash that queue for no benefit. Fire-and-forget:
+    // the enqueue resolves when the slot is consumed, and failures are recorded
+    // in portfolio_backfill_metadata, so nothing here can fail the import.
+    for (const portfolioId of affectedPortfolios) {
+      notifyTransactionsChanged(database, portfolioId, c.req.header("Authorization") ?? "")
+    }
+    if (affectedPortfolios.size > 0) {
+      console.warn(
+        `[import] §69.3: re-backfill queued for ${affectedPortfolios.size} touched portfolio/plfolios ` +
+        `(full rebuild each, serialized) — a bulk import changes history, not just today.`,
+      )
+    }
 
     return c.json({
       inserted,

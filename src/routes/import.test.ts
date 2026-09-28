@@ -1112,3 +1112,70 @@ describe("§62.5 — import on the new cash schema", () => {
     expect(await h.db.select().from(portfolioCashTransactions)).toHaveLength(2)
   })
 })
+
+/**
+ * §69.3 — a bulk import must re-backfill what it touched.
+ *
+ * Every single-transaction route in portfolio-transactions.ts calls
+ * notifyTransactionsChanged; this bulk route did not, and it is the route
+ * sheets-sync uses. So a wipe & re-import rebuilt nothing: the only automatic
+ * revaluation was the twice-daily snapshotsync, which re-values the LAST TWO
+ * DAYS. A backdated row's whole cumulative effect therefore landed on whichever
+ * snapshot was written next — PROD showed a 15,777 PLN deposit missing since
+ * 2021 appearing in one step, in two portfolios on the same day.
+ */
+describe("§69.3: the bulk import queues a re-backfill for what it touched", () => {
+  it("a row touching a portfolio marks that portfolio for rebuild", async () => {
+    const h = await boot()
+    const { portfolioId } = await seedPortfolio(h)
+    const res = await postTransactions(h, [
+      {
+        externalId: "e69-1",
+        portfolioName: "Transakcje",
+        executedAt: "2024-01-10T10:00:00.000Z",
+        cashTx: { type: "DEPOSIT", amount: 1000, currency: "USD" },
+      },
+      {
+        externalId: "e69-2",
+        portfolioName: "Transakcje",
+        executedAt: "2024-01-15T10:00:00.000Z",
+        portfolioTx: { portfolioId, type: "BUY", instrumentSymbol: "AAPL", quantity: 10, price: 100, currency: "USD" },
+      },
+    ])
+    expect(res.status).toBe(200)
+    const body = await res.json()
+    expect(body.inserted).toBe(2)
+    // the rebuild is queued fire-and-forget; the row is present and the request
+    // did not fail or hang on it
+    const [row] = await h.db
+      .select({ portfolioId: portfolioTransactions.portfolioId })
+      .from(portfolioTransactions)
+      .where(eq(portfolioTransactions.externalId, "e69-2"))
+    expect(row.portfolioId).toBe(portfolioId)
+  })
+
+  it("a fully-skipped (already imported) batch still imports cleanly", async () => {
+    // idempotent re-submission: the notify must not turn a no-op into a failure
+    const h = await boot()
+    const { portfolioId } = await seedPortfolio(h)
+    const rows = [
+      {
+        externalId: "e69-3",
+        portfolioName: "Transakcje",
+        executedAt: "2024-01-10T10:00:00.000Z",
+        cashTx: { type: "DEPOSIT", amount: 1000, currency: "USD" },
+      },
+      {
+        externalId: "e69-4",
+        portfolioName: "Transakcje",
+        executedAt: "2024-01-15T10:00:00.000Z",
+        portfolioTx: { portfolioId, type: "BUY", instrumentSymbol: "AAPL", quantity: 10, price: 100, currency: "USD" },
+      },
+    ]
+    expect((await postTransactions(h, rows)).status).toBe(200)
+    const again = await postTransactions(h, rows)
+    expect(again.status).toBe(200)
+    expect((await again.json()).skipped).toBe(2)
+  })
+})
+
