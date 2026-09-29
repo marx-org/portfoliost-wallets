@@ -1171,3 +1171,66 @@ describe("§72.15 — a bar's own currency beats the stored instrument_currency"
     expect(bars).toHaveLength(1)
   })
 })
+
+describe("§72.16 — bars instruments could not convert are not valued", () => {
+  beforeEach(() => {
+    process.env.INSTRUMENTS_URL = "http://instruments:3000"
+  })
+  afterEach(() => {
+    vi.unstubAllGlobals()
+    delete process.env.INSTRUMENTS_URL
+    __resetBackfillRunnerForTests()
+  })
+
+  it("drops the unconverted prefix instead of adding a USD close to a PLN total", async () => {
+    // The real BTC-USD response, verbatim shape: fxFrom 02-14, and 02-13 left at
+    // the raw USD close while every later day is converted.
+    const { db, user } = await makeHarness("fx-user-1")
+    const pf = await seedPortfolio(db, user.id, "PLN")
+    __resetBackfillRunnerForTests()
+
+    await db.insert(portfolioTransactions).values({
+      userId: user.id, portfolioId: pf.id, type: "BUY", instrumentSymbol: "BTC-USD",
+      quantity: "0.004", price: "172660", currency: "PLN", instrumentCurrency: "PLN",
+      totalAmount: "690.64", executedAt: new Date("2022-02-13T12:00:00Z"),
+    })
+    await db.insert(portfolioCashTransactions).values({
+      userId: user.id, portfolioId: pf.id, type: "DEPOSIT",
+      amount: "690.64", currency: "PLN", transactionDate: "2022-02-13",
+    })
+    await seedPosition(db, user.id, pf.id, "BTC-USD", 0.004, 172660)
+
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockImplementation((url: string) => {
+        const u = String(url)
+        const wants = new URL(u, "http://x").searchParams.get("currency")
+        const json = wants
+          ? {
+              symbol: "BTC-USD", stale: false, currency: "PLN", fxFrom: "2022-02-14",
+              dates: ["2022-02-13", "2022-02-14", "2022-02-15"],
+              // 02-13 left raw by convertSeries; the rest converted at ~4.01
+              closes: [42197.5156, 170859.4978, 176949.2152],
+            }
+          : {
+              symbol: "BTC-USD", stale: false, currency: "USD", fxFrom: null,
+              dates: ["2022-02-13", "2022-02-14", "2022-02-15"],
+              closes: [42197.5156, 42586.918, 44575.2031],
+            }
+        return Promise.resolve({ ok: true, status: 200, json: async () => json })
+      }),
+    )
+
+    await runBackfill(db, pf.id, "Bearer test", new Date("2022-02-16T00:00:00Z"))
+
+    const rows = await db
+      .select()
+      .from(valueSnapshots)
+      .where(eq(valueSnapshots.portfolioId, pf.id))
+      .orderBy(valueSnapshots.snapshotDate)
+    // 02-13 carries forward the first CONVERTED close: 0.004 × 170,859.50 = 683.44.
+    // The raw USD close would have read 168.79 and the day would have looked
+    // like a -75% crash.
+    expect(Number(rows[0].value)).toBeCloseTo(683.44, 1)
+  })
+})

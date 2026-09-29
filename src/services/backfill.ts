@@ -49,6 +49,10 @@ interface PriceBarSeries {
   closes: number[]
   stale: boolean
   currency?: string | null
+  /** §72.16 — the first date instruments could actually convert. Bars before it
+   * are still in the SOURCE currency while the response declares the target for
+   * the whole series, so a consumer that trusts `currency` silently mixes two. */
+  fxFrom?: string | null
 }
 
 async function fetchPriceBars(
@@ -93,6 +97,29 @@ async function fetchPriceBars(
   // A 200 with zero dates is a legitimate answer: the symbol genuinely has no
   // price history, which surfaces as a gap rather than an aborted pass.
   return (await res.json()) as PriceBarSeries
+}
+
+/**
+ * §72.16 — drop bars that instruments could not convert.
+ *
+ * `convertSeries` keeps a bar in its SOURCE currency when no rate row exists for
+ * that date ("floor semantics, no carry-forward"), while the response declares
+ * `currency: <target>` for the whole series and `fxFrom` as the first date it
+ * managed. BTC-USD converted to PLN over 2022-02-13..21 returns
+ * `fxFrom: 2022-02-14` and leaves 02-13 at a raw 42,197.5156 where its
+ * neighbours are ~170,859 — a USD number labelled PLN, off by the FX rate.
+ *
+ * The grid multiplies that straight into a portfolio total, which is where
+ * Crypto's +410% single-day jumps came from. Cutting the unconverted prefix
+ * leaves a gap that `buildPriceMap` already carries forward from the first
+ * genuinely-converted close, which is at least honest about the currency.
+ */
+function dropUnconvertedPrefix(series: PriceBarSeries): PriceBarSeries {
+  if (!series.fxFrom) return series
+  const from = series.fxFrom
+  const keep = series.dates.findIndex((d) => d >= from)
+  if (keep <= 0) return series
+  return { ...series, dates: series.dates.slice(keep), closes: series.closes.slice(keep) }
 }
 
 /**
@@ -188,7 +215,7 @@ export async function fetchPriceSeries(
         if (converted && converted.dates.length > 0) series = converted
       }
 
-      if (series && series.dates.length > 0) out.set(symbols[i], series)
+      if (series && series.dates.length > 0) out.set(symbols[i], dropUnconvertedPrefix(series))
     }
   }
   const workers = Math.min(PRICE_FETCH_CONCURRENCY, symbols.length)
