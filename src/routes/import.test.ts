@@ -1241,3 +1241,60 @@ describe("§72.13 — position dates come from the trade, not the import", () =>
     expect(pos.closedAt?.toISOString()).toBe("2022-09-26T10:00:00.000Z")
   })
 })
+
+describe("§72.8 — a resolved listing currency beats the payment currency", () => {
+  // Crypto bought 0.004 BTC-USD for 690.64 PLN, and the import stored
+  // instrument_currency=PLN — the currency it was PAID in. The history grid then
+  // asked instruments for no conversion and multiplied a USD close into a PLN
+  // total: 168.79 where it is 675.16 (§72.15). The two currencies legitimately
+  // differ; only the listing one says what a price for the instrument means.
+  it("stores the listing currency, not the payment currency", async () => {
+    const h = await boot()
+    const { portfolioId } = await seedPortfolio(h)
+
+    const res = await postTransactions(h, [
+      buyRow(portfolioId, { currency: "PLN", listingCurrency: "USD" }),
+    ])
+    expect(res.status).toBe(200)
+
+    const [pos] = await h.db.select().from(positions).where(eq(positions.portfolioId, portfolioId))
+    expect(pos.instrumentCurrency).toBe("USD")
+  })
+
+  it("falls back to the payment currency when the importer does not know", async () => {
+    const h = await boot()
+    const { portfolioId } = await seedPortfolio(h)
+
+    await postTransactions(h, [buyRow(portfolioId, { currency: "PLN" })])
+    const [pos] = await h.db.select().from(positions).where(eq(positions.portfolioId, portfolioId))
+    expect(pos.instrumentCurrency).toBe("PLN")
+  })
+
+  it("rejects a listingCurrency that is not an ISO code rather than storing it", async () => {
+    const h = await boot()
+    const { portfolioId } = await seedPortfolio(h)
+
+    const res = await postTransactions(h, [
+      buyRow(portfolioId, { currency: "PLN", listingCurrency: "zloty" }),
+    ])
+    expect(res.status).toBe(422)
+  })
+
+  it("a GBP listing paid in PLN keeps both", async () => {
+    // The CSN.L shape: a real broker trade in a GBP-listed stock settled in PLN.
+    const h = await boot()
+    const { portfolioId } = await seedPortfolio(h)
+
+    await postTransactions(h, [
+      buyRow(portfolioId, { currency: "PLN", listingCurrency: "GBP" }),
+    ])
+    const [tx] = await h.db
+      .select()
+      .from(portfolioTransactions)
+      .where(eq(portfolioTransactions.portfolioId, portfolioId))
+    const [pos] = await h.db.select().from(positions).where(eq(positions.portfolioId, portfolioId))
+    expect(tx.currency).toBe("PLN")          // paid in PLN
+    expect(tx.instrumentCurrency).toBe("GBP") // trades in GBP
+    expect(pos.instrumentCurrency).toBe("GBP")
+  })
+})

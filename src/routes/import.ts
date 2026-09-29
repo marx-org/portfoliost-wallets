@@ -105,6 +105,15 @@ const ImportPortfolioTxSchema = z
     originalQuantity: z.number().positive().nullable().optional(),
     originalPrice: z.number().positive().nullable().optional(),
     currency: z.string().regex(ISO_CURRENCY, "currency must be an ISO 4217 code"),
+    // §72.8 — the currency the instrument TRADES in, when the importer resolved
+    // it. `currency` is the currency the trade was PAID in, and those are not
+    // the same thing: a broker will sell a GBP-listed stock priced in PLN, and
+    // the Crypto portfolio bought 0.004 BTC-USD for 690.64 PLN. Storing the
+    // payment currency as the instrument's own is what made the history grid ask
+    // instruments for no conversion and multiply a USD close into a PLN total
+    // (§72.15). A provider-resolved listing currency must win; `currency` is only
+    // the fallback, and only because the sheet often knows nothing else.
+    listingCurrency: z.string().regex(ISO_CURRENCY, "listingCurrency must be an ISO 4217 code").nullable().optional(),
     fees: z.number().nonnegative().nullable().optional(),
     feesType: z.enum(["fixed", "pct"]).nullable().optional(),
     taxes: z.number().nullable().optional(),
@@ -181,6 +190,8 @@ async function upsertImportPositionOnBuy(
     currency: string
     assetType: string
     feesSettled: number
+    /** §72.8 — the instrument's listing currency when the importer resolved it. */
+    listingCurrency?: string | null
     /** §72.13 — the TRADE's date, which is when the lot opened. */
     executedAt: Date
     direction?: "LONG" | "SHORT" | null
@@ -224,7 +235,7 @@ async function upsertImportPositionOnBuy(
         quantity: String(newQty),
         averageCostBasis: String(newAvgCost),
         companyName: body.instrumentName ?? existing.companyName,
-        instrumentCurrency: body.currency,
+        instrumentCurrency: body.listingCurrency?.toUpperCase() ?? body.currency,
         assetType: body.assetType ?? existing.assetType,
         sector: body.sector ?? existing.sector,
         industry: body.industry ?? existing.industry,
@@ -246,7 +257,7 @@ async function upsertImportPositionOnBuy(
       companyName: body.instrumentName,
       quantity: String(body.quantity),
       averageCostBasis: String(body.price),
-      instrumentCurrency: body.currency,
+      instrumentCurrency: body.listingCurrency?.toUpperCase() ?? body.currency,
       assetType: body.assetType,
       contractSize: body.contractSize != null ? String(body.contractSize) : null,
       direction: body.direction ?? null,
@@ -976,6 +987,10 @@ async function insertImportPortfolioTx(
   const executedAt = ptx.executedAt ? new Date(ptx.executedAt) : new Date(row.executedAt)
   const symbol = ptx.instrumentSymbol.toUpperCase()
   const txCcy = ptx.currency.toUpperCase()
+  // §72.8 — null/absent means "the importer does not know", and then we fall back
+  // to the payment currency as before. Never guess a listing currency: an
+  // unknown one is a visible gap, a wrong one silently misprices the position.
+  const listingCcy = ptx.listingCurrency ? ptx.listingCurrency.toUpperCase() : txCcy
   const notional = ptx.quantity * ptx.price
   const feesSettled = settleImportFees(ptx.fees, ptx.feesType, notional)
   const rate = ptx.exchangeRate ?? 1
@@ -1029,6 +1044,7 @@ async function insertImportPortfolioTx(
       currency: txCcy,
       assetType: ptx.assetType,
       feesSettled,
+      listingCurrency: ptx.listingCurrency,
       executedAt,
       direction: ptx.direction ?? null,
       optionType: ptx.optionType ?? null,
@@ -1094,7 +1110,10 @@ async function insertImportPortfolioTx(
       originalQuantity: scale8(ptx.originalQuantity ?? ptx.quantity),
       originalPrice: scale8(ptx.originalPrice ?? ptx.price),
       currency: txCcy,
-      instrumentCurrency: txCcy,
+      // §72.8 — a resolved listing currency beats the payment currency. Both
+      // may legitimately differ, and when they do it is the listing currency that
+      // decides what a price for the instrument means.
+      instrumentCurrency: listingCcy,
       assetType: ptx.assetType,
       fees: ptx.fees != null ? scale8(ptx.fees) : null,
       feesType: ptx.feesType ?? null,
