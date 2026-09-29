@@ -46,7 +46,11 @@ export interface TradeRow {
   price: number
   currency: string
   instrumentCurrency: string | null
+  type?: string
   exchangeRate?: number | null
+  /** §72.18 — the source row's id; a SELL sharing a base with an EXPIRATION is
+   * an option premium, not a share trade. */
+  externalId?: string | null
 }
 
 export interface TradeVerdict {
@@ -293,7 +297,9 @@ async function main() {
              to_char(t.executed_at at time zone 'UTC', 'YYYY-MM-DD') as date,
              t.price::float8 as price, t.currency as currency,
              t.instrument_currency as "instrumentCurrency",
-             t.exchange_rate::float8 as "exchangeRate"
+             t.exchange_rate::float8 as "exchangeRate",
+             t.external_id as "externalId",
+             t.type as type
       from portfolios.transactions t
       join portfolios.portfolios pf on pf.id = t.portfolio_id
       where t.type in ('BUY','SELL') and t.price is not null and t.price <> 0
@@ -301,13 +307,40 @@ async function main() {
         ${only ? sql`and pf.name = ${only}` : sql``}
       order by t.instrument_symbol, t.executed_at`)) as unknown as TradeRow[]
 
+    // §72.18 — an option premium is not a share trade, and comparing it with a
+    // share price is a guaranteed false positive.
+    //
+    // A SELL of 100 at 1.04-1.30 with a sibling EXPIRATION at 0 whose
+    // externalId is the SELL's plus "#e" is the premium leg of an option, not a
+    // disposal of 100 shares. The share bar for the same day is ~150, so the
+    // audit read -99.3% on five SAP.DE rows and reported them as price
+    // mismatches. Equate+ has five such pairs.
+    //
+    // This is the same pairing §72.14 uses to stop them disposing of the equity
+    // lot, read from the other end: there the leg was wrongly counted as shares,
+    // here the leg was wrongly counted as a share-sized trade.
+    const optionLegIds = new Set<string>()
+    const expRows = (await db.execute(sql`
+      select t.external_id as "externalId"
+      from portfolios.transactions t
+      ${only ? sql`join portfolios.portfolios pf on pf.id = t.portfolio_id` : sql``}
+      where t.type = 'EXPIRATION' and t.external_id is not null
+        ${only ? sql`and pf.name = ${only}` : sql``}`)) as unknown as Array<{ externalId: string }>
+    for (const r of expRows) optionLegIds.add(r.externalId.replace(/#e$/, ""))
+
     // One history call per symbol, reused across every trade in it.
     const symbols = [...new Set(trades.map((t) => t.symbol))]
     const barCache = new Map<string, Awaited<ReturnType<typeof fetchNativeBars>>>()
     for (const sym of symbols) barCache.set(sym, await fetchNativeBars(sym, token))
 
     const bySymbol = new Map<string, Array<Omit<TradeVerdict, "fxHint">>>()
+    let optionLegsSkipped = 0
     for (const t of trades) {
+      // §72.18 — skip option premium legs; they have no share price to compare.
+      if (t.type === "SELL" && t.externalId && optionLegIds.has(t.externalId)) {
+        optionLegsSkipped++
+        continue
+      }
       const { bars, claimedCurrency } = barCache.get(t.symbol)!
       const hit = pickBar(bars, t.date)
       const list = bySymbol.get(t.symbol) ?? []
@@ -382,6 +415,12 @@ async function main() {
             `sent in Authorization; anything else goes as X-Service-Token and is rejected).\n`,
         )
       } else if (unverifiable.length > 0) {
+        if (optionLegsSkipped > 0) {
+          console.log(
+            `[price-audit] ${optionLegsSkipped} option premium leg(s) skipped ` +
+              `(SELLs sharing a base with an EXPIRATION — §72.18).\n`,
+          )
+        }
         console.log(
           `[price-audit] WARNING: ${unverifiable.length} symbol(s) have no bars and were NOT checked ` +
             `(${unverifiable.reduce((n, r) => n + r.checked, 0)} trades). ` +
@@ -389,7 +428,13 @@ async function main() {
         )
       }
       if (flagged.length === 0 && checked > 0) {
-        console.log(`[price-audit] all ${checked} checked trades reconcile with their bar.\n`)
+        console.log(
+          `[price-audit] all ${checked} checked trades reconcile with their bar` +
+            (optionLegsSkipped > 0
+              ? ` (${optionLegsSkipped} option premium leg(s) skipped — not share trades)`
+              : "") +
+            `\n`,
+        )
       }
       for (const r of flagged) {
         console.log(

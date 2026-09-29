@@ -257,3 +257,27 @@ describe("credential → header routing (§72.8)", () => {
     expect(h["X-Service-Token"]).toBe("eyJhbGciOi.payload.sig")
   })
 })
+
+describe("§72.18 — option premium legs are not share trades", () => {
+  it("skips a SELL that shares a base with an EXPIRATION", () => {
+    // Equate+/SAP.DE traded options in 2022: a SELL of 100 at 1.04-1.30 paired
+    // with an EXPIRATION at 0 whose externalId is the SELL's plus "#e". Against
+    // a share bar near 150 that read -99.3% and was reported as a price
+    // mismatch, five times. The lot ledger closes both against a SHORT option
+    // lot; there is no share trade to reconcile.
+    const legIds = new Set(["opt-1", "opt-2"]) // built from EXPIRATION ids, "#e" stripped
+    const isLeg = (t: { type?: string; externalId?: string | null }) =>
+      t.type === "SELL" && !!t.externalId && legIds.has(t.externalId)
+
+    expect(isLeg({ type: "SELL", externalId: "opt-1" })).toBe(true)
+    expect(isLeg({ type: "SELL", externalId: "real-sell" })).toBe(false)
+    expect(isLeg({ type: "BUY", externalId: "opt-1" })).toBe(false) // a BUY leg is a real purchase
+  })
+
+  it("only a SELL with the shared base is a leg", () => {
+    // "opt-1" and "opt-1#e" are the pair; the EXPIRATION row is what puts the
+    // base in the set, so a bare EXPIRATION must not make an unrelated SELL a leg.
+    const legIds = new Set(["352caf673c34433e91a808f08f368cd2b75023f52fe221e67abbf88d0ebbc096"])
+    expect(legIds.has("352caf673c34433e91a808f08f368cd2b75023f52fe221e67abbf88d0ebbc096#e")).toBe(false)
+  })
+})
