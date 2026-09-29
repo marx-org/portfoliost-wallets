@@ -69,7 +69,13 @@ function buyRow(
 }
 
 describe("POST /api/import/portfolios/bootstrap (§23.3)", () => {
-  it("creates a portfolio tagged with externalSource; second call is idempotent", async () => {
+  // 30s: this is the first test in the file, so it pays for `boot()` — harness,
+  // schema migration and a real Postgres — before it asserts anything. Under a
+  // full-suite run that contends with the other 28 files for the database and it
+  // intermittently blew vitest's 5s DEFAULT timeout, which reads as a logic
+  // failure and is not one: standalone the file's 50 tests pass in 23s. Observed
+  // twice, never reproduced once it was given room.
+  it("creates a portfolio tagged with externalSource; second call is idempotent", { timeout: 30_000 }, async () => {
     const h = await boot()
     const call = () =>
       h.app.request("/api/import/portfolios/bootstrap", {
