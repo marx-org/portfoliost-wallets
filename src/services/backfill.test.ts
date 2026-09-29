@@ -547,6 +547,64 @@ describe("§63.8 — backfill records held-but-unpriced symbols (no silent under
   })
 })
 
+describe("§72.30 — a gap anywhere in the window is reported, not just on the last day", () => {
+  beforeEach(() => {
+    process.env.INSTRUMENTS_URL = "http://instruments:3000"
+  })
+  afterEach(() => {
+    vi.unstubAllGlobals()
+    delete process.env.INSTRUMENTS_URL
+    __resetBackfillRunnerForTests()
+  })
+
+  it("flags a symbol that was held and unpriced EARLIER in the window, then sold", async () => {
+    const { db, user } = await makeHarness("early-gap-user-1")
+    const pf = await seedPortfolio(db, user.id)
+    // ILLIQ is bought and sold inside the window and never has a bar (PROD: the
+    // four IKE Marek bonds whose upstream returns a permanent 404). It contributes
+    // nothing while held, so every day of the hold is under-reported.
+    await seedBuy(db, user.id, pf.id, "ILLIQ", 10, 100, "2026-07-01")
+    await seedSell(db, user.id, pf.id, "ILLIQ", 10, 120, "2026-07-02")
+    // AAA is still held on the last day, so the pass is valuable and must not abort.
+    await seedBuy(db, user.id, pf.id, "AAA", 10, 100, "2026-07-01")
+
+    mockPriceBars({ AAA: { dates: ["2026-07-01", "2026-07-02"], closes: [100, 110] } })
+
+    await runBackfill(db, pf.id, "Bearer t", new Date("2026-07-03T00:00:00Z"))
+
+    // Before this fix ILLIQ was closed by the last day, so the last-day-only scan
+    // saw nothing and the backfill recorded status=complete over an under-reported
+    // history — the IKE Marek 2022-06-13 +152% chart spike.
+    const [meta] = await db
+      .select({ gapSymbols: portfolioBackfillMetadata.gapSymbols, status: portfolioBackfillMetadata.status })
+      .from(portfolioBackfillMetadata)
+      .where(eq(portfolioBackfillMetadata.portfolioId, pf.id))
+    expect(meta?.gapSymbols).toEqual(["ILLIQ"])
+    // Still completes: a permanently unpriceable symbol must not strand the portfolio.
+    expect(meta?.status).toBe("complete")
+  })
+
+  it("does not flag a symbol that was never held inside the window", async () => {
+    const { db, user } = await makeHarness("early-gap-user-2")
+    const pf = await seedPortfolio(db, user.id)
+    await seedBuy(db, user.id, pf.id, "AAA", 10, 100, "2026-07-01")
+    await seedBuy(db, user.id, pf.id, "AAA", 10, 100, "2026-07-01")
+    await seedSell(db, user.id, pf.id, "CLOSED", 5, 200, "2026-07-01")
+    await seedBuy(db, user.id, pf.id, "AAA", 5, 100, "2026-07-02")
+
+    mockPriceBars({ AAA: { dates: ["2026-07-01", "2026-07-02"], closes: [100, 110] } })
+
+    await runBackfill(db, pf.id, "Bearer t", new Date("2026-07-03T00:00:00Z"))
+
+    const [meta] = await db
+      .select({ gapSymbols: portfolioBackfillMetadata.gapSymbols })
+      .from(portfolioBackfillMetadata)
+      .where(eq(portfolioBackfillMetadata.portfolioId, pf.id))
+    // CLOSED is net zero across the window, so it is never held and never a gap.
+    expect(meta?.gapSymbols ?? null).toBeNull()
+  })
+})
+
 describe("recalcPortfolioHistory (background recalc on transaction changes)", () => {
   beforeEach(() => {
     process.env.INSTRUMENTS_URL = "http://instruments:3000"

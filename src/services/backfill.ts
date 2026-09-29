@@ -584,19 +584,35 @@ export interface SnapshotRow {
  */
 export interface SnapshotBatch {
   rows: SnapshotRow[]
+  /**
+   * §72.30 — **window-wide**. Every symbol that was held on *any* day of the
+   * window and lacked a price on at least one of those days. `length > 0` means
+   * the stored value is a **partial** sum for part of the history.
+   *
+   * This is deliberately NOT the abort input: it is a report, and it spans days
+   * the pass is not deciding about. Use `unpricedLastDay` for that.
+   */
   gapSymbols: string[]
   /**
    * §63.10 — held symbols the pass was asked to price (qty > 0 on the window's
-   * last day). `gapSymbols.length === heldSymbols` means the pass priced *nothing*,
+   * last day). `unpricedLastDay === heldSymbols` means the pass priced *nothing*,
    * which is never a legitimate result: it is what a transport/auth failure looks
    * like once it has been collapsed into "no data". A genuinely all-cash
    * portfolio has `heldSymbols === 0` and is unaffected.
    */
   heldSymbols: number
+  /**
+   * §72.30 — how many of those last-day-held symbols had no price. Kept separate
+   * from `gapSymbols` so that a mid-window gap (an illiquid bond that was later
+   * sold) can be reported honestly without tripping the abort: before this split,
+   * a portfolio whose live holdings all priced fine but which held an unpriceable
+   * bond earlier would be judged "priced nothing" and lose its entire history.
+   */
+  unpricedLastDay: number
 }
 
 /** No history to backfill (no BUY/SELL or cash yet) — shared by every guard. */
-const EMPTY_BATCH: SnapshotBatch = { rows: [], gapSymbols: [], heldSymbols: 0 }
+const EMPTY_BATCH: SnapshotBatch = { rows: [], gapSymbols: [], heldSymbols: 0, unpricedLastDay: 0 }
 
 /**
  * §63.10 — refuse to persist a pass that could not price a single held symbol.
@@ -622,7 +638,10 @@ export class UnpriceablePortfolioError extends Error {
 }
 
 export function isUnpriceable(batch: SnapshotBatch): boolean {
-  return batch.heldSymbols > 0 && batch.gapSymbols.length >= batch.heldSymbols
+  // §72.30 — last-day view only. Deliberately NOT gapSymbols.length: that is a
+  // window-wide report now, and a portfolio can be fully priced today while
+  // having held an unpriceable bond last year.
+  return batch.heldSymbols > 0 && batch.unpricedLastDay >= batch.heldSymbols
 }
 
 /**
@@ -889,18 +908,44 @@ export async function computeSnapshotBatch(
   const recalcDebug = process.env.RECALC_DEBUG === "1"
   const snapBatch: SnapshotRow[] = []
 
-  // §63.8 — a held symbol (qty > 0 on the window's last day) with NO price bar
-  // for the window is *dropped* from every day's value, so the stored series
-  // is a partial sum. Surface those symbols so the caller can flag the value as
-  // incomplete instead of silently under-reporting (the IKE Beata spike: 18/23
-  // symbols priced → 155k vs true 205k).
+  // §63.8 — a held symbol with NO price bar for a day is *dropped* from that
+  // day's value, so the stored series is a partial sum. Surface those symbols so
+  // the caller can flag the value as incomplete instead of silently
+  // under-reporting (the IKE Beata spike: 18/23 symbols priced → 155k vs true 205k).
+  //
+  // §72.30 — the gap scan covers EVERY day a symbol was held, not just the
+  // window's last day. Last-day-only meant a symbol that was held and unpriced
+  // *earlier* in the window went unreported, and the backfill still recorded
+  // `status=complete`. PROD (IKE Marek, 2022-06-13): four bonds whose upstream
+  // returns a permanent 404 (BST0922, INS0922, NVA0624, VOX0224) contributed
+  // nothing while held, so the value was understated by ~10.3k PLN; the sale
+  // turned them into cash at real proceeds and the chart showed a +152% "spike".
+  // By the last day they were closed, so the old check saw nothing to report.
   const lastDay = days[days.length - 1]
   const gapSymbols: string[] = []
   let heldCount = 0
+  let unpricedLastDay = 0
   for (const sym of symbols) {
-    if ((qtyMaps.get(sym)?.get(lastDay) ?? 0) <= 0) continue
-    heldCount += 1
-    if (!priceMaps.get(sym) || !priceMaps.get(sym)!.has(lastDay)) gapSymbols.push(sym)
+    const perDay = qtyMaps.get(sym)
+    if (!perDay) continue
+    const prices = priceMaps.get(sym)
+    // Abort accounting (§63.10) is deliberately still last-day-only: a symbol
+    // that cannot be priced today must not make the portfolio unvaluable, and
+    // these four bonds are permanently unpriceable upstream — aborting on them
+    // would strand the whole portfolio.
+    if ((perDay.get(lastDay) ?? 0) > 0) {
+      heldCount += 1
+      if (!prices || !prices.has(lastDay)) {
+        unpricedLastDay += 1
+        if (!gapSymbols.includes(sym)) gapSymbols.push(sym)
+      }
+    }
+    for (const day of days) {
+      if ((perDay.get(day) ?? 0) <= 0) continue
+      if (prices && prices.has(day)) continue
+      if (!gapSymbols.includes(sym)) gapSymbols.push(sym)
+      break
+    }
   }
 
   for (const day of days) {
@@ -951,7 +996,7 @@ export async function computeSnapshotBatch(
     }
   }
 
-  return { rows: snapBatch, gapSymbols, heldSymbols: heldCount }
+  return { rows: snapBatch, gapSymbols, heldSymbols: heldCount, unpricedLastDay }
 }
 
 async function _runBackfillCore(
