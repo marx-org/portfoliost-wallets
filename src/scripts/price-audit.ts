@@ -30,6 +30,7 @@
  */
 import { sql } from "drizzle-orm"
 import { getDb, closeDb } from "../db/index.js"
+import type { DB } from "../db/index.js"
 import { instrumentsAuthHeaders, resolveRates } from "../services/instruments-fx.js"
 
 /** Trades deviating from their bar by more than this are flagged. */
@@ -38,6 +39,32 @@ const DEFAULT_TOLERANCE = 0.1
 export const MAX_CARRY_DAYS = 7
 /** The ratio must sit this close to an FX rate before that pair is named. */
 const FX_HINT_TOLERANCE = 0.01
+
+/**
+ * §72.22 — write the run's findings to `admin.job_run` so the admin UI can serve
+ * them. Raw SQL because the wallets service does not own the `admin` schema; the
+ * table and its jsonb `details` column already exist and admin already reads it.
+ *
+ * Best-effort by design: a failure to persist must NOT fail the audit. Losing the
+ * report is unfortunate; failing a read-only audit that already ran is worse, and
+ * the caller still has the full findings on stdout.
+ */
+async function persistReport(db: DB, payload: Record<string, unknown>): Promise<void> {
+  try {
+    await db.execute(sql`
+      insert into admin.job_run (name, namespace, kind, status, details, started_at, updated_at)
+      values ('price-audit', 'pfire', 'price_audit', ${payload.status as string}, ${JSON.stringify(payload)}::jsonb, now(), now())
+      on conflict (name) do update set
+        status = excluded.status,
+        details = excluded.details,
+        updated_at = now()
+    `)
+  } catch (e) {
+    console.warn(
+      `[price-audit] could not persist the report to admin.job_run: ${e instanceof Error ? e.message : String(e)}`,
+    )
+  }
+}
 
 export interface TradeRow {
   portfolioName: string
@@ -392,12 +419,11 @@ async function main() {
     reports.sort((a, b) => Math.abs(b.worstDeviation) - Math.abs(a.worstDeviation))
     const flagged = reports.filter((r) => r.unreconciled > 0)
     const unverifiable = reports.filter((r) => r.unverifiable)
+    const checked = reports.reduce((n, r) => n + r.trades.filter((t) => t.barClose != null).length, 0)
 
     if (asJson) {
       console.log(JSON.stringify({ tolerance, flagged: flagged.length, reports }, null, 2))
     } else {
-      const checked = reports.reduce((n, r) => n + r.trades.filter((t) => t.barClose != null).length, 0)
-      const unverifiable = reports.filter((r) => r.unverifiable)
       console.log(
         `[price-audit] ${trades.length} BUY/SELL trades across ${symbols.length} symbols ` +
           `(tolerance ${(tolerance * 100).toFixed(0)}%)\n`,
@@ -462,6 +488,34 @@ async function main() {
         `[price-audit] ${flagged.length} symbol(s) need a venue override or a currency fix. Nothing was modified.`,
       )
     }
+    // §72.22 — persist the report so it is readable from the admin UI.
+    //
+    // The findings used to exist only in this process's stdout, which meant the
+    // Data quality card could start an audit and confirm it finished but could not
+    // show what it found — the one thing worth knowing. `admin.job_run.details` is
+    // already jsonb and admin already reads that table (the stooq job writes
+    // `latest_date`/`rows_deleted` into the same row), so the report lands beside
+    // the pod counts with no schema change and no migration.
+    //
+    // Scope note: this writes to job_run and to NOTHING else. The audit stays
+    // read-only with respect to portfolio data — that is what makes it safe to run
+    // against PROD unattended, and it would be a poor trade to give that up for a
+    // convenience feature.
+    await persistReport(db, {
+      status: "Succeeded",
+      trades: trades.length,
+      symbols: reports.length,
+      checked,
+      flagged: flagged.map((r) => r.symbol),
+      unverifiable: unverifiable.map((r) => r.symbol),
+      optionLegsSkipped,
+      reports: reports.map((r) => ({
+        symbol: r.symbol,
+        unreconciled: r.unreconciled,
+        unverifiable: r.unverifiable,
+        trades: r.trades,
+      })),
+    })
     process.exit(flagged.length > 0 && !exitZero ? 1 : 0)
   } catch (e) {
     console.error(`[price-audit] could not run: ${e instanceof Error ? e.message : String(e)}`)
