@@ -16,7 +16,9 @@ import { __resetBackfillRunnerForTests } from "./backfill-runner.js"
 
 // ── mock fetch for instruments price-bars ──────────────────────────────
 
-function mockPriceBars(series: Record<string, { dates: string[]; closes: number[] }>) {
+function mockPriceBars(
+  series: Record<string, { dates: string[]; closes: number[]; currency?: string; rateToBase?: number }>,
+) {
   vi.stubGlobal(
     "fetch",
     vi.fn().mockImplementation((url: string) => {
@@ -25,10 +27,22 @@ function mockPriceBars(series: Record<string, { dates: string[]; closes: number[
       // §63.10 — 404 is the documented "no data for this key" answer, so a symbol
       // with no series is a *gap*, not an aborted pass. Any other non-2xx aborts.
       if (!data) return Promise.resolve({ ok: false, status: 404, json: async () => ({}) })
+      // §72.15 — `?currency=<X>` is how the grid asks for a conversion, and the
+      // response states the currency of the closes it hands back.
+      const wants = new URL(String(url), "http://x").searchParams.get("currency")
+      const converted = wants && data.currency && data.currency !== wants
       return Promise.resolve({
         ok: true,
         status: 200,
-        json: async () => ({ symbol: sym, dates: data.dates, closes: data.closes, stale: false }),
+        json: async () => ({
+          symbol: sym,
+          dates: data.dates,
+          closes: converted
+            ? data.closes.map((c) => c * (data.rateToBase ?? 1))
+            : data.closes,
+          stale: false,
+          currency: converted ? wants : (data.currency ?? null),
+        }),
       })
     }),
   )
@@ -1092,5 +1106,68 @@ describe("§72.14 — option-premium legs do not reduce the share count", () => 
     expect(byDate.get("2026-07-01")).toBeCloseTo(15000, 0)
     expect(byDate.get("2026-07-02")).toBeCloseTo(16000, 0)
     expect(byDate.get("2026-07-03")).toBeCloseTo(16000, 0)
+  })
+})
+
+describe("§72.15 — a bar's own currency beats the stored instrument_currency", () => {
+  beforeEach(() => {
+    process.env.INSTRUMENTS_URL = "http://instruments:3000"
+  })
+  afterEach(() => {
+    vi.unstubAllGlobals()
+    delete process.env.INSTRUMENTS_URL
+    __resetBackfillRunnerForTests()
+  })
+
+  it("re-asks with a conversion when the closes come back in a foreign currency", async () => {
+    // The Crypto portfolio: 0.004 BTC-USD bought for 690.64 PLN, so the import
+    // stored instrument_currency=PLN — the PAYMENT currency, not the listing one.
+    // The grid asked for no conversion, got a USD close, and multiplied it as if
+    // it were PLN: ~172 instead of ~688.
+    const { db, user } = await makeHarness("ccy-user-1")
+    const pf = await seedPortfolio(db, user.id, "PLN")
+    __resetBackfillRunnerForTests()
+
+    await db.insert(portfolioTransactions).values({
+      userId: user.id, portfolioId: pf.id, type: "BUY", instrumentSymbol: "BTC-USD",
+      quantity: "0.004", price: "172660", currency: "PLN", instrumentCurrency: "PLN",
+      totalAmount: "690.64", executedAt: new Date("2022-02-13T12:00:00Z"),
+    })
+    await db.insert(portfolioCashTransactions).values({
+      userId: user.id, portfolioId: pf.id, type: "DEPOSIT",
+      amount: "690.64", currency: "PLN", transactionDate: "2022-02-13",
+    })
+    await seedPosition(db, user.id, pf.id, "BTC-USD", 0.004, 172660)
+
+    mockPriceBars({
+      "BTC-USD": { dates: ["2022-02-13", "2022-02-14"], closes: [42197.5156, 42586.918], currency: "USD", rateToBase: 4 },
+    })
+
+    await runBackfill(db, pf.id, "Bearer test", new Date("2022-02-15T00:00:00Z"))
+
+    const rows = await db
+      .select()
+      .from(valueSnapshots)
+      .where(eq(valueSnapshots.portfolioId, pf.id))
+      .orderBy(valueSnapshots.snapshotDate)
+    // 0.004 × 42,197.5156 × 4 = 675.16 PLN. Unconverted it would be 168.79 —
+    // the USD close multiplied straight into a PLN total.
+    expect(Number(rows[0].value)).toBeCloseTo(675.16, 1)
+  })
+
+  it("leaves a series that already arrives in the portfolio base alone", async () => {
+    const { db, user } = await makeHarness("ccy-user-2")
+    const pf = await seedPortfolio(db, user.id, "PLN")
+    __resetBackfillRunnerForTests()
+
+    await seedBuy(db, user.id, pf.id, "AAPL", 10, 150, "2026-07-01")
+    await seedPosition(db, user.id, pf.id, "AAPL", 10, 150)
+    mockPriceBars({ AAPL: { dates: ["2026-07-01", "2026-07-02"], closes: [150, 155], currency: "PLN" } })
+
+    const fetchMock = vi.mocked(globalThis.fetch)
+    await runBackfill(db, pf.id, "Bearer test", new Date("2026-07-03T00:00:00Z"))
+    // one fetch per symbol, no corrective re-ask
+    const bars = fetchMock.mock.calls.filter((c) => String(c[0]).includes("/price-bars"))
+    expect(bars).toHaveLength(1)
   })
 })

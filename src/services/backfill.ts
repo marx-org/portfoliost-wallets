@@ -134,6 +134,10 @@ export async function fetchPriceSeries(
   /** §63.10.5 — per-symbol base the caller already knows; passed to instruments
    * so an ambiguous listing can still be converted. */
   baseCcyMap?: Map<string, string | null>,
+  /** §72.15 — the portfolio's own base currency. Every close the grid multiplies
+   * by a quantity has to be in THIS currency, and it is the only reference that
+   * can say whether a series arrived converted. */
+  portfolioBase?: string,
 ): Promise<Map<string, PriceBarSeries>> {
   const out = new Map<string, PriceBarSeries>()
   let next = 0
@@ -151,16 +155,39 @@ export async function fetchPriceSeries(
       if (failure !== null) return
       const i = next++
       if (i >= symbols.length) return
-      const series = await fetcher(
-        symbols[i],
-        from,
-        to,
-        authToken,
-        signal,
-        targetCcy?.get(symbols[i] ?? "") ?? undefined,
-        baseCcyMap?.get(symbols[i] ?? "") ?? undefined,
-      )
+      const wantCcy = targetCcy?.get(symbols[i] ?? "") ?? undefined
+      const baseCcy = baseCcyMap?.get(symbols[i] ?? "") ?? undefined
+      let series = await fetcher(symbols[i], from, to, authToken, signal, wantCcy, baseCcy)
       if (failure !== null) return
+
+      // §72.15 — the price-bars response states the currency of the closes it
+      // returned. When we asked for no conversion we were ASSUMING the close was
+      // already in the portfolio base, and that assumption came from
+      // `transactions.instrument_currency`, which the import fills from the
+      // PAYMENT currency. A BTC-USD holding bought for 690 PLN was therefore
+      // stored as PLN, and the grid took a USD close as if it were PLN —
+      // undervaluing 0.004 BTC at ~172 PLN where it is ~688.
+      //
+      // So check the answer instead of trusting the question we asked. When the
+      // series comes back in a currency that is not the portfolio's, re-ask with
+      // the conversion, rather than multiplying a foreign price by a quantity.
+      // That is an extra round trip only for symbols whose stored currency was
+      // wrong; everything else takes one fetch as before.
+      if (
+        series &&
+        series.dates.length > 0 &&
+        !wantCcy &&
+        portfolioBase &&
+        series.currency &&
+        series.currency.toUpperCase() !== portfolioBase.toUpperCase()
+      ) {
+        const converted = await fetcher(
+          symbols[i], from, to, authToken, signal, portfolioBase, baseCcy,
+        )
+        if (failure !== null) return
+        if (converted && converted.dates.length > 0) series = converted
+      }
+
       if (series && series.dates.length > 0) out.set(symbols[i], series)
     }
   }
@@ -775,7 +802,7 @@ export async function computeSnapshotBatch(
     declaredBase.set(sym, ccy && KNOWN_CURRENCY.test(ccy) ? ccy.toUpperCase() : null)
   }
   const priceSeries = symbols.length
-    ? await fetchPriceSeries(symbols, from, to, authToken, fetchPriceBars, signal, targetCcy, declaredBase)
+    ? await fetchPriceSeries(symbols, from, to, authToken, fetchPriceBars, signal, targetCcy, declaredBase, base)
     : new Map<string, PriceBarSeries>()
   throwIfAborted(signal)
 
