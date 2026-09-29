@@ -2375,6 +2375,8 @@ export interface components {
             name?: string;
             country?: string | null;
             countryCode?: string | null;
+            /** @description Contract `InstrumentType` for the shared identity block (`TickerBadge`). Resolved from the local ticker reference, like `countryCode`; null when the symbol is not in it — never guessed (§61.8). */
+            assetType?: string | null;
             isin?: string | null;
             /** @description ISO-4217; null when the provider does not declare one (45.2 — never guessed) */
             currency?: string | null;
