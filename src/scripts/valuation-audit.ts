@@ -28,7 +28,7 @@
  */
 import { and, eq, sql } from "drizzle-orm"
 import { getDb, closeDb } from "../db/index.js"
-import { portfolios, portfolioTransactions, positions, valueSnapshots } from "../db/schema.js"
+import { portfolios, portfolioTransactions, portfolioCashTransactions, positions, valueSnapshots } from "../db/schema.js"
 import { resolveServiceToken, fxTo } from "../services/instruments-fx.js"
 import { splitPortfolioValue } from "../services/valuation.js"
 import { cashBalances } from "../services/cashLedger.js"
@@ -55,7 +55,108 @@ export interface ReconciliationFinding {
   deltaPct: number
 }
 
-export type Finding = CurrencyFinding | ReconciliationFinding
+export type Finding = CurrencyFinding | ReconciliationFinding | UnfundedFinding
+
+export interface UnfundedFinding {
+  kind: "unfunded-portfolio"
+  portfolioId: string
+  portfolioName: string
+  tradeCount: number
+  /**
+   * The cash the portfolio's own trades imply it must have been funded with.
+   * A portfolio holding positions but with no external inflow is valued against
+   * a ledger that starts at zero, so its cash is negative by everything ever
+   * spent and every stored value is offset.
+   */
+  impliedFunding: number
+  minBalance: number
+}
+
+/**
+ * §72.32 — portfolios that hold positions but were never funded in the import.
+ *
+ * `cashBalances` starts from an empty map and adds trade effects plus external
+ * cash rows, so a portfolio whose opening deposit was never imported is not
+ * merely "missing data" — it is valued as though the money never arrived, and its
+ * whole value history comes out negative.
+ *
+ * PROD (XTB): 22 trades, 0 cash rows, 1680 negative snapshots, `invested = 0` on
+ * every day (so its TWR/MWR is meaningless too). Quantities balanced exactly, so
+ * the arithmetic was right and only the funding was absent.
+ */
+export function findUnfundedPortfolios(
+  rows: Array<{
+    portfolioId: string
+    portfolioName: string
+    tradeCount: number
+    externalInflow: number
+    impliedFunding: number
+    minBalance: number
+  }>,
+): UnfundedFinding[] {
+  const out: UnfundedFinding[] = []
+  for (const r of rows) {
+    // Has trades, nothing ever put money in, and the ledger is running negative.
+    if (r.tradeCount <= 0) continue
+    if (Math.abs(r.externalInflow) > 1e-6) continue
+    if (!(r.minBalance < -1e-6)) continue
+    out.push({
+      kind: "unfunded-portfolio",
+      portfolioId: r.portfolioId,
+      portfolioName: r.portfolioName,
+      tradeCount: r.tradeCount,
+      impliedFunding: r.impliedFunding,
+      minBalance: r.minBalance,
+    })
+  }
+  return out
+}
+
+/** §72.32 — sweep for portfolios whose opening cash was never imported. */
+export async function auditUnfunded(
+  db: Awaited<ReturnType<typeof getDb>>,
+  authToken: string,
+) {
+  // Candidate set in SQL: has trades, and nothing ever put money in. The balance
+  // is then read through the real ledger rather than re-derived here — the
+  // negative comes from the *trade* cash effects, not the cash rows, and
+  // re-implementing that arithmetic in SQL is exactly how it drifts.
+  const rows = await db
+    .select({
+      portfolioId: portfolioTransactions.portfolioId,
+      portfolioName: portfolios.name,
+      tradeCount: sql<string>`count(*)::text`,
+      impliedFunding: sql<string>`coalesce(sum(${portfolioTransactions.totalAmount}) FILTER (WHERE ${portfolioTransactions.type} = 'BUY'), 0)::text`,
+    })
+    .from(portfolioTransactions)
+    .innerJoin(portfolios, eq(portfolioTransactions.portfolioId, portfolios.id))
+    .groupBy(portfolioTransactions.portfolioId, portfolios.name)
+    .where(
+      sql`coalesce((SELECT sum(c.amount) FROM ${portfolioCashTransactions} c
+                     WHERE c.portfolio_id = ${portfolioTransactions.portfolioId}
+                       AND c.type IN ('DEPOSIT','TRANSFER') AND c.amount > 0), 0) = 0`,
+    )
+
+  const out: UnfundedFinding[] = []
+  for (const r of rows) {
+    const balances = await cashBalances(db, authToken, r.portfolioId)
+    let minBalance = 0
+    for (const v of balances.values()) minBalance = Math.min(minBalance, v)
+    out.push(
+      ...findUnfundedPortfolios([
+        {
+          portfolioId: r.portfolioId,
+          portfolioName: r.portfolioName,
+          tradeCount: Number(r.tradeCount),
+          externalInflow: 0,
+          impliedFunding: Number(r.impliedFunding),
+          minBalance,
+        },
+      ]),
+    )
+  }
+  return out
+}
 
 /**
  * Pure comparison, exported so the rules are testable without a database.
@@ -218,12 +319,13 @@ async function main() {
     const findings: Finding[] = [
       ...(await auditCurrencies(db)),
       ...(await auditReconciliation(db, token, tolerance)),
+      ...(await auditUnfunded(db, token)),
     ]
 
     if (asJson) {
       console.log(JSON.stringify({ tolerance, findings }, null, 2))
     } else if (findings.length === 0) {
-      console.log(`[valuation-audit] clean — no currency or reconciliation findings (tolerance ${(tolerance * 100).toFixed(1)}%)`)
+      console.log(`[valuation-audit] clean — no currency, reconciliation or funding findings (tolerance ${(tolerance * 100).toFixed(1)}%)`)
     } else {
       for (const f of findings) {
         if (f.kind === "currency-mismatch") {
@@ -232,12 +334,19 @@ async function main() {
               `its transactions say ${f.transactionCurrencies.join("/")} — a currency discrepancy multiplies this ` +
               `position's value by the FX factor.`,
           )
-        } else {
+        } else if (f.kind === "reconciliation-gap") {
           console.log(
             `[valuation-audit] RECONCILE pf=${f.portfolioName} ${f.snapshotDate}: stored ${f.storedValue.toFixed(2)} ` +
               `vs live ${f.liveValue.toFixed(2)} (${(f.deltaPct * 100).toFixed(1)}%) — ` +
               `check the CURRENCY findings above first: one mislabelled position moves a ` +
               `portfolio total by its FX factor without looking wrong.`,
+          )
+        } else {
+          console.log(
+            `[valuation-audit] UNFUNDED pf=${f.portfolioName}: ${f.tradeCount} trades but no DEPOSIT/TRANSFER ` +
+              `anywhere in the import, and the cash ledger bottoms out at ${f.minBalance.toFixed(2)}. Those trades ` +
+              `imply about ${f.impliedFunding.toFixed(2)} of funding that was never imported, so this portfolio's ` +
+              `whole value history is offset and can go negative. Add the opening deposit to the source data.`,
           )
         }
       }

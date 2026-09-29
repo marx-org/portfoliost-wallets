@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest"
-import { findCurrencyMismatches, findReconciliationGaps } from "./valuation-audit.js"
+import { findCurrencyMismatches, findReconciliationGaps, findUnfundedPortfolios } from "./valuation-audit.js"
 
 /**
  * §71 — CRI.WA carried `CAD` on the position while both of its BUY transactions
@@ -108,5 +108,50 @@ describe("valuation audit — reconciliation", () => {
     const row = gap({ liveValue: 91_800 }) // +1.82% — inside the 2% default
     expect(findReconciliationGaps([row])).toEqual([])
     expect(findReconciliationGaps([{ ...row, tolerance: 0.01 }])).toHaveLength(1)
+  })
+})
+
+/**
+ * §72.32 — PROD (XTB): 22 trades, not one DEPOSIT or TRANSFER anywhere in the
+ * import, 1680 negative value snapshots and `invested = 0` on every day. The cash
+ * ledger starts from an empty map, so a portfolio whose opening deposit was never
+ * imported is valued as though the money never arrived.
+ */
+describe("valuation audit — unfunded portfolios", () => {
+  const row = (o: Partial<Parameters<typeof findUnfundedPortfolios>[0][number]>) => ({
+    portfolioId: "pf-xtb",
+    portfolioName: "XTB",
+    tradeCount: 22,
+    externalInflow: 0,
+    impliedFunding: 1925.7,
+    minBalance: -56.5,
+    ...o,
+  })
+
+  it("flags the PROD shape: trades, no inflow, negative cash", () => {
+    expect(findUnfundedPortfolios([row({})])).toEqual([
+      {
+        kind: "unfunded-portfolio",
+        portfolioId: "pf-xtb",
+        portfolioName: "XTB",
+        tradeCount: 22,
+        impliedFunding: 1925.7,
+        minBalance: -56.5,
+      },
+    ])
+  })
+
+  it("does not flag a portfolio that was funded", () => {
+    expect(findUnfundedPortfolios([row({ externalInflow: 5000 })])).toEqual([])
+  })
+
+  it("does not flag a portfolio with no trades", () => {
+    expect(findUnfundedPortfolios([row({ tradeCount: 0 })])).toEqual([])
+  })
+
+  it("does not flag a portfolio whose cash never went negative", () => {
+    // No inflow and no negative balance is a genuinely cash-neutral, empty
+    // portfolio — not a data defect.
+    expect(findUnfundedPortfolios([row({ minBalance: 0 })])).toEqual([])
   })
 })
