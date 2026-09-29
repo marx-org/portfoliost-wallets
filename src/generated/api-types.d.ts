@@ -2626,6 +2626,10 @@ export interface components {
             items?: {
                 symbol: string;
                 instrumentName?: string | null;
+                /** @description The instrument's asset class, for the shared identity block (`TickerBadge`). Nullable because the research-backed `history` shape has neither this nor `country`; the portfolio route fills both from the DIVIDEND transaction row. Never guessed. */
+                assetType?: string | null;
+                /** @description 2-letter country code of the instrument (not the transaction's currency) — see `assetType`. Null when unknown. */
+                country?: string | null;
                 date: string;
                 quantity: number;
                 gross: number;
@@ -2803,6 +2807,10 @@ export interface components {
         ResearchCompare: {
             symbol?: string;
             name?: string;
+            /** @description 2-letter country code for the shared identity block (`TickerBadge`). Resolved from the provider's own ticker reference; null when the symbol is not in it — never guessed (§61.4). */
+            countryCode?: string | null;
+            /** @description Contract `InstrumentType` for the identity block. Same rule as `countryCode` — null when the ticker reference has no row. */
+            assetType?: string | null;
             price?: number;
             marketCap?: number;
             peRatio?: number;
@@ -3623,7 +3631,10 @@ export interface components {
             originalQuantity?: number | null;
             /** @description Pre-restatement unit price; frozen at creation */
             originalPrice?: number | null;
+            /** @description The currency the trade was PAID or SETTLED in. This is not necessarily the instrument's listing currency — a broker will sell a GBP-listed stock priced in PLN — so it must not be used as the instrument's currency. */
             currency: string;
+            /** @description The currency the instrument TRADES in, when the importer resolved it. Takes precedence over `currency` for the stored `instrumentCurrency`; `currency` is used only as a fallback. Set it whenever the source is authoritative (a crypto quote pair, a venue-qualified listing), and leave it null when the instrument's currency is genuinely unknown — the "never guess" rule applies, and a wrong listing currency is worse than a known-missing one. */
+            listingCurrency?: string | null;
             fees?: number | null;
             /** @enum {string|null} */
             feesType?: "fixed" | "pct" | null;
