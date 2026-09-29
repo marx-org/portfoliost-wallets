@@ -1748,6 +1748,51 @@ describe("Portfolio dividends (§49)", () => {
     expect(body.totalDividends).toBe(37) // 20 + 17 (display ccy net sum)
   })
 
+  it("GET /:id/dividends — items carry the instrument identity, null when absent (§61.3)", async () => {
+    const h = await makeHarness()
+    const a = app(h.db)
+    const portfolio = await makeTestPortfolio(h, a)
+
+    const record = (body: Record<string, unknown>) =>
+      a.request(`/api/portfolios/${portfolio.id}/transactions`, {
+        method: "POST",
+        headers: h.headers,
+        body: JSON.stringify(body),
+      })
+
+    // newer, WITH an identity — newest first, so it comes back at index 0
+    await record({
+      type: "DIVIDEND",
+      symbol: "SAP.DE",
+      quantity: 5,
+      price: 2,
+      currency: "EUR",
+      assetType: "ETF",
+      country: "PL",
+      executedAt: "2026-05-10T00:00:00Z",
+    })
+    // older, WITHOUT one
+    await record({
+      type: "DIVIDEND",
+      symbol: "AAPL",
+      quantity: 10,
+      price: 2,
+      currency: "USD",
+      executedAt: "2026-01-10T00:00:00Z",
+    })
+
+    const res = await a.request(`/api/portfolios/${portfolio.id}/dividends`, { headers: h.headers })
+    expect(res.status).toBe(200)
+    const body = await res.json()
+    expect(body.items[0].symbol).toBe("SAP.DE")
+    expect(body.items[0].assetType).toBe("ETF")
+    expect(body.items[0].country).toBe("PL")
+    // A row without them reports null — never a guessed class or country.
+    expect(body.items[1].symbol).toBe("AAPL")
+    expect(body.items[1].assetType).toBe("STOCK") // the route's own default
+    expect(body.items[1].country).toBeNull()
+  })
+
   it("BUY/SELL totals unchanged by §49 dividend changes (§49.3)", async () => {
     const h = await makeHarness()
     const a = app(h.db)

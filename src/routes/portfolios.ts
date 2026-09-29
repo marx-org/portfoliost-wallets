@@ -1343,6 +1343,10 @@ async function resolveAggregateBase(
       return {
         symbol: r.instrumentSymbol,
         instrumentName: r.instrumentName,
+        // §61.3 — both columns are already on the DIVIDEND row; they feed the
+        // shared identity block (TickerBadge). Null, never guessed.
+        assetType: r.assetType ?? null,
+        country: r.country ?? null,
         date: r.executedAt?.toISOString?.() ?? r.executedAt,
         quantity,
         gross,
