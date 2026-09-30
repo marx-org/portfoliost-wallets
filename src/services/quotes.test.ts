@@ -141,12 +141,11 @@ describe("refreshQuotes (D58)", () => {
   //
   // The test is about ORDERING, not arithmetic, so it makes the snapshot slow:
   // if refreshQuotes resolves before the row exists, the race is back.
-  it("does not resolve before today's snapshot has been written (the §63.2 race)", async () => {
+  it("§76.4 — refreshQuotes writes NO snapshot; positions are priced and the row is left to the batch", async () => {
     const { db, user } = await makeHarness("q-race")
     const { pf, pos } = await seedPortfolioAndPosition(db, user.id, { qty: 10, avg: 150 })
 
-    // Slow the snapshot's own dependency (FX resolution) so a fire-and-forget
-    // write cannot possibly have landed by the time refreshQuotes returns.
+    // Slow the FX resolution so a slow path would be visible if one existed.
     mockFetch(180, 3, 1.7)
     const realFetch = globalThis.fetch
     vi.stubGlobal(
@@ -161,17 +160,21 @@ describe("refreshQuotes (D58)", () => {
 
     await refreshQuotes(db, user.id, pf.id, "Bearer test-token")
 
-    // Read IMMEDIATELY, with no extra awaits — this is the assertion the old
-    // `void` failed.
+    // This test used to assert the opposite — that today's row EXISTS by the time
+    // refreshQuotes resolves, which is the §63.2 race fix (c195839). §76.4 removed
+    // the precondition for that race: `computeSnapshotBatch` is now the only
+    // writer of value_snapshots, so there is nothing for the live path to race.
     const snaps = await db
       .select()
       .from(valueSnapshots)
       .where(eq(valueSnapshots.portfolioId, pf.id))
-    expect(snaps).toHaveLength(1)
+    expect(snaps).toHaveLength(0)
+
+    // What refreshQuotes IS still responsible for: pricing the position.
     const [updated] = await db.select().from(positions).where(eq(positions.id, pos.id))
-    // The snapshot must reflect the LIVE quote (10 × 180), not a stored value.
-    expect(Number(snaps[0].value)).toBeCloseTo(1800)
-    expect(Number(snaps[0].value)).toBeCloseTo(Number(updated.marketValue))
+    expect(Number(updated.marketValue)).toBeCloseTo(1800)
+    expect(updated.priceSource).toBe("quote")
+    expect(updated.priceAsOf).not.toBeNull()
   })
 
   // The second half of the §63.2 fix. Awaiting the snapshot write made a
@@ -565,7 +568,7 @@ describe("refreshQuotes (D58)", () => {
 describe("snapshotPortfolioValue (H5)", () => {
   afterEach(() => vi.unstubAllGlobals())
 
-  it("upserts a value_snapshots row with correct sums", async () => {
+  it("§76.4 — computes the right sums and writes NO value_snapshots row", async () => {
     const { db, user } = await makeHarness("snap-user-1")
     const [pf] = await db
       .insert(portfolios)
@@ -589,19 +592,19 @@ describe("snapshotPortfolioValue (H5)", () => {
       { marketValue: "500", averageCostBasis: "200", quantity: "3", instrumentCurrency: "USD" },
     ]
     const now = new Date("2026-09-03T10:00:00Z")
-    await snapshotPortfolioValue(db, "Bearer t", pf.id, posRows, now)
+    const computed = await snapshotPortfolioValue(db, "Bearer t", pf.id, posRows, now)
 
-    const snaps = await db.select().from(valueSnapshots).where(eq(valueSnapshots.portfolioId, pf.id))
-    expect(snaps).toHaveLength(1)
-    expect(snaps[0].snapshotDate).toBe("2026-09-03")
-    expect(Number(snaps[0].value)).toBeCloseTo(2300)   // 1800 + 500
-    expect(Number(snaps[0].invested)).toBeCloseTo(2100) // = the deposit
-    // §53.5 — the snapshot-on-read upsert maintains portfolios.current_value
-    const [pfRow] = await db.select().from(portfolios).where(eq(portfolios.id, pf.id))
-    expect(Number(pfRow.currentValue)).toBeCloseTo(2300)
+    expect(computed.snapshotDate).toBe("2026-09-03")
+    expect(Number(computed.value)).toBeCloseTo(2300)   // 1800 + 500
+    expect(Number(computed.invested)).toBeCloseTo(2100) // = the deposit
+
+    // §76.4 — the single-writer invariant. This is the assertion that replaced
+    // "a row was upserted and current_value followed": `computeSnapshotBatch`
+    // owns every (portfolioId, date), so a second writer here is the bug.
+    expect(await db.select().from(valueSnapshots).where(eq(valueSnapshots.portfolioId, pf.id))).toHaveLength(0)
   })
 
-  it("is idempotent — second call updates value in place", async () => {
+  it("§76.4 — repeated calls recompute and never accumulate rows", async () => {
     const { db, user } = await makeHarness("snap-user-2")
     const [pf] = await db
       .insert(portfolios)
@@ -612,22 +615,22 @@ describe("snapshotPortfolioValue (H5)", () => {
       { marketValue: "1000", averageCostBasis: "100", quantity: "10", instrumentCurrency: "USD" },
     ]
     const now = new Date("2026-09-03T10:00:00Z")
-    await snapshotPortfolioValue(db, "Bearer t", pf.id, posRows, now)
+    const first = await snapshotPortfolioValue(db, "Bearer t", pf.id, posRows, now)
+    expect(Number(first.value)).toBeCloseTo(1000)
+
     // second call with updated value
     const posRows2 = [
       { marketValue: "1100", averageCostBasis: "100", quantity: "10", instrumentCurrency: "USD" },
     ]
-    await snapshotPortfolioValue(db, "Bearer t", pf.id, posRows2, now)
+    const second = await snapshotPortfolioValue(db, "Bearer t", pf.id, posRows2, now)
+    expect(Number(second.value)).toBeCloseTo(1100)
 
+    // Still nothing written — and specifically not two rows for one date.
     const snaps = await db.select().from(valueSnapshots).where(eq(valueSnapshots.portfolioId, pf.id))
-    expect(snaps).toHaveLength(1)
-    expect(Number(snaps[0].value)).toBeCloseTo(1100)
-    // §53.5 — current_value follows the updated snapshot
-    const [pfRow] = await db.select().from(portfolios).where(eq(portfolios.id, pf.id))
-    expect(Number(pfRow.currentValue)).toBeCloseTo(1100)
+    expect(snaps).toHaveLength(0)
   })
 
-  it("refreshQuotes writes a snapshot row after persisting quote fields", async () => {
+  it("§76.4 — refreshQuotes prices positions but leaves the row to the batch", async () => {
     const { db, user } = await makeHarness("snap-user-3")
     process.env.INSTRUMENTS_URL = "http://instruments:3000"
     _clearQuoteCache()
@@ -653,13 +656,16 @@ describe("snapshotPortfolioValue (H5)", () => {
     }))
 
     await refreshQuotes(db, user.id, pf.id, "Bearer test-token")
-    // give the background void a tick
+    // an extra tick: if a background write were still scheduled, it would land
     await new Promise((r) => setTimeout(r, 50))
 
     const snaps = await db.select().from(valueSnapshots).where(eq(valueSnapshots.portfolioId, pf.id))
-    expect(snaps.length).toBeGreaterThanOrEqual(1)
-    // value = 5 × 220 = 1100
-    expect(Number(snaps[0].value)).toBeCloseTo(1100)
+    expect(snaps).toHaveLength(0)
+
+    // …and the quote fields themselves WERE persisted (5 × 220 = 1100).
+    const [posRow] = await db.select().from(positions).where(eq(positions.portfolioId, pf.id))
+    expect(Number(posRow.marketValue)).toBeCloseTo(1100)
+    expect(posRow.priceSource).toBe("quote")
 
     vi.unstubAllGlobals()
     delete process.env.INSTRUMENTS_URL

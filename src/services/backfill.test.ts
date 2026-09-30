@@ -606,6 +606,121 @@ describe("§72.30 — a gap anywhere in the window is reported, not just on the 
   })
 })
 
+describe("§76.4 — one writer per (portfolioId, snapshotDate)", () => {
+  beforeEach(() => {
+    process.env.INSTRUMENTS_URL = "http://instruments:3000"
+  })
+  afterEach(() => {
+    vi.unstubAllGlobals()
+    delete process.env.INSTRUMENTS_URL
+    __resetBackfillRunnerForTests()
+    __resetQuoteCachesForTests()
+  })
+
+  /**
+   * The invariant itself. Before §76.4 two paths wrote today's row — the live
+   * `snapshotPortfolioValue` and the batch window — and whichever finished last
+   * won. Now only the batch writes, so a date has exactly one row and the live
+   * path's presence must not change that.
+   */
+  it("holds one row per date across the live path and a batch pass", async () => {
+    const { db, user } = await makeHarness("one-writer-1")
+    const pf = await seedPortfolio(db, user.id)
+    await seedBuy(db, user.id, pf.id, "AAPL", 10, 150, "2026-07-01")
+    await seedPosition(db, user.id, pf.id, "AAPL", 10, 150)
+
+    mockPriceBars({
+      AAPL: { dates: ["2026-07-01", "2026-07-02", "2026-07-03"], closes: [150, 155, 160] },
+    })
+
+    const now = new Date("2026-07-04T00:00:00Z")
+
+    // The batch pass writes the window.
+    await recalcPortfolioSeries(db, pf.id, "Bearer test", now)
+    const afterBatch = await db
+      .select()
+      .from(valueSnapshots)
+      .where(eq(valueSnapshots.portfolioId, pf.id))
+      .orderBy(valueSnapshots.snapshotDate)
+    expect(afterBatch.length).toBeGreaterThan(0)
+
+    // The live path runs afterwards and must NOT add or duplicate a row.
+    await snapshotPortfolioValue(
+      db,
+      "Bearer test",
+      pf.id,
+      [{ symbol: "AAPL", marketValue: "1600", averageCostBasis: "150", quantity: "10", instrumentCurrency: "USD" }],
+      new Date("2026-07-04T00:00:00Z"),
+    )
+    const afterLive = await db
+      .select()
+      .from(valueSnapshots)
+      .where(eq(valueSnapshots.portfolioId, pf.id))
+      .orderBy(valueSnapshots.snapshotDate)
+
+    expect(afterLive).toHaveLength(afterBatch.length)
+    // No date appears twice — the ownership claim, checked as data.
+    const dates = afterLive.map((r) => r.snapshotDate)
+    expect(new Set(dates).size).toBe(dates.length)
+  })
+
+  /**
+   * "Two concurrent writers for the same date cannot both succeed" is enforced
+   * by the primary key rather than by application logic — which is the honest
+   * thing to assert. A second writer cannot create a duplicate row; it can only
+   * overwrite. So the property under test is that concurrent passes converge to
+   * ONE coherent series rather than interleaving into a torn one.
+   */
+  it("concurrent passes for the same portfolio converge to one coherent series", async () => {
+    const { db, user } = await makeHarness("one-writer-2")
+    const pf = await seedPortfolio(db, user.id)
+    await seedBuy(db, user.id, pf.id, "AAPL", 10, 150, "2026-07-01")
+    await seedPosition(db, user.id, pf.id, "AAPL", 10, 150)
+
+    mockPriceBars({
+      AAPL: { dates: ["2026-07-01", "2026-07-02", "2026-07-03"], closes: [150, 155, 160] },
+    })
+
+    const now = new Date("2026-07-04T00:00:00Z")
+    await Promise.all([
+      recalcPortfolioSeries(db, pf.id, "Bearer test", now),
+      recalcPortfolioSeries(db, pf.id, "Bearer test", now),
+    ])
+
+    const rows = await db
+      .select()
+      .from(valueSnapshots)
+      .where(eq(valueSnapshots.portfolioId, pf.id))
+      .orderBy(valueSnapshots.snapshotDate)
+
+    const dates = rows.map((r) => r.snapshotDate)
+    expect(new Set(dates).size).toBe(dates.length)
+
+    // Every row must be a complete value for its date, not a blend: 10 × the
+    // close for that date. A torn write would show a value belonging to neither
+    // pass, or a missing/zero one.
+    // Each row must carry 10 × the close for ITS OWN date. A torn or half-applied
+    // write shows as a value belonging to a different date (or a zero), so the
+    // expectation is derived per row from the mocked series rather than pinned
+    // to a fixed set of dates — the window's extent is not what is under test.
+    const closes: Record<string, number> = {
+      "2026-07-01": 150,
+      "2026-07-02": 155,
+      "2026-07-03": 160,
+      // `recalcPortfolioSeries` passes today as the window end, so 07-04 is in
+      // the series. There is no bar for it yet, so it carries the last close —
+      // which is the point of asserting per-row: a torn write would give 07-04
+      // some other day's close.
+      "2026-07-04": 160,
+    }
+    expect(rows.length).toBeGreaterThan(0)
+    for (const r of rows) {
+      expect(closes[r.snapshotDate]).toBeDefined()
+      expect(Number(r.value)).toBeCloseTo(10 * closes[r.snapshotDate], 0)
+    }
+  })
+})
+
 describe("§76.3 — recalcPortfolioSeries (additive re-value behind the mutation queue)", () => {
   beforeEach(() => {
     process.env.INSTRUMENTS_URL = "http://instruments:3000"
@@ -1041,7 +1156,13 @@ describe("§53.6 — snapshot-on-read agrees with the backfill pipeline", () => 
 
     // Snapshot-on-read on 07-02 from live quotes at the day-2 closes:
     // mv is denominated in the QUOTE currency (USD / PLN), not the stored one.
-    await snapshotPortfolioValue(
+    //
+    // §76.4 — this used to PERSIST the row and read it back; the function no
+    // longer writes (computeSnapshotBatch is the single writer), so the
+    // arithmetic guard is now stated on its RETURN value. The regression this
+    // guards is unchanged: the two valuation paths must agree to 6dp, and the
+    // legacy "EUR" instrumentCurrency must be ignored in favour of the quote's.
+    const live = await snapshotPortfolioValue(
       db,
       "Bearer t",
       pf.id,
@@ -1051,14 +1172,17 @@ describe("§53.6 — snapshot-on-read agrees with the backfill pipeline", () => 
       ],
       new Date("2026-07-02T12:00:00Z"),
     )
-    const [snap] = await db
-      .select()
-      .from(valueSnapshots)
-      .where(
-        and(eq(valueSnapshots.portfolioId, pf.id), eq(valueSnapshots.snapshotDate, "2026-07-02")),
-      )
 
-    expect(Number(snap.value)).toBeCloseTo(Number(backfillDay2!.value), 6)
+    expect(Number(live.value)).toBeCloseTo(Number(backfillDay2!.value), 6)
+    expect(live.snapshotDate).toBe("2026-07-02")
+
+    // …and the invariance itself: only the batch writes rows.
+    expect(
+      await db
+        .select()
+        .from(valueSnapshots)
+        .where(and(eq(valueSnapshots.portfolioId, pf.id), eq(valueSnapshots.snapshotDate, "2026-07-02"))),
+    ).toHaveLength(0)
   })
 })
 

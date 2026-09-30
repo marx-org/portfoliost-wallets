@@ -418,31 +418,31 @@ export async function refreshQuotesUnlocked(
   // is the whole fix. `await` on an already-caught promise cannot throw, so the
   // "best-effort" contract is untouched — only the timing changes.
   //
-  // §63.2 (2026-09-30). This was `void …`, i.e. fire-and-forget, and the
-  // recompute in backfill.ts runs `syncCurrentValueFromSnapshots` on the very
-  // next line. So `portfolios.current_value` was synced from the *previous*
-  // (price-bar) snapshot before this live one landed, and the stored card
-  // disagreed with the headline that `/summary-metrics` computes on read.
+  // §63.2 (2026-09-30) fixed a real race HERE, and §76.4 has now made it
+  // structurally impossible instead of merely ordered. It is kept because the
+  // reasoning is what explains the guard below, not because the race can return.
   //
-  // It read as "two valuation paths that were never unified", and **9 of 10
-  // PROD portfolios hid it**: they are cash-only or hold unpriced bonds, so
-  // both paths produce the same number and the race is invisible. Only a
-  // portfolio with priced positions exposed it — IBKR, +3,401 PLN, a gap that
-  // *grew* across a recompute instead of closing.
+  // §63.2: this call was `void …` (fire-and-forget) while the recompute in
+  // backfill.ts ran `syncCurrentValueFromSnapshots` on the next line, so
+  // `current_value` was synced from the PREVIOUS (price-bar) snapshot before the
+  // live one landed, and the stored card disagreed with the headline. It hid on
+  // 9 of 10 PROD portfolios — cash-only or unpriced bonds make both paths agree —
+  // and showed only on IBKR, where the gap GREW across a recompute instead of
+  // closing. `c195839` fixed it by awaiting this write.
   //
-  // The comment in backfill.ts claiming "refreshQuotesUnlocked upserts today's
-  // snapshot itself" was true only because nothing checked. It is now true
-  // because the ordering is guaranteed.
+  // §76.4: `snapshotPortfolioValue` no longer writes `value_snapshots` at all.
+  // `computeSnapshotBatch` is the single writer of every (portfolioId, date),
+  // today included. Two writers of today's row was the precondition for that
+  // race, so with one writer there is nothing left to order — and
+  // `syncCurrentValueFromSnapshots` runs exactly where the snapshot is written.
   //
-  // Second half of the fix, and it only became reachable once the write was
-  // awaited. The fallback path above pushes the position's **stored**
-  // `marketValue`, which is `0` until a position has been quoted once — so for
-  // a freshly seeded or freshly re-imported portfolio, pricing *nothing* would
-  // write today's snapshot as 0 and, now that this write is ordered before
-  // `syncCurrentValueFromSnapshots`, set `current_value` to 0 and wipe the
-  // headline. The old fire-and-forget accidentally hid that by writing its bad
-  // row too late. So: if we hold positions and priced none of them, do not
-  // touch today's snapshot at all — the backfilled series stays authoritative.
+  // The `quotedCount === 0` guard below still earns its place for a different
+  // reason, and the distinction matters: we hold positions but priced NONE, so
+  // the fallback path would contribute each position's STORED `marketValue` —
+  // which is `0` until a position has been quoted once. On a freshly seeded or
+  // freshly re-imported portfolio that is every position, so valuing now would
+  // be valuing a set of zeros. Do not touch today's figure; the backfilled
+  // series stays authoritative.
   if (quotedCount === 0) return
 
   await snapshotPortfolioValue(db, authToken, portfolioId, liveValues, now).catch(() => undefined)
@@ -463,7 +463,22 @@ export async function refreshQuotesUnlocked(
   * Falls back to rate=1 when instruments FX is unavailable or a pair is missing (plan §48.3).
   * Exported for unit testing.
   */
- export async function snapshotPortfolioValue(
+ /**
+ * What today is worth for a portfolio, computed but NOT written.
+ *
+ * §76.4: `computeSnapshotBatch` is the single writer of `value_snapshots`; this
+ * is the live-quote arithmetic that callers need in order to price positions and
+ * to show a fresh figure. See the ownership note at the return statement.
+ */
+export interface SnapshotValue {
+  portfolioId: string
+  snapshotDate: string
+  value: string
+  invested: string
+  netFlow: string
+}
+
+export async function snapshotPortfolioValue(
   db: DB,
   authToken: string | null,
   portfolioId: string,
@@ -476,7 +491,7 @@ export async function refreshQuotesUnlocked(
     quoteCurrency?: string | null
   }>,
   now = new Date(),
-): Promise<void> {
+): Promise<SnapshotValue> {
   const [portfolio] = await db
     .select({ baseCurrency: portfolios.baseCurrency })
     .from(portfolios)
@@ -533,28 +548,35 @@ export async function refreshQuotesUnlocked(
   // hand-written addition, which is how the two paths drifted apart.
   totalValue = splitTotal
   const todayFlows = await dailyExternalFlows(db, authToken, portfolioId, snapshotDate, snapshotDate, base)
-  await db
-    .insert(valueSnapshots)
-    .values({
-      portfolioId,
-      snapshotDate,
-      value: totalValue.toFixed(8),
-      invested: totalInvested.toFixed(8),
-      netFlow: (todayFlows.get(snapshotDate) ?? 0).toFixed(8),
-    })
-    .onConflictDoUpdate({
-      target: [valueSnapshots.portfolioId, valueSnapshots.snapshotDate],
-      set: {
-        value: sql`excluded.value`,
-        invested: sql`excluded.invested`,
-        netFlow: sql`excluded.net_flow`,
-      },
-    })
 
-  // Recompute stored return-type columns after the new snapshot is written
-  await recomputeReturnColumns(db, portfolioId)
-  // §53.5 — keep portfolios.current_value in step with the newest snapshot
-  await syncCurrentValueFromSnapshots(db, portfolioId)
+  // §76.4 — this function no longer WRITES value_snapshots. It used to upsert
+  // today's row here, which made it the second writer of
+  // (portfolioId, today) alongside `computeSnapshotBatch`'s window, and whichever
+  // ran last won. The ownership rule is now single and stated once:
+  //
+  //   `computeSnapshotBatch` owns EVERY (portfolioId, snapshotDate), today
+  //   included — reached through `_runBackfillCore` (upsert),
+  //   `recalcPortfolioSeries` (§76.3) and `recalcPortfolioHistory` (force).
+  //   Only it can price a past date from bars, and only it covers a
+  //   cash-only portfolio (§62.4), so today must belong to it too.
+  //
+  // What remains here is the part that genuinely needs a live quote: this
+  // function's callers (`refreshQuotesUnlocked` and the POST that writes a
+  // position) use it to price POSITIONS — market_value, price_as_of,
+  // price_source — and to learn what today is worth.
+  //
+  // Consequence, stated rather than hidden: a write no longer moves
+  // `current_value` on the spot. It picks the value up when the debounced
+  // re-value pass lands (~3s). The POST still answers with the freshly priced
+  // position, and the card keeps showing the snapshot's own as-of, so the
+  // number is labelled rather than silently stale (§70).
+  return {
+    portfolioId,
+    snapshotDate,
+    value: totalValue.toFixed(8),
+    invested: totalInvested.toFixed(8),
+    netFlow: (todayFlows.get(snapshotDate) ?? 0).toFixed(8),
+  }
 }
 
 /** Exposed for testing: flush the in-process caches. */

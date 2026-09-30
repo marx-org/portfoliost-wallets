@@ -112,7 +112,7 @@ function mockPriceBars(series: Record<string, { dates: string[]; closes: number[
 describe("snapshotPortfolioValue — today snapshot", () => {
   afterEach(() => { vi.unstubAllGlobals(); unmockInstrumentsFx() })
 
-  it("writes a single row with correct value for 2 USD positions", async () => {
+  it("computes the right value for 2 USD positions and writes NOTHING (§76.4)", async () => {
     const { db, user } = await makeHarness("snap-2pos")
     const pf = await seedPortfolio(db, user.id)
 
@@ -133,13 +133,17 @@ describe("snapshotPortfolioValue — today snapshot", () => {
       { marketValue: "750", averageCostBasis: "250", quantity: "3", instrumentCurrency: "USD" },
     ]
     const now = new Date("2026-09-01T10:00:00Z")
-    await snapshotPortfolioValue(db, "Bearer t", pf.id, posRows, now)
+    const computed = await snapshotPortfolioValue(db, "Bearer t", pf.id, posRows, now)
 
+    expect(computed.snapshotDate).toBe("2026-09-01")
+    expect(Number(computed.value)).toBeCloseTo(2750)    // 2000 + 750
+    expect(Number(computed.invested)).toBeCloseTo(2750) // = the deposit (net external flow)
+
+    // §76.4 — `computeSnapshotBatch` is the single writer of value_snapshots.
+    // This function used to upsert today's row here, making it a second writer
+    // of the same (portfolioId, date) with whichever ran last winning.
     const snaps = await db.select().from(valueSnapshots).where(eq(valueSnapshots.portfolioId, pf.id))
-    expect(snaps).toHaveLength(1)
-    expect(snaps[0].snapshotDate).toBe("2026-09-01")
-    expect(Number(snaps[0].value)).toBeCloseTo(2750)    // 2000 + 750
-    expect(Number(snaps[0].invested)).toBeCloseTo(2750) // = the deposit (net external flow)
+    expect(snaps).toHaveLength(0)
   })
 
   it("applies FX conversion for multi-currency positions (PLN, EUR → USD)", async () => {
@@ -173,23 +177,26 @@ describe("snapshotPortfolioValue — today snapshot", () => {
       // 1000 USD → 1000 × (1.10/1.10) = 1000 USD
     ]
     const now = new Date("2026-09-01T10:00:00Z")
-    await snapshotPortfolioValue(db, "Bearer t", pf.id, posRows, now)
+    const computed = await snapshotPortfolioValue(db, "Bearer t", pf.id, posRows, now)
 
-    const snaps = await db.select().from(valueSnapshots).where(eq(valueSnapshots.portfolioId, pf.id))
-    expect(Number(snaps[0].value)).toBeCloseTo(1000 + 1000) // 2000 USD
-    expect(Number(snaps[0].invested)).toBeCloseTo(1000 + 1000) // deposits: 1000 USD + 4000 PLN→1000 USD
+    expect(Number(computed.value)).toBeCloseTo(1000 + 1000) // 2000 USD
+    expect(Number(computed.invested)).toBeCloseTo(1000 + 1000) // deposits: 1000 USD + 4000 PLN→1000 USD
+    // §76.4 — computed, not written; the batch owns the row.
+    expect(await db.select().from(valueSnapshots).where(eq(valueSnapshots.portfolioId, pf.id))).toHaveLength(0)
   })
 
   it("empty portfolio — no positions → value and invested are 0", async () => {
     const { db, user } = await makeHarness("snap-empty")
     const pf = await seedPortfolio(db, user.id)
 
-    await snapshotPortfolioValue(db, "Bearer t", pf.id, [], new Date("2026-09-01T10:00:00Z"))
+    const computed = await snapshotPortfolioValue(db, "Bearer t", pf.id, [], new Date("2026-09-01T10:00:00Z"))
 
-    const snaps = await db.select().from(valueSnapshots).where(eq(valueSnapshots.portfolioId, pf.id))
-    expect(snaps).toHaveLength(1)
-    expect(Number(snaps[0].value)).toBe(0)
-    expect(Number(snaps[0].invested)).toBe(0)
+    expect(Number(computed.value)).toBe(0)
+    expect(Number(computed.invested)).toBe(0)
+    // §76.4 — a position-less portfolio is exactly the case the BATCH must own:
+    // `refreshQuotesUnlocked` returns early when there are no open positions, so
+    // if this path wrote, a cash-only portfolio would never get today's row.
+    expect(await db.select().from(valueSnapshots).where(eq(valueSnapshots.portfolioId, pf.id))).toHaveLength(0)
   })
 })
 
