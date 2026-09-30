@@ -13,6 +13,7 @@ import {
 import { eq, and } from "drizzle-orm"
 import { getBackfillStatus } from "../services/backfill.js"
 import { __resetBackfillRunnerForTests } from "../services/backfill-runner.js"
+import { __resetQuoteCachesForTests } from "../services/quotes.js"
 
 type Harness = Awaited<ReturnType<typeof makeHarness>>
 type DB = Harness["db"]
@@ -103,6 +104,65 @@ describe("POST /api/portfolios/:id/recompute (plan §27.2)", () => {
     vi.unstubAllGlobals()
     delete process.env.INSTRUMENTS_URL
     __resetBackfillRunnerForTests()
+    __resetQuoteCachesForTests()
+  })
+
+  it("§76.5 — ?mode=upsert PRICES the positions, it does not merely re-value stored prices", async () => {
+    const h = await makeHarness("recalc-route-upsert-prices")
+    const a = app(h.db)
+    const pf = await seedPortfolio(h.db, h.user.id)
+    await seedBuy(h.db, h.user.id, pf.id, "AAPL", 10, 150, "2026-07-01")
+    await seedPosition(h.db, h.user.id, pf.id, "AAPL", 10, 150)
+
+    mockPriceBars({ AAPL: { dates: ["2026-07-01", "2026-07-02"], closes: [150, 155] } })
+
+    // Bars AND quotes: the position starts unpriced, and only a live quote can
+    // give it a market value.
+    const inner = vi.mocked(globalThis.fetch).getMockImplementation()!
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockImplementation((url: string, init?: RequestInit) => {
+        const u = String(url)
+        if (u.includes("/price-bars")) return inner(u, init)
+        if (u.includes("/quote")) {
+          return Promise.resolve({
+            ok: true,
+            status: 200,
+            json: async () => ({ symbol: "AAPL", currentPrice: 222, change: 0, percentChange: 0, currency: "USD" }),
+          })
+        }
+        if (u.includes("/profile")) {
+          return Promise.resolve({
+            ok: true,
+            status: 200,
+            json: async () => ({
+              ticker: "AAPL", name: "Apple Inc.", country: "US",
+              finnhubIndustry: "Technology", currency: "USD", currencySource: "provider",
+            }),
+          })
+        }
+        return inner(u, init)
+      }),
+    )
+
+    const [before] = await h.db.select().from(positions).where(eq(positions.portfolioId, pf.id))
+    expect(before.marketValue).toBeNull()
+
+    const res = await a.request(`/api/portfolios/${pf.id}/recompute?mode=upsert`, {
+      method: "POST",
+      headers: h.headers,
+    })
+    expect(res.status).toBe(200)
+    expect(await waitForComplete(h.db, pf.id)).toBe("complete")
+
+    // THE REGRESSION THIS GUARDS: `runBackfillRecent` re-values the series from
+    // prices already stored on the positions and never calls instruments, so the
+    // button completed, reported success, and left an unpriced portfolio
+    // unpriced. Found by §76.5's PROD check, not by a unit test.
+    const [after] = await h.db.select().from(positions).where(eq(positions.portfolioId, pf.id))
+    expect(after.marketValue).not.toBeNull()
+    expect(Number(after.marketValue)).toBeCloseTo(2220) // 10 × 222
+    expect(after.priceSource).toBe("quote")
   })
 
   it("404 for a portfolio not owned by the user", async () => {

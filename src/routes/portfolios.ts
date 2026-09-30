@@ -14,7 +14,8 @@ import { preferredBaseCurrency } from "../services/preferences.js"
 import { dominantPriceSource, oldestPriceAsOf, splitPortfolioValue } from "../services/valuation.js"
 import { getPortfolioNews } from "../services/portfolioNews.js"
 import { getPortfolioCalendar } from "../services/portfolioCalendar.js"
-import { runBackfillRecent, getGapSymbols, buildBenchmarkSeries, forcePortfolioRecalc, hasBackfillableHistory } from "../services/backfill.js"
+import { getGapSymbols, buildBenchmarkSeries, forcePortfolioRecalc, hasBackfillableHistory, recalcPortfolioSeries } from "../services/backfill.js"
+import { enqueueBackfill } from "../services/backfill-runner.js"
 import { cashBalances, dailyExternalFlows } from "../services/cashLedger.js"
 import { debugEnabled, debugLog } from "../services/debug.js"
 import { buildPortfolioCash } from "./portfolio-cash.js"
@@ -1159,10 +1160,29 @@ async function resolveAggregateBase(
     // default = FULL delete+rebuild (manual recompute after data fixes — no
     // stale rows can survive); ?mode=upsert = ADDITIVE (upsert computed days,
     // never delete) — what the scheduled refresh job uses, so a mid-day pass
-    // that fails can't erase a day it didn't recompute.
+    // that fails can't erase a day it didn't recomputed.
+    //
+    // §76.5 — the additive mode used to call `runBackfillRecent`, which was
+    // WRONG for a user-facing "refresh now" and §76.5's check caught it: pressing
+    // the button issued the POST, the UI went through its states, and nothing in
+    // the database moved. `runBackfillRecent` re-values the series from prices
+    // ALREADY STORED on the positions — it never calls instruments. So the button
+    // re-derived yesterday's numbers and called it fresh. The force mode it
+    // replaced happened to fetch quotes (its tail runs `refreshQuotesUnlocked`),
+    // so moving the control to upsert silently removed the pricing it had.
+    //
+    // `recalcPortfolioSeries` is the same additive pass WITH the pricing tail —
+    // the one the mutation queue uses since §76.3 — so "refresh now" prices and
+    // then re-values, which is precisely what `snapshots-sync` does for the fleet
+    // (refreshQuotes, then the additive backfill). It must be called INSIDE
+    // `enqueueBackfill` because it takes the abort signal and does not enqueue
+    // itself; nesting an enqueue behind the pass awaiting it would self-deadlock
+    // (the reason `refreshQuotesUnlocked` exists as a separate export).
     if (c.req.query("mode") === "upsert") {
-      // additive + through today (the job's mode — re-values the last 2 days)
-      void runBackfillRecent(database, id, c.req.header("Authorization") ?? "").catch(() => undefined)
+      const token = c.req.header("Authorization") ?? ""
+      void enqueueBackfill(id, (signal) => recalcPortfolioSeries(database, id, token, new Date(), signal)).catch(
+        () => undefined,
+      )
     } else {
       void forcePortfolioRecalc(database, id, c.req.header("Authorization") ?? "").catch(() => undefined)
     }
