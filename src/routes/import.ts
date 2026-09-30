@@ -264,7 +264,13 @@ async function upsertImportPositionOnBuy(
       optionType: body.optionType ?? null,
       sector: body.sector ?? "Other",
       industry: body.industry ?? "Other",
-      country: body.country ?? "Other",
+      // §61 — NULL, not the "Other" sentinel. A *category* can be "Other"
+      // (sector/industry keep it, and quotes.ts `isBlankish` depends on it), but
+      // a country CODE cannot: `country` is 2-letter-or-null in the contract,
+      // and §61's TickerBadge rendered `(OTHER) Bond` on every Polish bond
+      // because "Other".toUpperCase() is not a code. The placeholder was a
+      // display bucket that escaped into a typed field.
+      country: body.country ?? null,
       fees: String(body.feesSettled),
       isOpen: true,
       // §72.13 — was `new Date()`, i.e. the import's own timestamp. Every one of
