@@ -37,6 +37,21 @@ import { instrumentsAuthHeaders, resolveRates } from "../services/instruments-fx
 const DEFAULT_TOLERANCE = 0.1
 /** How far back a weekend/holiday trade may borrow the previous close. */
 export const MAX_CARRY_DAYS = 7
+
+/**
+ * §74.3/74.4 — how far either side of an order-priced trade the audit will look
+ * for a bracketing bar.
+ *
+ * **This is an evidence-gathering radius, not a tolerance.** Nothing is declared
+ * reconciled merely by being inside it, so unlike a tolerance it cannot silence a
+ * genuine mismatch. PROD (§74.4) measured 102 forward / 26 backward / 36
+ * same-day among the 164 of 174 TFI trades that reconcile to a bar at all, with
+ * offsets reaching the edge of a ±21-day search — so the radius is set to 21
+ * days, comfortably past the Polish/TSE settlement convention of T+2/T+5 and past
+ * the 6-day gap in the broker's own worked example (order 2023-04-07, valuation
+ * 2023-04-13), while staying far short of "any bar in the year".
+ */
+export const ORDER_PRICED_WINDOW_DAYS = 21
 /** The ratio must sit this close to an FX rate before that pair is named. */
 const FX_HINT_TOLERANCE = 0.01
 
@@ -75,9 +90,37 @@ export interface TradeRow {
   instrumentCurrency: string | null
   type?: string
   exchangeRate?: number | null
+  /**
+   * §74.2 — `asset_type`, so an order-priced instrument can be identified by
+   * what it IS rather than by guessing from its ticker shape.
+   *
+   * Measured in PROD 2026-09-30 before writing the predicate, because the plan
+   * required it and because a `.TFI` suffix rule is a claim about provider
+   * conventions: `asset_type` is populated on 100% of the 1960 transaction
+   * rows, and every one of the 174 `*.TFI` BUY/SELL rows is `FUND`. The
+   * fallback is therefore unnecessary — and a fallback that is never exercised
+   * is a rule nobody can tell is dead.
+   */
+  assetType?: string | null
   /** §72.18 — the source row's id; a SELL sharing a base with an EXPIRATION is
    * an option premium, not a share trade. */
   externalId?: string | null
+}
+
+/**
+ * §74.2 — an instrument whose orders are priced at the NAV of the VALUATION
+ * date, not the order date. A PPO/PPI fund order placed on a Friday evening is
+ * priced at the next business day's NAV, and the broker's own detail says so in
+ * its field names: "Data zlecenia" / "Data wyceny" / "Cena Jednostki
+ * Uczestnictwa z dnia wyceny".
+ *
+ * Keyed on `asset_type === 'FUND'`, which PROD populates for every fund row.
+ */
+export const ORDER_PRICED_ASSET_TYPES = new Set(["FUND"])
+
+export function isOrderPriced(row: { assetType?: string | null }): boolean {
+  const t = (row.assetType ?? "").trim().toUpperCase()
+  return t !== "" && ORDER_PRICED_ASSET_TYPES.has(t)
 }
 
 export interface TradeVerdict {
@@ -94,6 +137,13 @@ export interface TradeVerdict {
   storedRate: number | null
   /** True when the trade row recorded two DIFFERENT currencies. */
   importConverted: boolean
+  /** §74.2 — the source row's asset class, for the report's provenance. */
+  assetType?: string | null
+  /** §74.3 — set on an order-priced trade. The deviation is left `null`. */
+  orderPriced?: boolean
+  /** The bracketing bars around an order-priced trade, with their offsets. */
+  orderPricedPrior?: { date: string; close: number; offsetDays: number } | null
+  orderPricedNext?: { date: string; close: number; offsetDays: number } | null
 }
 
 export interface SymbolReport {
@@ -105,6 +155,8 @@ export interface SymbolReport {
   positionCurrency: string | null
   /** No bars at all: nothing could be checked, which is itself worth saying. */
   unverifiable: boolean
+  /** §74 — trades that are order-priced and therefore not deviation-judged. */
+  orderPriced: number
   trades: TradeVerdict[]
 }
 
@@ -134,6 +186,46 @@ export function pickBar(
   )
   if (gap > maxCarryDays) return null
   return { close: best.close, carriedDays: gap }
+}
+
+/**
+ * §74.3 — the two bars that bracket an order-priced trade, and which side each
+ * one is on.
+ *
+ * `pickBar` carries BACKWARD, which is right for an exchange holiday and wrong
+ * for a fund order priced forward: on 2023-04-07 (Good Friday) it takes
+ * 2023-04-06 = 339.47, and 382.05 / 339.47 = 1.1254 — the 1.126 that §72.19 and
+ * §72.20 chased across nine ING Akcji categories.
+ *
+ * **This returns evidence, not a verdict, and that is deliberate.** §74.4
+ * measured the offsets in PROD and could not pin a window constant (see the
+ * note in the plan): 164 of 174 TFI trades reconcile to *some* bar within 10%,
+ * but the offsets run to the edge of the search window in both directions, so
+ * any constant is a guess about a distribution that is not there. A guess would
+ * also hide genuine mismatches, which the plan calls out as worse than the
+ * defect. So the audit reports the bracketing bars and declines to compute a
+ * deviation for a fund trade.
+ */
+export function pickOrderPricedBar(
+  bars: Map<string, number>,
+  date: string,
+  windowDays = ORDER_PRICED_WINDOW_DAYS,
+): {
+  prior: { date: string; close: number; offsetDays: number } | null
+  next: { date: string; close: number; offsetDays: number } | null
+} {
+  const at = (d: string) => Date.parse(`${d}T00:00:00Z`)
+  const target = at(date)
+  const day = 86_400_000
+  let prior: { date: string; close: number; offsetDays: number } | null = null
+  let next: { date: string; close: number; offsetDays: number } | null = null
+  for (const [d, close] of bars) {
+    const delta = Math.round((at(d) - target) / day)
+    if (delta === 0 || Math.abs(delta) > windowDays) continue
+    if (delta < 0 && (!prior || d > prior.date)) prior = { date: d, close, offsetDays: delta }
+    if (delta > 0 && (!next || d < next.date)) next = { date: d, close, offsetDays: delta }
+  }
+  return { prior, next }
 }
 
 /**
@@ -219,6 +311,14 @@ export function assessSymbol(
         : null
     const norm = normaliseToBarCurrency(t.tradePrice, t.tradeCurrency, t.claimedCurrency, rateToBar)
     const usable = t.barClose != null && Number.isFinite(norm.price)
+    // §74.3 — an order-priced fund trade is NOT deviation-judged. Its executed
+    // price belongs to a later valuation date by construction, so any ratio
+    // against a bar is a statement about the calendar rather than about the
+    // data, and reporting one manufactures findings that are true about the
+    // fund and false about the pipeline. `deviation: null` is what makes
+    // `summarise` skip it — the trade is still present in the report, with its
+    // bracketing bars, so nothing is hidden.
+    if (t.orderPriced) return { ...t, deviation: null }
     const deviation = usable ? deviationPct(norm.price, t.barClose!) : null
     // The hint stays on the RAW ratio: an unconverted gap that IS an FX rate is
     return { ...t, deviation }
@@ -239,6 +339,10 @@ export function summarise(
   return {
     symbol,
     checked: verdicts.length,
+    // §74 — an order-priced trade is counted as checked (it WAS compared against
+    // the bracketing bars) but never as unreconciled, because the ratio between
+    // an order price and a valuation-date NAV is not a defect.
+    orderPriced: verdicts.filter((v) => v.orderPriced).length,
     unreconciled: verdicts.filter((v) => v.deviation != null && Math.abs(v.deviation) > tolerance).length,
     worstDeviation: worst,
     claimedCurrency: verdicts[0]?.claimedCurrency ?? null,
@@ -326,6 +430,7 @@ async function main() {
              t.instrument_currency as "instrumentCurrency",
              t.exchange_rate::float8 as "exchangeRate",
              t.external_id as "externalId",
+             t.asset_type as "assetType",   -- §74.2: the rule keys on this
              t.type as type
       from portfolios.transactions t
       join portfolios.portfolios pf on pf.id = t.portfolio_id
@@ -369,7 +474,12 @@ async function main() {
         continue
       }
       const { bars, claimedCurrency } = barCache.get(t.symbol)!
-      const hit = pickBar(bars, t.date)
+      // §74.2/74.3 — an order-priced instrument is judged against the bars that
+      // BRACKET the order, not against the prior close, and is not given a
+      // deviation at all. `pickBar` is untouched for everything else.
+      const orderPriced = isOrderPriced(t)
+      const bracket = orderPriced ? pickOrderPricedBar(bars, t.date) : null
+      const hit = orderPriced ? null : pickBar(bars, t.date)
       const list = bySymbol.get(t.symbol) ?? []
       list.push({
         portfolioName: t.portfolioName,
@@ -379,6 +489,10 @@ async function main() {
         barClose: hit?.close ?? null,
         carriedDays: hit?.carriedDays ?? 0,
         deviation: hit ? deviationPct(t.price, hit.close) : null,
+        assetType: t.assetType ?? null,
+        orderPriced,
+        orderPricedPrior: bracket?.prior ?? null,
+        orderPricedNext: bracket?.next ?? null,
         tradeCurrency: (t.currency ?? "").toUpperCase(),
         claimedCurrency,
         storedRate: t.exchangeRate ?? null,
@@ -419,6 +533,8 @@ async function main() {
     reports.sort((a, b) => Math.abs(b.worstDeviation) - Math.abs(a.worstDeviation))
     const flagged = reports.filter((r) => r.unreconciled > 0)
     const unverifiable = reports.filter((r) => r.unverifiable)
+    const orderPricedReports = reports.filter((r) => r.orderPriced > 0)
+    const orderPricedTotal = orderPricedReports.reduce((n, r) => n + r.orderPriced, 0)
     const checked = reports.reduce((n, r) => n + r.trades.filter((t) => t.barClose != null).length, 0)
 
     if (asJson) {
@@ -461,6 +577,30 @@ async function main() {
               : "") +
             `\n`,
         )
+      }
+      // §74 — the order-priced trades are REPORTED, not hidden. "Every NN TFI
+      // trade is a false positive" was true of the old comparison and false of
+      // the data; saying so requires showing the reader the evidence rather than
+      // dropping the trades, which is what §71.6 was about for the audit above.
+      if (orderPricedReports.length > 0) {
+        console.log(
+          `[price-audit] ${orderPricedTotal} order-priced fund trade(s) across ` +
+            `${orderPricedReports.length} symbol(s) not deviation-judged (§74): a PPO/PPI ` +
+            `order is priced at the VALUATION date's NAV, so any ratio to a bar is a statement ` +
+            `about the calendar. The executed price and the bracketing bars are below.\n`,
+        )
+        for (const r of orderPricedReports) {
+          for (const v of r.trades.filter((t) => t.orderPriced)) {
+            const p = v.orderPricedPrior
+            const n = v.orderPricedNext
+            console.log(
+              `  ${v.symbol.padEnd(12)} ${v.date} ${v.portfolioName}: ${v.tradePrice} ${v.tradeCurrency}` +
+                (p ? ` · prior bar ${p.date} ${p.close} (${p.offsetDays}d)` : " · no prior bar") +
+                (n ? ` · next bar ${n.date} ${n.close} (+${n.offsetDays}d)` : " · no next bar"),
+            )
+          }
+        }
+        console.log("")
       }
       for (const r of flagged) {
         console.log(

@@ -2,10 +2,13 @@ import { describe, expect, it } from "vitest"
 import { instrumentsAuthHeaders } from "../services/instruments-fx.js"
 import {
   MAX_CARRY_DAYS,
+  ORDER_PRICED_WINDOW_DAYS,
   assessSymbol,
   deviationPct,
+  isOrderPriced,
   normaliseToBarCurrency,
   pickBar,
+  pickOrderPricedBar,
   resolveInstrumentsToken,
   summarise,
   type TradeVerdict,
@@ -279,5 +282,172 @@ describe("§72.18 — option premium legs are not share trades", () => {
     // base in the set, so a bare EXPIRATION must not make an unrelated SELL a leg.
     const legIds = new Set(["352caf673c34433e91a808f08f368cd2b75023f52fe221e67abbf88d0ebbc096"])
     expect(legIds.has("352caf673c34433e91a808f08f368cd2b75023f52fe221e67abbf88d0ebbc096#e")).toBe(false)
+  })
+})
+
+
+/**
+ * §74 — `price-audit` compares an order-priced fund trade against the wrong day's
+ * bar.
+ *
+ * The broker's own detail for the flagged row says why, in its field names:
+ *
+ *     Data zlecenia:  07.04.2023   (Good Friday — the market was shut)
+ *     Data wyceny:   13.04.2023
+ *     Cena Jednostki Uczestnictwa z dnia wyceny: 382,05 PLN
+ *
+ * `pickBar` takes the exact day else the most recent PRIOR close, so it picked
+ * 2023-04-06 = 339.47 and computed 382.05 / 339.47 = 1.1254 — the 1.126 that
+ * §72.19 and §72.20 chased across nine ING Akcji categories before §72.23 kept
+ * deferring the check. It was never a fund class, a share class or a provider
+ * gap. The price is correct; row 604 of the sheet must not be edited.
+ */
+describe("§74 — order-priced fund trades", () => {
+  // The real bars around the flagged trade, and the real executed prices.
+  const INGAKC_BARS = new Map([
+    ["2026-04-29", 396.8], ["2026-04-30", 397.1],
+    ["2023-04-05", 337.9], ["2023-04-06", 339.47],
+    // Good Friday 2023-04-07: no bar. The valuation date is 2023-04-13.
+    ["2023-04-10", 340.2], ["2023-04-11", 344.32], ["2023-04-12", 345.0],
+    ["2023-04-13", 382.05], ["2023-04-14", 380.1],
+  ])
+
+  it("74.1 — a FUND trade whose price matches a LATER bar is not a mismatch", () => {
+    // The defect, as the audit behaves today: a ratio against the prior close.
+    const oldWay = pickBar(INGAKC_BARS, "2023-04-07")
+    expect(oldWay).toEqual({ close: 339.47, carriedDays: 1 })
+    expect(deviationPct(382.05, oldWay!.close)).toBeCloseTo(0.1254, 3)
+    expect(Math.abs(deviationPct(382.05, oldWay!.close))).toBeGreaterThan(0.1) // over tolerance
+
+    // The rule: an order-priced trade is NOT deviation-judged, so the trade
+    // reconciles. The bracketing bars are the evidence instead.
+    const verdicts = assessSymbol([
+      {
+        portfolioName: "NN TFI PPO", symbol: "INGAKC.TFI", date: "2023-04-07",
+        tradePrice: 382.05, barClose: null, carriedDays: 0, deviation: null,
+        tradeCurrency: "PLN", claimedCurrency: "PLN", storedRate: 1,
+        importConverted: false, assetType: "FUND", orderPriced: true,
+        orderPricedPrior: pickOrderPricedBar(INGAKC_BARS, "2023-04-07").prior,
+        orderPricedNext: pickOrderPricedBar(INGAKC_BARS, "2023-04-07").next,
+      },
+    ])
+    expect(verdicts[0].deviation).toBeNull()
+    const report = summarise("INGAKC.TFI", verdicts, "PLN", 0.1)
+    expect(report.unreconciled).toBe(0)
+    expect(report.orderPriced).toBe(1)
+    // The evidence is the NEAREST bar each side — deliberately NOT the bar the
+    // price happens to match. The audit says "here is the local range"; it does
+    // not claim to know the valuation date, which is §74.5's open question.
+    expect(verdicts[0].orderPricedPrior).toEqual({ date: "2023-04-06", close: 339.47, offsetDays: -1 })
+    expect(verdicts[0].orderPricedNext).toEqual({ date: "2023-04-10", close: 340.2, offsetDays: 3 })
+  })
+
+  it("74.1 CONTROL — the same trade against a PRIOR bar is still judged, so the fix cannot be satisfied by widening a tolerance", () => {
+    // If the rule were "widen every tolerance", this exchange-traded trade would
+    // also stop being reported. It must not.
+    const verdicts = assessSymbol([
+      {
+        portfolioName: "IKE Marek", symbol: "SAP.DE", date: "2023-04-07",
+        tradePrice: 382.05, barClose: 339.47, carriedDays: 1, deviation: null,
+        tradeCurrency: "PLN", claimedCurrency: "PLN", storedRate: 1,
+        importConverted: false, assetType: "STOCK",
+      },
+    ])
+    expect(Math.abs(verdicts[0].deviation!)).toBeGreaterThan(0.1)
+    const report = summarise("SAP.DE", verdicts, "PLN", 0.1)
+    expect(report.unreconciled).toBe(1)
+    expect(report.orderPriced).toBe(0)
+  })
+
+  it("74.2 — an order-priced instrument is identified by asset_type, never by ticker shape", () => {
+    expect(isOrderPriced({ assetType: "FUND" })).toBe(true)
+    expect(isOrderPriced({ assetType: "fund" })).toBe(true)
+    expect(isOrderPriced({ assetType: "STOCK" })).toBe(false)
+    expect(isOrderPriced({ assetType: "BOND" })).toBe(false)
+    // A FUND with a ticker that does not end in .TFI is still order-priced —
+    // that is the point of keying on the class rather than the shape.
+    expect(isOrderPriced({ assetType: "FUND" })).toBe(true)
+    // And an unpopulated column must not be guessed from the symbol: a real
+    // exchange-traded fund on a major exchange is priced on the trade date.
+    expect(isOrderPriced({ assetType: null })).toBe(false)
+    expect(isOrderPriced({ assetType: "" })).toBe(false)
+    expect(isOrderPriced({})).toBe(false)
+  })
+
+  it("74.3 — the bracketing bars are found on BOTH sides, each with its signed offset", () => {
+    const { prior, next } = pickOrderPricedBar(INGAKC_BARS, "2023-04-07")
+    expect(prior).toEqual({ date: "2023-04-06", close: 339.47, offsetDays: -1 })
+    expect(next).toEqual({ date: "2023-04-10", close: 340.2, offsetDays: 3 })
+    // A trade on a bar's own day is still bracketed by its neighbours, so a
+    // reader can see the local range either way.
+    const mid = pickOrderPricedBar(INGAKC_BARS, "2023-04-11")
+    expect(mid.prior).toEqual({ date: "2023-04-10", close: 340.2, offsetDays: -1 })
+    expect(mid.next).toEqual({ date: "2023-04-12", close: 345, offsetDays: 1 })
+  })
+
+  it("74.3 — pickBar is UNCHANGED for an exchange-traded instrument", () => {
+    // Carrying backward is right for an exchange holiday. The fix is a second
+    // function, not a rewritten one.
+    expect(pickBar(new Map([["2023-04-06", 339.47]]), "2023-04-07")).toEqual({
+      close: 339.47,
+      carriedDays: 1,
+    })
+    expect(pickBar(new Map([["2023-04-13", 382.05]]), "2023-04-07")).toBeNull()
+  })
+
+  it("74.4 — the window is an evidence radius, and it reaches the real 6-day gap", () => {
+    // The broker's own example: order 2023-04-07, valuation 2023-04-13 = 6 days.
+    expect(ORDER_PRICED_WINDOW_DAYS).toBeGreaterThanOrEqual(6)
+    // Far short of "any bar in the year", so it cannot pair a trade with an
+    // unrelated price.
+    expect(ORDER_PRICED_WINDOW_DAYS).toBeLessThan(60)
+    // Nothing outside the radius is returned as a bracket.
+    const far = pickOrderPricedBar(new Map([["2023-06-01", 500]]), "2023-04-07")
+    expect(far.prior).toBeNull()
+    expect(far.next).toBeNull()
+  })
+
+  it("an order-priced trade is still COUNTED as checked — it is not a free pass", () => {
+    // §71.6's lesson: dropping the evidence is worse than reporting it oddly.
+    const verdicts = assessSymbol([
+      {
+        portfolioName: "NN TFI PPO", symbol: "INGAKC.TFI", date: "2023-04-07",
+        tradePrice: 382.05, barClose: null, carriedDays: 0, deviation: null,
+        tradeCurrency: "PLN", claimedCurrency: "PLN", storedRate: 1,
+        importConverted: false, assetType: "FUND", orderPriced: true,
+      },
+    ])
+    const report = summarise("INGAKC.TFI", verdicts, "PLN", 0.1)
+    expect(report.checked).toBe(1)
+    expect(report.orderPriced).toBe(1)
+    expect(report.unreconciled).toBe(0)
+    // and the trade is present in the report, not filtered out of it
+    expect(report.trades).toHaveLength(1)
+    expect(report.trades[0].tradePrice).toBe(382.05)
+  })
+
+  it("a MIXED symbol judges its exchange-traded trades and exempts only the fund ones", () => {
+    const verdicts = assessSymbol([
+      // the STOCK trade genuinely deviates, so it must be reported
+      {
+        portfolioName: "NN TFI PPO", symbol: "X", date: "2026-01-05",
+        tradePrice: 150, barClose: 100, carriedDays: 0, deviation: null,
+        tradeCurrency: "PLN", claimedCurrency: "PLN", storedRate: 1,
+        importConverted: false, assetType: "STOCK",
+      },
+      // a 50%-off fund trade: the same number, and it is NOT a finding
+      {
+        portfolioName: "NN TFI PPO", symbol: "X", date: "2026-01-06",
+        tradePrice: 200, barClose: 100, carriedDays: 0, deviation: null,
+        tradeCurrency: "PLN", claimedCurrency: "PLN", storedRate: 1,
+        importConverted: false, assetType: "FUND", orderPriced: true,
+      },
+    ])
+    const report = summarise("X", verdicts, "PLN", 0.1)
+    expect(report.checked).toBe(2)
+    expect(report.orderPriced).toBe(1)
+    expect(report.unreconciled).toBe(1) // the STOCK one (+50%) is still judged
+    expect(verdicts.find((v) => v.date === "2026-01-06")!.deviation).toBeNull()
+    expect(verdicts.find((v) => v.date === "2026-01-05")!.deviation).toBeCloseTo(0.5, 6)
   })
 })
