@@ -1,5 +1,10 @@
 import { describe, expect, it } from "vitest"
-import { findCurrencyMismatches, findReconciliationGaps, findUnfundedPortfolios } from "./valuation-audit.js"
+import {
+  CROSS_LISTINGS,
+  findCurrencyMismatches,
+  findReconciliationGaps,
+  findUnfundedPortfolios,
+} from "./valuation-audit.js"
 
 /**
  * §71 — CRI.WA carried `CAD` on the position while both of its BUY transactions
@@ -108,6 +113,76 @@ describe("valuation audit — reconciliation", () => {
     const row = gap({ liveValue: 91_800 }) // +1.82% — inside the 2% default
     expect(findReconciliationGaps([row])).toEqual([])
     expect(findReconciliationGaps([{ ...row, tolerance: 0.01 }])).toHaveLength(1)
+  })
+})
+
+/**
+ * §71.6 — `MFC` is a KNOWN false positive and the plan asks for a decision:
+ * narrow the rule, or record the exception.
+ *
+ * **Recorded, not narrowed.** A wrong symbol produces the same signature — a
+ * stored value that no longer matches the live one — so no threshold, ratio or
+ * shape test separates "bought on the other line" from "the resolver picked the
+ * wrong line". Narrowing would either eat real findings or need a guess about
+ * provider conventions.
+ *
+ * **And not suppressed either.** The complaint in §71.6 is that a permanent red
+ * line trains people to skim past real findings; deleting the evidence does not
+ * fix that, it just makes the rule unchallengeable. So the finding is still
+ * emitted, carries its reason, and is excluded from the exit code.
+ */
+describe("valuation audit — known cross-listings (§71.6)", () => {
+  const gap = (o: Partial<Parameters<typeof findReconciliationGaps>[0][number]>) => ({
+    portfolioId: "pf-1",
+    portfolioName: "Rach. rejestrowy PKO BP",
+    snapshotDate: "2026-09-27",
+    storedValue: 45_000,
+    liveValue: 45_000,
+    ...o,
+  })
+
+  it("classifies a known cross-listing instead of reporting it as a defect", () => {
+    const found = findReconciliationGaps([
+      gap({ symbol: "MFC", positionSymbols: ["MFC"], liveValue: 52_000 }),
+    ])
+    expect(found).toHaveLength(1)
+    expect(found[0].classification).toBe("known-cross-listing")
+    expect(found[0].classificationReason).toMatch(/Mastercard/)
+  })
+
+  it("STILL REPORTS it — the finding is not deleted, only explained", () => {
+    // Suppressing it would remove the evidence and leave the rule
+    // unchallengeable, which is the failure §71.6 is actually about.
+    const found = findReconciliationGaps([
+      gap({ symbol: "MFC", positionSymbols: ["MFC"], liveValue: 52_000 }),
+    ])
+    expect(found).toHaveLength(1)
+    expect(found[0].deltaPct).toBeCloseTo(52_000 / 45_000 - 1, 6)
+  })
+
+  it("does NOT classify a symbol that is not on the list", () => {
+    // The whole value of the list is that it is curated. A typo in the lookup,
+    // or a new holding, must not inherit a free pass.
+    const found = findReconciliationGaps([
+      gap({ symbol: "MFCX", positionSymbols: ["MFCX"], liveValue: 52_000 }),
+    ])
+    expect(found[0].classification).toBeUndefined()
+  })
+
+  it("does not classify anything when the position's symbol is unknown", () => {
+    const found = findReconciliationGaps([gap({ liveValue: 52_000 })])
+    expect(found[0].classification).toBeUndefined()
+  })
+
+  it("every entry carries a reason — an unexplained entry is a mistake", () => {
+    for (const [symbol, reason] of Object.entries(CROSS_LISTINGS)) {
+      expect(reason, `${symbol} has no recorded reason`).toBeTruthy()
+      expect(reason.length, `${symbol}'s reason is too short to be a justification`).toBeGreaterThan(40)
+    }
+  })
+
+  it("a cross-listing inside tolerance is still quiet", () => {
+    expect(findReconciliationGaps([gap({ symbol: "MFC", liveValue: 45_500 })])).toEqual([])
   })
 })
 

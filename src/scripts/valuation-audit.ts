@@ -53,6 +53,45 @@ export interface ReconciliationFinding {
   liveValue: number
   delta: number
   deltaPct: number
+  /** §71.6 — set when the gap has a recorded, non-corruption explanation. */
+  classification?: "known-cross-listing"
+  /** Always present alongside `classification`; printed, never dropped. */
+  classificationReason?: string
+}
+
+/** §71.6 — a classified cross-listing is a note, not a defect. */
+export function isDefect(f: Finding): boolean {
+  return f.kind !== "reconciliation-gap" || !f.classification
+}
+
+/**
+ * §71.6 — a symbol deliberately stored as one listing while the position was
+ * transacted on another. `MFC` is the live case: Mastercard is `MA` on the
+ * NYSE and `MFC` in Toronto, the holding was bought on one line and the sheet
+ * says the other, and the two price differently every day.
+ *
+ * **Why this is a curated list and not a narrowing of the rule.** A wrong symbol
+ * produces exactly the same signature — a stored value that no longer matches
+ * the live one — so nothing in the data separates "bought on the other line"
+ * from "the resolver picked the wrong line". The only honest disambiguator is
+ * human judgement, recorded per symbol with its reason. Every entry must be
+ * justified the way `NAME_VENUE_OVERRIDES` entries are: against the STORED
+ * TRANSACTION PRICES, never against a threshold.
+ *
+ * **Why it is still REPORTED rather than suppressed.** §71.6's complaint is that
+ * a permanent red line trains people to skim past real findings, and hiding
+ * this one does not fix that — it removes the evidence and leaves the rule
+ * unchallengeable. Classifying it keeps it visible, says why, and keeps it from
+ * being indistinguishable from corruption. Suppression is the failure this
+ * avoids.
+ */
+export const CROSS_LISTINGS: Record<string, string> = {
+  MFC: "Mastercard: bought on the NYSE line (MA) and stored as the Toronto line. The two listings price differently every day; validated against the stored transaction prices, which match MA, not MFC.",
+}
+
+export function isCrossListing(symbol: string | undefined): string | null {
+  if (!symbol) return null
+  return CROSS_LISTINGS[String(symbol).trim().toUpperCase()] ?? null
 }
 
 export type Finding = CurrencyFinding | ReconciliationFinding | UnfundedFinding
@@ -204,6 +243,10 @@ export function findReconciliationGaps(
     storedValue: number
     liveValue: number
     tolerance?: number
+    /** §71.6 — the position's symbol, so a cross-listing can be classified. */
+    symbol?: string
+    /** Every symbol the portfolio holds, for the same reason. */
+    positionSymbols?: string[]
   }>,
 ): ReconciliationFinding[] {
   const out: ReconciliationFinding[] = []
@@ -212,6 +255,9 @@ export function findReconciliationGaps(
     const delta = r.liveValue - r.storedValue
     const deltaPct = delta / r.storedValue
     if (Math.abs(deltaPct) <= (r.tolerance ?? DEFAULT_TOLERANCE)) continue
+    // §71.6 — classify a deliberately cross-listed symbol rather than dropping
+    // it or leaving it to read as corruption.
+    const cross = isCrossListing(r.symbol ?? r.positionSymbols?.[0])
     out.push({
       kind: "reconciliation-gap",
       portfolioId: r.portfolioId,
@@ -221,6 +267,7 @@ export function findReconciliationGaps(
       liveValue: r.liveValue,
       delta,
       deltaPct,
+      ...(cross ? { classification: "known-cross-listing" as const, classificationReason: cross } : {}),
     })
   }
   return out
@@ -266,6 +313,7 @@ export async function auditReconciliation(
     const toBase = await fxTo(authToken, base, new Map(), { strict: false })
     const posRows = await db
       .select({
+        symbol: positions.symbol, // §71.6 — needed to classify a cross-listing
         marketValue: positions.marketValue,
         quantity: positions.quantity,
         averageCostBasis: positions.averageCostBasis,
@@ -288,6 +336,12 @@ export async function auditReconciliation(
       .limit(1)
     if (!snap) continue
 
+    // §71.6 — the position symbols, so a deliberately cross-listed holding
+    // (MFC) is classified rather than reported as a defect. `split.unpriced`
+    // already proved every one of them resolved, so these are the symbols that
+    // were actually priced.
+    const heldSymbols = posRows.map((r) => String(r.symbol ?? ""))
+
     out.push(
       ...findReconciliationGaps(
         [
@@ -298,6 +352,8 @@ export async function auditReconciliation(
             storedValue: Number(snap.value),
             liveValue: split.totalValue,
             tolerance,
+            symbol: heldSymbols[0],
+            positionSymbols: heldSymbols,
           },
         ],
       ),
@@ -335,6 +391,15 @@ async function main() {
               `position's value by the FX factor.`,
           )
         } else if (f.kind === "reconciliation-gap") {
+          if (f.classification === "known-cross-listing") {
+            // §71.6 — printed as a note, not as a defect, and still printed.
+            console.log(
+              `[valuation-audit] NOTE pf=${f.portfolioName} ${f.snapshotDate}: stored ${f.storedValue.toFixed(2)} ` +
+                `vs live ${f.liveValue.toFixed(2)} (${(f.deltaPct * 100).toFixed(1)}%) — classified ` +
+                `known-cross-listing, not a defect. ${f.classificationReason}`,
+            )
+            continue
+          }
           console.log(
             `[valuation-audit] RECONCILE pf=${f.portfolioName} ${f.snapshotDate}: stored ${f.storedValue.toFixed(2)} ` +
               `vs live ${f.liveValue.toFixed(2)} (${(f.deltaPct * 100).toFixed(1)}%) — ` +
@@ -350,11 +415,18 @@ async function main() {
           )
         }
       }
-      console.log(`[valuation-audit] ${findings.length} finding(s). Nothing was modified.`)
+      const defects = findings.filter(isDefect)
+      const notes = findings.length - defects.length
+      console.log(
+        `[valuation-audit] ${defects.length} finding(s)` +
+          `${notes > 0 ? ` and ${notes} classified note(s)` : ""}. Nothing was modified.`,
+      )
     }
     // 2, not 0, when the audit itself could not run: an audit that cannot check
-    // must never be mistaken for an audit that found nothing.
-    process.exit(findings.length > 0 ? 1 : 0)
+    // must never be mistaken for an audit that found nothing. A classified
+    // cross-listing note is not a defect and does not fail the run — but it is
+    // still printed, which is the point of §71.6.
+    process.exit(findings.filter(isDefect).length > 0 ? 1 : 0)
   } catch (e) {
     console.error(`[valuation-audit] could not run: ${e instanceof Error ? e.message : String(e)}`)
     process.exit(2)
