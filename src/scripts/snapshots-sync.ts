@@ -52,11 +52,21 @@ async function main() {
       //
       // This job used to call only `runBackfillRecent`, so nothing in the
       // scheduled pipeline ever wrote `positions.market_value`. The only writer
-      // is `refreshQuotes`, which ran solely when a user OPENED a portfolio. So
+      // was `refreshQuotes`, which ran whenever a user OPENED a portfolio. So
       // after any re-import every position was unpriced, and the aggregate
       // quietly reported each one's COST as its market value — the dashboard
       // understated net worth by ~261k PLN on PROD while looking entirely
       // plausible (two PLN funds sat exactly on their cost to the złoty).
+      //
+      // §76.1 — since then reads stopped pricing: no GET route calls
+      // `refreshQuotes` any more (it survived D58 only in
+      // routes/portfolio-transactions.ts, which is where portfolio-open reads
+      // positions from). So as of §76.1 this job is not merely the safer writer,
+      // it is the ONLY one in the scheduled pipeline, and a portfolio whose
+      // prices have gone stale stays stale until this runs or a write
+      // re-prices it. `snapshots-sync` is therefore the thing that keeps the
+      // dashboard truthful; if this job stops, §76.5's cron-coverage check is
+      // what should fail.
       //
       // `refreshQuotes` never throws (instruments errors keep stored values and
       // mark priceSource 'fallback'), so this cannot fail the job. The backfill

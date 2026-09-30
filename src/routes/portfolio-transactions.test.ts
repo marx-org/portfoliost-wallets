@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest"
+import { describe, expect, it, vi } from "vitest"
 import { Hono } from "hono"
 import { createPortfolioRoutes } from "./portfolios.js"
 import { createPublicShareRoutes } from "./portfolios.js"
@@ -2102,5 +2102,182 @@ describe("§68: instruments + cash == total, everywhere", () => {
       // must not be reported as USD
       expect(body.baseCurrency).toBe("PLN")
     } finally { unmockInstrumentsFx() }
+  })
+})
+
+// ─────────────────────────────────────────────────────────────────────────────
+// §76.1 — read purity. A GET must not write.
+//
+// These tests are built to have TEETH: instruments is mocked to return a price
+// that differs from the seeded one, so if `refreshQuotes` were still reachable
+// from a GET, market_value / price_as_of / value_snapshots would all move and
+// the assertions below would fail. Asserting the response body alone would pass
+// with the write still in place, which is the mistake D58 made.
+// ─────────────────────────────────────────────────────────────────────────────
+describe("§76.1 — GET read paths are pure (no writes)", () => {
+  /** Quote the mocks will return: deliberately ≠ the seeded cost of 150. */
+  const LIVE_PRICE = 999
+
+  function mockInstrumentsQuote() {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockImplementation((url: string) => {
+        const u = String(url)
+        if (u.includes("/profile")) {
+          return Promise.resolve({
+            ok: true,
+            json: async () => ({
+              ticker: "AAPL",
+              name: "Apple Inc.",
+              country: "US",
+              finnhubIndustry: "Technology",
+              currency: "USD",
+              currencySource: "provider",
+            }),
+          })
+        }
+        return Promise.resolve({
+          ok: true,
+          json: async () => ({
+            symbol: "AAPL",
+            currentPrice: LIVE_PRICE,
+            change: 0,
+            percentChange: 0,
+            currency: "USD",
+          }),
+        })
+      }),
+    )
+  }
+
+  /** Everything a pricing read would touch, captured in one comparable object. */
+  async function captureState(
+    db: Awaited<ReturnType<typeof makeHarness>>["db"],
+    portfolioId: string,
+  ) {
+    const snaps = await db
+      .select({ n: sql<number>`count(*)::int` })
+      .from(valueSnapshots)
+      .where(eq(valueSnapshots.portfolioId, portfolioId))
+    const pf = await db
+      .select({ currentValue: portfolios.currentValue })
+      .from(portfolios)
+      .where(eq(portfolios.id, portfolioId))
+    const pos = await db
+      .select({
+        symbol: positions.symbol,
+        marketValue: positions.marketValue,
+        priceAsOf: positions.priceAsOf,
+        priceSource: positions.priceSource,
+      })
+      .from(positions)
+      .where(eq(positions.portfolioId, portfolioId))
+    return {
+      snapshotCount: snaps[0]?.n ?? 0,
+      currentValue: pf[0]?.currentValue ?? null,
+      positions: pos.map((p) => ({
+        symbol: p.symbol,
+        marketValue: p.marketValue,
+        priceAsOf: p.priceAsOf ? new Date(p.priceAsOf).toISOString() : null,
+        priceSource: p.priceSource,
+      })),
+    }
+  }
+
+  /** A portfolio with one open AAPL position bought at 150, deliberately stale. */
+  async function seedStalePortfolio(a: Hono, h: Awaited<ReturnType<typeof makeHarness>>) {
+    const createRes = await a.request("/api/portfolios", {
+      method: "POST",
+      headers: h.headers,
+      body: JSON.stringify({ name: "Purity", currency: "USD" }),
+    })
+    const portfolio = await createRes.json()
+    // Buy, then hand the position a stale price so a refresh would be visible.
+    await a.request(`/api/portfolios/${portfolio.id}/transactions`, {
+      method: "POST",
+      headers: h.headers,
+      body: JSON.stringify(BUY_BODY),
+    })
+    await h.db
+      .update(positions)
+      .set({ marketValue: "1500", priceAsOf: null, priceSource: "manual" })
+      .where(eq(positions.portfolioId, portfolio.id))
+    await h.db
+      .update(portfolios)
+      .set({ currentValue: "1500" })
+      .where(eq(portfolios.id, portfolio.id))
+    return portfolio.id as string
+  }
+
+  const READS = [
+    { name: "GET /:id/positions", path: (id: string) => `/api/portfolios/${id}/positions` },
+    { name: "GET /:id/allocation", path: (id: string) => `/api/portfolios/${id}/allocation` },
+    {
+      name: "GET /:id/positions/cfd-hints",
+      path: (id: string) => `/api/portfolios/${id}/positions/cfd-hints`,
+    },
+  ] as const
+
+  for (const read of READS) {
+    it(`${read.name} writes nothing: snapshots, current_value and price_as_of unchanged`, async () => {
+      process.env.INSTRUMENTS_URL = "http://instruments:3000"
+      mockInstrumentsQuote()
+      try {
+        const h = await makeHarness()
+        const a = app(h.db)
+        const portfolioId = await seedStalePortfolio(a, h)
+
+        const before = await captureState(h.db, portfolioId)
+
+        const res = await a.request(read.path(portfolioId), { headers: h.headers })
+        expect(res.status).toBe(200)
+
+        const after = await captureState(h.db, portfolioId)
+        expect(after).toEqual(before)
+        // spelled out so a failure names the write, not just a blob diff
+        expect(after.snapshotCount).toBe(before.snapshotCount)
+        expect(after.currentValue).toBe(before.currentValue)
+        expect(after.positions[0]?.priceAsOf).toBe(before.positions[0]?.priceAsOf)
+        expect(after.positions[0]?.marketValue).toBe(before.positions[0]?.marketValue)
+      } finally {
+        vi.unstubAllGlobals()
+        delete process.env.INSTRUMENTS_URL
+      }
+    })
+  }
+
+  it("GET /:id/positions still carries priceAsOf/priceSource per position (§61/§70)", async () => {
+    const h = await makeHarness()
+    const a = app(h.db)
+    const createRes = await a.request("/api/portfolios", {
+      method: "POST",
+      headers: h.headers,
+      body: JSON.stringify({ name: "Purity shape", currency: "USD" }),
+    })
+    const portfolio = await createRes.json()
+    await a.request(`/api/portfolios/${portfolio.id}/transactions`, {
+      method: "POST",
+      headers: h.headers,
+      body: JSON.stringify(BUY_BODY),
+    })
+    // give it a real as-of so the field is non-null and actually travelling
+    await h.db
+      .update(positions)
+      .set({ priceAsOf: new Date("2026-09-30T06:00:00Z"), priceSource: "quote" })
+      .where(eq(positions.portfolioId, portfolio.id))
+
+    const body = await (
+      await a.request(`/api/portfolios/${portfolio.id}/positions`, { headers: h.headers })
+    ).json()
+
+    expect(body).toHaveLength(1)
+    const p = body[0]
+    expect(p.symbol).toBe("AAPL")
+    expect(Number(p.quantity)).toBe(10)
+    expect(p.priceSource).toBe("quote")
+    expect(p.priceAsOf).toBe("2026-09-30T06:00:00.000Z")
+    // the wire fields §61/§70 depend on must still be present, not undefined
+    expect(p).toHaveProperty("marketValue")
+    expect(p).toHaveProperty("currentPrice")
   })
 })

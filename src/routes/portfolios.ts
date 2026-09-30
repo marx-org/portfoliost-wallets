@@ -873,6 +873,15 @@ async function resolveAggregateBase(
     //
     // The summaries below are built entirely from stored columns, so nothing
     // here depends on a refresh having just run.
+    //
+    // §76.1 — D58 removed the refresh from THIS module, but portfolio-open reads
+    // its holdings through the *transactions* module (`GET /:id/positions`,
+    // `GET /:id/allocation`, `GET /:id/positions/cfd-hints` in
+    // routes/portfolio-transactions.ts), where the call survived. So the removal
+    // above fixed a route the SPA does not use for that data. §76.1 completes
+    // D58 there; the comment here stood true while the write lived two files
+    // away. If you are looking for where positions stop being re-priced on a
+    // read, it is those three handlers, not this one.
 
     // Fetch position summaries
     const posRows = await database

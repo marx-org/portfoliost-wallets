@@ -1202,8 +1202,11 @@ export function createTransactionRoutes(db?: DB) {
     const portfolio = await loadPortfolio(database, portfolioId, identity.id)
     if (!portfolio) return c.json({ error: "NotFound", message: "Portfolio not found" }, 404)
 
-    await refreshQuotes(database, identity.id, portfolioId, c.req.header("Authorization") ?? "")
-
+    // §76.1 — this route used to `await refreshQuotes(...)`, so *opening* a
+    // portfolio wrote prices, today's snapshot and current_value through three
+    // tables. Prices now come from the twice-daily cron and from writes; a read
+    // prices nothing. Do not reintroduce the call here — §76.1's route tests
+    // assert value_snapshots/current_value/price_as_of are unchanged by a GET.
     const labelsFilter = labelFilterIds(c.req.query("labels"))
     const conditions: SQL[] = [
       eq(positions.userId, identity.id),
@@ -1248,7 +1251,7 @@ export function createTransactionRoutes(db?: DB) {
     const portfolio = await loadPortfolio(database, portfolioId, identity.id)
     if (!portfolio) return c.json({ error: "NotFound", message: "Portfolio not found" }, 404)
 
-    await refreshQuotes(database, identity.id, portfolioId, c.req.header("Authorization") ?? "")
+    // §76.1 — no refresh: this is a read (see GET /:id/positions above).
 
     const posRows = await database
       .select()
@@ -1361,7 +1364,8 @@ export function createTransactionRoutes(db?: DB) {
     const portfolio = await loadPortfolio(database, portfolioId, identity.id)
     if (!portfolio) return c.json({ error: "NotFound", message: "Portfolio not found" }, 404)
 
-    await refreshQuotes(database, identity.id, portfolioId, c.req.header("Authorization") ?? "")
+    // §76.1 — no refresh: this is a read (see GET /:id/positions above). The
+    // endpoint and its response shape are unchanged; only the write is gone.
 
     const posRows = await database
       .select()
