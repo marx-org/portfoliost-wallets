@@ -129,13 +129,30 @@ describe("getPortfolioNews", () => {
 describe("mergePortfolioNews", () => {
   it("sorts desc and caps at limit", () => {
     const rows = [
-      { url: "https://a.com/2", title: "t2", summary: null, source: null, publishedAt: new Date("2026-01-01T00:00:00Z"), symbols: [] },
-      { url: "https://a.com/1", title: "t1", summary: null, source: null, publishedAt: new Date("2026-06-01T00:00:00Z"), symbols: [] },
-      { url: "https://a.com/3", title: "t3", summary: null, source: null, publishedAt: new Date("2026-12-01T00:00:00Z"), symbols: [] },
+      { url: "https://a.com/2", title: "t2", summary: null, source: null, publishedAt: new Date("2026-01-01T00:00:00Z"), symbols: [], requestedTicker: "NVDA" },
+      { url: "https://a.com/1", title: "t1", summary: null, source: null, publishedAt: new Date("2026-06-01T00:00:00Z"), symbols: [], requestedTicker: "NVDA" },
+      { url: "https://a.com/3", title: "t3", summary: null, source: null, publishedAt: new Date("2026-12-01T00:00:00Z"), symbols: [], requestedTicker: "NVDA" },
     ]
     const out = mergePortfolioNews(rows, 2)
     expect(out.data.map((d) => d.id)).toEqual(["https://a.com/3", "https://a.com/1"])
     expect(out.pagination.count).toBe(2)
     expect(out.pagination.has_next_page).toBe(false)
+  })
+
+  // §61.11 PROD finding. One article can cover several companies, so
+  // `symbols[0]` is whichever the provider listed first — often a company the
+  // portfolio does not hold. Captioning with it made 37/50 news cards render a
+  // bare ticker, because the SPA then enriched a name that was not a position.
+  it("captions with the REQUESTED ticker, not symbols[0]", () => {
+    const rows = [
+      {
+        url: "https://a.com/1", title: "t", summary: null, source: null,
+        publishedAt: new Date("2026-06-01T00:00:00Z"),
+        symbols: ["MSFT", "NVDA"], requestedTicker: "NVDA",
+      },
+    ]
+    const out = mergePortfolioNews(rows, 10)
+    expect(out.data[0].ticker).toBe("NVDA")
+    expect(out.data[0].ticker).not.toBe("MSFT")
   })
 })

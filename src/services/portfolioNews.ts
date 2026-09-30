@@ -39,6 +39,18 @@ export interface PortfolioNewsRow {
   source: string | null
   publishedAt: Date
   symbols: string[]
+  /**
+   * The ticker this article was fetched FOR, not one of the companies it
+   * happens to mention. `news_articles.symbols` is a text[] because a single
+   * article can cover several companies, so the array's first element is
+   * whichever one the provider happened to list first — frequently a company
+   * this portfolio does not own. §61.11: captioned with that, 37 of 50 news
+   * cards rendered a bare ticker because the SPA enriched a name that was not
+   * a holding. The requested ticker is by construction one of the article's
+   * symbols (`arrayContains(symbols, [ticker])`), and it is the one the user
+   * actually holds.
+   */
+  requestedTicker: string
 }
 
 /** Distinct open symbols of a portfolio (own schema only). */
@@ -87,7 +99,14 @@ async function fetchTickerNews(
         summary: typeof article.description === "string" ? article.description : null,
         source: typeof article.source === "string" ? article.source : null,
         publishedAt: new Date(typeof a.published_at === "string" ? a.published_at : ""),
-        symbols: typeof a.ticker === "string" ? [a.ticker] : [],
+        // Keep what instruments actually reported, but never let it become the
+        // caption — `requestedTicker` is the holding, and it is authoritative.
+        symbols: Array.isArray(a.symbols)
+          ? a.symbols.filter((x): x is string => typeof x === "string")
+          : typeof a.ticker === "string"
+            ? [a.ticker]
+            : [],
+        requestedTicker: ticker,
       }
     }).filter((r): r is PortfolioNewsRow => {
       if (!r) return false
@@ -144,7 +163,7 @@ export function mergePortfolioNews(rows: PortfolioNewsRow[], limit = 50): {
   const data = page.map((r) => ({
     id: r.url,
     type: "article",
-    ...(r.symbols[0] ? { ticker: r.symbols[0] } : {}),
+    ...(r.requestedTicker ? { ticker: r.requestedTicker } : {}),
     metadata: r.source ? { source: r.source } : undefined,
     article: {
       title: r.title,
