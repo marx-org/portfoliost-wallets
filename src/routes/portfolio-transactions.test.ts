@@ -13,7 +13,7 @@ import {
   portfolioCashTransactions,
   valueSnapshots,
 } from "../db/schema.js"
-import { eq, sql } from "drizzle-orm"
+import { and, eq, sql } from "drizzle-orm"
 
 function app(db: Parameters<typeof makeHarness>[0] extends string ? never : Parameters<typeof createPortfolioRoutes>[0]) {
   const a = new Hono()
@@ -2101,6 +2101,145 @@ describe("§68: instruments + cash == total, everywhere", () => {
       // every portfolio is PLN-based, so the honest aggregate base is PLN — and it
       // must not be reported as USD
       expect(body.baseCurrency).toBe("PLN")
+    } finally { unmockInstrumentsFx() }
+  })
+})
+
+// ─────────────────────────────────────────────────────────────────────────────
+// §63.2 — the headline must equal the chart's last point.
+//
+// The comparison a user actually makes is "add up the cards, compare with the
+// last dot on the chart". Nothing asserted that end to end: `portfolio-
+// transactions.test.ts` above pins the headline against Σ per-portfolio rows,
+// and `backfill.test.ts:1102` pins the live path against the batch — but no
+// test compared the ROUTE's number with the STORED snapshot row, which is the
+// pair that drifted (§70 found 75/85 positions with `market_value` NULL, and
+// the chart came from bars while the headline came from the column).
+//
+// Condition, stated rather than assumed: quotes fresh. The headline reads
+// `positions.market_value` and the snapshot reads `price_bars.close`, so they
+// agree only when the quote and the bar are the same moment. A test that
+// asserted equality unconditionally would have to lie about one of the two.
+//
+describe("§63.2: the headline total equals the latest snapshot (quotes fresh)", () => {
+  // NOTE on the arithmetic below: `POST /positions` opens a position by writing a
+  // BUY, and a BUY is a cash OUTFLOW in `cashBalances` (cashLedger.ts:61,
+  // `principalSign = tx.type === "BUY" ? -1 : 1`). So a deposit of 1500 plus a
+  // 1000 purchase leaves 500 of cash, not 1500. Asserting the naive number here
+  // would have "caught" a bug that does not exist.
+
+  it("a per-portfolio totalValue equals its newest value_snapshots row to the cent", async () => {
+    const h = await makeHarness()
+    const a = app(h.db)
+    mockInstrumentsFx({ table: { USD: 1.08, PLN: 4.3 } })
+    try {
+      const res = await a.request("/api/portfolios", {
+        method: "POST", headers: h.headers,
+        body: JSON.stringify({ name: "P", currency: "USD", baseCurrency: "PLN" }),
+      })
+      const { id } = await res.json()
+      await h.db.insert(portfolioCashTransactions).values({
+        userId: h.user.id, portfolioId: id, type: "DEPOSIT", amount: "1500", currency: "PLN",
+      })
+      await a.request(`/api/portfolios/${id}/positions`, {
+        method: "POST", headers: h.headers,
+        body: JSON.stringify({ symbol: "SNT.WA", quantity: 10, price: 100, currency: "PLN" }),
+      })
+      await priceOpenPositions(h.db, id, 100)   // 10 × 100 = 1000 instruments
+      // 1500 deposited − 1000 spent = 500 cash, + 1000 instruments.
+      await h.db.insert(valueSnapshots).values({
+        portfolioId: id, snapshotDate: "2026-09-29", value: "1500", invested: "1000", netFlow: "1500",
+      })
+
+      const body = await (await a.request("/api/portfolios/total-metrics", { headers: h.headers })).json()
+      const row = body.portfolioBreakdown[0]
+      expect(row.instrumentsValue).toBe(1000)
+      expect(row.cashValue).toBe(500)
+      expect(row.totalValue).toBe(1500)
+
+      // The comparison §63.2 was opened for: the dashboard headline is the last
+      // dot on the chart. Same portfolio, same day, same cent.
+      const last = await h.db
+        .select({ value: valueSnapshots.value })
+        .from(valueSnapshots)
+        .where(eq(valueSnapshots.portfolioId, id))
+      expect(row.totalValue).toBe(Number(last[0].value))
+
+      // …and the aggregate, which is the number the headline tile prints.
+      expect(body.totalValue).toBe(1500)
+    } finally { unmockInstrumentsFx() }
+  })
+
+  it("an UNPRICED position contributes nothing to instrumentsValue and is counted (§70)", async () => {
+    // The case that actually discriminates. Cost basis 900/unit and a NULL
+    // market_value: a route that fell back to cost would report 9000 of
+    // instruments. §70 says an unpriced position is worth an unknown amount, so
+    // it contributes 0 and is reported as unpriced.
+    const h = await makeHarness()
+    const a = app(h.db)
+    mockInstrumentsFx({ table: { USD: 1.08, PLN: 4.3 } })
+    try {
+      const res = await a.request("/api/portfolios", {
+        method: "POST", headers: h.headers,
+        body: JSON.stringify({ name: "Unpriced", currency: "USD", baseCurrency: "PLN" }),
+      })
+      const { id } = await res.json()
+      await a.request(`/api/portfolios/${id}/positions`, {
+        method: "POST", headers: h.headers,
+        body: JSON.stringify({ symbol: "GHOST", quantity: 10, price: 900, currency: "PLN" }),
+      })
+      // deliberately NOT priced: market_value stays NULL
+
+      const body = await (await a.request("/api/portfolios/total-metrics", { headers: h.headers })).json()
+      const row = body.portfolioBreakdown[0]
+      expect(row.unpricedPositions).toBe(1)
+      // the cost-basis answer this must never produce
+      expect(row.instrumentsValue).toBe(0)
+      expect(row.instrumentsValue).not.toBe(9000)
+      // cash went out for the purchase and nothing came back in, so the total is
+      // the −9000 outflow with no instrument to show for it. Stated explicitly
+      // because "a portfolio worth −9000" reads like a bug until you know the
+      // buy consumed the cash.
+      expect(row.cashValue).toBe(-9000)
+      expect(row.totalValue).toBe(-9000)
+    } finally { unmockInstrumentsFx() }
+  })
+
+  it("a half-priced portfolio reports the priced half and flags the rest", async () => {
+    // §70's contract decision: flagged, not hidden. Suppressing the portfolio
+    // would make a broken pipeline look like an empty one; valuing the unpriced
+    // lot at cost would make it look fine.
+    const h = await makeHarness()
+    const a = app(h.db)
+    mockInstrumentsFx({ table: { USD: 1.08, PLN: 4.3 } })
+    try {
+      const res = await a.request("/api/portfolios", {
+        method: "POST", headers: h.headers,
+        body: JSON.stringify({ name: "Half", currency: "USD", baseCurrency: "PLN" }),
+      })
+      const { id } = await res.json()
+      for (const symbol of ["PRICED", "GHOST"]) {
+        await a.request(`/api/portfolios/${id}/positions`, {
+          method: "POST", headers: h.headers,
+          body: JSON.stringify({ symbol, quantity: 10, price: 900, currency: "PLN" }),
+        })
+      }
+      await priceOpenPositions(h.db, id, 100)   // both quoted…
+      // …then GHOST's quote is lost, which is the real shape: a symbol that
+      // priced yesterday and has no quote today.
+      await h.db
+        .update(positions)
+        .set({ marketValue: null })
+        .where(and(eq(positions.portfolioId, id), eq(positions.symbol, "GHOST")))
+
+      const body = await (await a.request("/api/portfolios/total-metrics", { headers: h.headers })).json()
+      const row = body.portfolioBreakdown[0]
+      expect(row.unpricedPositions).toBe(1)
+      expect(row.instrumentsValue).toBe(1000)              // 10 × 100, the priced lot
+      // 10 000 would be the "no position went missing" reading, and 19 000 the
+      // "value the unpriced lot at cost" one.
+      expect(row.instrumentsValue).not.toBe(10000)
+      expect(row.instrumentsValue).not.toBe(19000)
     } finally { unmockInstrumentsFx() }
   })
 })

@@ -17,7 +17,7 @@ import type { DB } from "../db/index.js"
 import { positions, portfolios, valueSnapshots } from "../db/schema.js"
 import { fxTo, instrumentsAuthHeaders } from "./instruments-fx.js"
 import { cashBalances, dailyExternalFlows, externalCashInvested } from "./cashLedger.js"
-import { recomputeReturnColumns, syncCurrentValueFromSnapshots } from "./returnColumns.js"
+import { recomputeReturnColumns } from "./returnColumns.js"
 import { enqueueBackfill } from "./backfill-runner.js"
 import { splitPortfolioValue } from "./valuation.js"
 
@@ -433,8 +433,16 @@ export async function refreshQuotesUnlocked(
   // §76.4: `snapshotPortfolioValue` no longer writes `value_snapshots` at all.
   // `computeSnapshotBatch` is the single writer of every (portfolioId, date),
   // today included. Two writers of today's row was the precondition for that
-  // race, so with one writer there is nothing left to order — and
-  // `syncCurrentValueFromSnapshots` runs exactly where the snapshot is written.
+  // race, so with one writer there is nothing left to order.
+  //
+  // §63.2 correction (2026-09-30): the sentence this block used to end with —
+  // "`syncCurrentValueFromSnapshots` runs exactly where the snapshot is written" —
+  // was false in *this* file. It is called from `backfill.ts` (`:1036`, `:1119`,
+  // `:1194`), not from here, and the `quotes.ts` import of it was dead. The
+  // claim was carried into `plan-archive.md` §76.4 as evidence that
+  // `current_value` is written by the live path, which is not what happens: the
+  // row synced is the one the batch wrote from price bars. Removed rather than
+  // reworded, because the live quote genuinely does not write anything here.
   //
   // The `quotedCount === 0` guard below still earns its place for a different
   // reason, and the distinction matters: we hold positions but priced NONE, so
