@@ -58,6 +58,13 @@ interface PriceBarSeries {
    * are still in the SOURCE currency while the response declares the target for
    * the whole series, so a consumer that trusts `currency` silently mixes two. */
   fxFrom?: string | null
+  /** §72.10 — the requested-window dates instruments DROPPED for want of an FX
+   * rate. This is the only place the reason for a missing bar is knowable: the
+   * backfill can see that a date is absent from the response but not whether it
+   * was never fetched or was fetched and unconvertible. Null until the
+   * `@marx2/contracts` release carrying the field is out — see the note on
+   * `fxCoverageHoles` for what happens without it. */
+  unconvertedDates?: string[] | null
 }
 
 async function fetchPriceBars(
@@ -125,6 +132,54 @@ function dropUnconvertedPrefix(series: PriceBarSeries): PriceBarSeries {
   const keep = series.dates.findIndex((d) => d >= from)
   if (keep <= 0) return series
   return { ...series, dates: series.dates.slice(keep), closes: series.closes.slice(keep) }
+}
+
+/**
+ * §72.21 — the dates a symbol was held on but has no price for, counted BEFORE
+ * `buildPriceMap` erases the evidence.
+ *
+ * **This is the only point where the information exists.** `buildPriceMap`
+ * carry-forwards every day from the first surviving bar onward, so by the time
+ * the gap scan runs (`prices.has(day)`) a **scattered** mid-window hole is
+ * indistinguishable from a day that simply reused the last close — which is
+ * exactly the shape §72.17's damage took (`fx-convert.ts:44-45`). A prefix hole
+ * survives that scan and gets reported as a `gapSymbol`; a scattered one does
+ * not, and never did. Anything computed downstream of the carry-forward would
+ * report a number structurally incapable of being non-zero for the case that
+ * matters.
+ *
+ * **What it can and cannot say.** It can say a held day has no returned bar. It
+ * cannot say why: no history upstream, or a bar instruments dropped for want of
+ * an FX rate, are the same absence at this layer. `unconvertedDates` (§72.10) is
+ * what separates them, and it is `null` until that contract field ships — so this
+ * is a **count, deliberately not a diagnosis**, and the note is repeated on
+ * `fxCoverage` so nobody reads it as one.
+ */
+function fxCoverageHoles(
+  qtyMaps: Map<string, Map<string, number>>,
+  seriesBySymbol: Map<string, PriceBarSeries>,
+  symbols: string[],
+  days: string[],
+): Map<string, string[]> {
+  const holes = new Map<string, string[]>()
+  for (const sym of symbols) {
+    const perDay = qtyMaps.get(sym)
+    if (!perDay) continue
+    // A symbol with no returned series at all is a `gapSymbol`, reported
+    // elsewhere and not an FX story — counting every day of it here would bury
+    // the real signal under the genuinely unpriceable bonds (§72.31).
+    const series = seriesBySymbol.get(sym)
+    if (!series) continue
+    const returned = new Set(series.dates)
+    const missing: string[] = []
+    for (const day of days) {
+      if ((perDay.get(day) ?? 0) <= 0) continue          // not held ⇒ not a hole
+      if (returned.has(day)) continue                    // instruments returned it
+      missing.push(day)
+    }
+    if (missing.length > 0) holes.set(sym, missing)
+  }
+  return holes
 }
 
 /**
@@ -614,10 +669,30 @@ export interface SnapshotBatch {
    * bond earlier would be judged "priced nothing" and lose its entire history.
    */
   unpricedLastDay: number
+  /**
+   * §72.21 — per symbol, the days it was **held** on but instruments returned **no
+   * bar** for, counted before `buildPriceMap` carry-forward made the difference
+   * invisible.
+   *
+   * This is the FX-coverage boundary made reportable, and it is the *scattered*
+   * case that `gapSymbols` structurally cannot see: a hole after the first bar
+   * survives carry-forward as a repeated close, so `prices.has(day)` is true and
+   * nothing is ever reported. A prefix hole does show up, in `gapSymbols`, where
+   * it is indistinguishable from a symbol with no history at all.
+   *
+   * **A count, not a diagnosis.** At this layer "no bar returned" and "bar
+   * dropped for want of an FX rate" are the same absence. Only instruments knows
+   * which — via `unconvertedDates` (§72.10), which is `null` on the response
+   * until that contract field ships. So this says *the series has holes where it
+   * is held*, and the reason needs one more field, not a better guess.
+   */
+  fxCoverageHoles: Map<string, string[]>
 }
 
 /** No history to backfill (no BUY/SELL or cash yet) — shared by every guard. */
-const EMPTY_BATCH: SnapshotBatch = { rows: [], gapSymbols: [], heldSymbols: 0, unpricedLastDay: 0 }
+const EMPTY_BATCH: SnapshotBatch = {
+  rows: [], gapSymbols: [], heldSymbols: 0, unpricedLastDay: 0, fxCoverageHoles: new Map(),
+}
 
 /**
  * §63.10 — refuse to persist a pass that could not price a single held symbol.
@@ -867,6 +942,13 @@ export async function computeSnapshotBatch(
   const cashSeries = await cashBalanceSeries(db, authToken, portfolioId, from, to, base, { strict: true })
   throwIfAborted(signal)
 
+  // §72.21 — count the held days instruments did NOT return a bar for, while
+  // that difference still exists. It is measured against `series.dates` (what
+  // came back) and NOT against `priceMaps`, which is built immediately below and
+  // carry-forwards every day from the first surviving bar: after that, a scattered
+  // hole is indistinguishable from a day that legitimately reused the last close.
+  const fxCoverage = fxCoverageHoles(qtyMaps, priceSeries, symbols, days)
+
   // Pre-build carry-forward price maps per symbol
   const priceMaps = new Map<string, Map<string, number>>()
   for (const sym of symbols) {
@@ -1021,7 +1103,7 @@ export async function computeSnapshotBatch(
     }
   }
 
-  return { rows: snapBatch, gapSymbols, heldSymbols: heldCount, unpricedLastDay }
+  return { rows: snapBatch, gapSymbols, heldSymbols: heldCount, unpricedLastDay, fxCoverageHoles: fxCoverage }
 }
 
 async function _runBackfillCore(

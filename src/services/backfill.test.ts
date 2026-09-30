@@ -1186,6 +1186,113 @@ describe("§53.6 — snapshot-on-read agrees with the backfill pipeline", () => 
   })
 })
 
+/**
+ * §72.21 — the FX coverage boundary, counted before carry-forward erases it.
+ *
+ * The load-bearing assertion in this block is the NEGATIVE one: a **scattered**
+ * mid-window hole is invisible to `gapSymbols`, and always has been. The gap scan
+ * tests `prices.has(day)`, and `buildPriceMap` has already filled every day from
+ * the first surviving bar, so the day looks priced. §72.17's damage was exactly
+ * that shape, and nothing ever reported it.
+ */
+describe("§72.21: fxCoverageHoles reports holes that gapSymbols structurally cannot", () => {
+  beforeEach(() => {
+    process.env.INSTRUMENTS_URL = "http://instruments:3000"
+  })
+  afterEach(() => {
+    vi.unstubAllGlobals()
+    delete process.env.INSTRUMENTS_URL
+    __resetBackfillRunnerForTests()
+  })
+
+  /** Serves FX at 1:1 for everything and prices `series` per symbol. */
+  function stubInstruments(series: Record<string, { dates: string[]; closes: number[]; ccy: string }>) {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = String(input)
+        if (url.includes("/api/internal/fx-rates")) {
+          const q = new URL(url).searchParams
+          const from = (q.get("from") ?? "").toUpperCase()
+          const to = (q.get("to") ?? "PLN").toUpperCase()
+          return new Response(JSON.stringify({ rate: from === to ? 1 : 1, asOf: "2026-07-02" }), { status: 200 })
+        }
+        const sym = decodeURIComponent(url.match(/\/instruments\/([^/]+)\/price-bars/)?.[1] ?? "")
+        const data = series[sym]
+        if (!data) return new Response("nope", { status: 404 })
+        const target = new URL(url).searchParams.get("currency")?.toUpperCase() ?? null
+        return new Response(
+          JSON.stringify({ symbol: sym, dates: data.dates, closes: data.closes, currency: target ?? data.ccy, stale: false }),
+          { status: 200 },
+        )
+      }),
+    )
+  }
+
+  it("a SCATTERED mid-window hole is counted, and gapSymbols does not see it", async () => {
+    const { db, user } = await makeHarness("7221-scatter")
+    const pf = await seedPortfolio(db, user.id, "PLN")
+    await seedBuy(db, user.id, pf.id, "AAA", 10, 100, "2026-07-01", "PLN")
+    await seedPosition(db, user.id, pf.id, "AAA", 10, 100, "PLN")
+    // The middle day is simply ABSENT from the response — the shape an FX hole
+    // produces, and the shape that used to vanish.
+    stubInstruments({ AAA: { dates: ["2026-07-01", "2026-07-03"], closes: [100, 102], ccy: "PLN" } })
+
+    const batch = await computeSnapshotBatch(db, pf.id, "Bearer t", new Date("2026-07-04T00:00:00Z"))
+
+    expect(batch.fxCoverageHoles.get("AAA")).toEqual(["2026-07-02"])
+    // …and the value carried forward rather than being absent, which is exactly
+    // why nothing downstream could have reported it.
+    const mid = batch.rows.find((r) => r.snapshotDate === "2026-07-02")
+    expect(mid).toBeDefined()
+    expect(Number(mid!.value)).toBe(1000)
+    // The point of the whole block: gapSymbols is blind to this case.
+    expect(batch.gapSymbols).toEqual([])
+  })
+
+  it("a PREFIX hole is counted too, and is also a gapSymbol", async () => {
+    const { db, user } = await makeHarness("7221-prefix")
+    const pf = await seedPortfolio(db, user.id, "PLN")
+    await seedBuy(db, user.id, pf.id, "AAA", 10, 100, "2026-07-01", "PLN")
+    await seedPosition(db, user.id, pf.id, "AAA", 10, 100, "PLN")
+    // Nothing before 07-03 — FX coverage that begins mid-window.
+    stubInstruments({ AAA: { dates: ["2026-07-03"], closes: [102], ccy: "PLN" } })
+
+    const batch = await computeSnapshotBatch(db, pf.id, "Bearer t", new Date("2026-07-04T00:00:00Z"))
+
+    expect(batch.fxCoverageHoles.get("AAA")).toEqual(["2026-07-01", "2026-07-02"])
+    // The prefix case was already visible — this asserts it still is, and that
+    // the two reports are allowed to overlap rather than being deduped away.
+    expect(batch.gapSymbols).toContain("AAA")
+  })
+
+  it("a day the symbol is NOT held on is not a hole", async () => {
+    // Bought on 07-03, so 07-01/07-02 predate the position entirely. Counting
+    // them would report FX coverage problems on days with no exposure.
+    const { db, user } = await makeHarness("7221-notheld")
+    const pf = await seedPortfolio(db, user.id, "PLN")
+    await seedBuy(db, user.id, pf.id, "AAA", 10, 100, "2026-07-03", "PLN")
+    await seedPosition(db, user.id, pf.id, "AAA", 10, 100, "PLN")
+    stubInstruments({ AAA: { dates: ["2026-07-03"], closes: [100], ccy: "PLN" } })
+
+    const batch = await computeSnapshotBatch(db, pf.id, "Bearer t", new Date("2026-07-04T00:00:00Z"))
+    expect(batch.fxCoverageHoles.has("AAA")).toBe(false)
+  })
+
+  it("a fully-priced series reports no holes", async () => {
+    const { db, user } = await makeHarness("7221-clean")
+    const pf = await seedPortfolio(db, user.id, "PLN")
+    await seedBuy(db, user.id, pf.id, "AAA", 10, 100, "2026-07-01", "PLN")
+    await seedPosition(db, user.id, pf.id, "AAA", 10, 100, "PLN")
+    stubInstruments({
+      AAA: { dates: ["2026-07-01", "2026-07-02", "2026-07-03"], closes: [100, 101, 102], ccy: "PLN" },
+    })
+
+    const batch = await computeSnapshotBatch(db, pf.id, "Bearer t", new Date("2026-07-04T00:00:00Z"))
+    expect(batch.fxCoverageHoles.size).toBe(0)
+  })
+})
+
 describe("§62.4 — snapshots include cash; netFlow is external-only", () => {
   beforeEach(() => {
     process.env.INSTRUMENTS_URL = "http://instruments:3000"
