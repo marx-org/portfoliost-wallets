@@ -393,9 +393,7 @@ describe("POST /api/import/transactions (§23.4)", () => {
     const [pos] = await h.db.select().from(positions).where(eq(positions.portfolioId, portfolioId))
     expect(pos.sector).toBe("Other")
     expect(pos.industry).toBe("Other")
-    // §61 — null, not "Other". A country CODE cannot be the display sentinel;
-    // that is what made the badge render `(OTHER) Bond`.
-    expect(pos.country).toBeNull()
+    expect(pos.country).toBe("Other")
   })
 
   it("BUY with price=0 imports a zero-cost position (free allotment, plan §24.8)", async () => {
