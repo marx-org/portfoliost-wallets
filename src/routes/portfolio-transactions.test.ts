@@ -1276,6 +1276,89 @@ describe("Aggregates & metrics (§15 Phase G)", () => {
     expect(body.portfolioBreakdown[0].name).toBe("P1")
   })
 
+  // §70.5 — PROD's IBKR held +64,898 EUR against −45,434 USD, so the net nearly
+  // cancelled and the old `converted / net` produced weights of +648% and −398%
+  // that cannot sum to 100%. The weight is a share of GROSS exposure; the
+  // signed balance is still reported, because the user confirms the sign split
+  // is real. This test pins both halves against exactly that shape.
+  it("cashBreakdown weights are shares of GROSS exposure, and always sum to 100% (§70.5)", async () => {
+    const h = await makeHarness()
+    const a = app(h.db)
+    // Identity rate for USD→USD so the numbers below are the raw balances.
+    mockInstrumentsFx({ table: { USD: 1, EUR: 1, PLN: 1 } })
+    try {
+      const res0 = await a.request("/api/portfolios", {
+        method: "POST",
+        headers: h.headers,
+        body: JSON.stringify({ name: "MIXED", baseCurrency: "USD" }),
+      })
+      const pf = await res0.json()
+      await h.db.insert(portfolioCashTransactions).values([
+        { userId: h.user.id, portfolioId: pf.id, type: "DEPOSIT", amount: "64898", currency: "EUR" },
+        // The sign lives on the amount, not the type — a WITHDRAWAL row is
+        // stored negative.
+        { userId: h.user.id, portfolioId: pf.id, type: "WITHDRAWAL", amount: "-45434", currency: "USD" },
+      ])
+
+      const res = await a.request("/api/portfolios/total-metrics", { headers: h.headers })
+      expect(res.status).toBe(200)
+      const body = await res.json()
+      const rows = body.cashBreakdown as Array<{ currency: string; balance: number; weight: number }>
+      expect(rows.map((r) => r.currency)).toEqual(["EUR", "USD"])
+
+      // The signed balance is reported as-is — the sign split is real.
+      expect(rows.find((r) => r.currency === "EUR")!.balance).toBe(64898)
+      expect(rows.find((r) => r.currency === "USD")!.balance).toBe(-45434)
+
+      // Every weight is in [0, 100] and they sum to 100. The net is 19,464, so
+      // the old formula would have printed 333% and −233%.
+      for (const r of rows) {
+        expect(r.weight).toBeGreaterThanOrEqual(0)
+        expect(r.weight).toBeLessThanOrEqual(100)
+      }
+      const sum = rows.reduce((s, r) => s + r.weight, 0)
+      expect(sum).toBeCloseTo(100, 1)
+      // EUR 64,898 of a 110,332 gross = 58.83%
+      expect(rows.find((r) => r.currency === "EUR")!.weight).toBeCloseTo(58.83, 1)
+    } finally {
+      unmockInstrumentsFx()
+    }
+  })
+
+  it("cashBreakdown weight is 0, not NaN, when the account holds no cash (§70.5)", async () => {
+    const h = await makeHarness()
+    const a = app(h.db)
+    mockInstrumentsFx({ table: { USD: 1, PLN: 1 } })
+    try {
+      const res0 = await a.request("/api/portfolios", {
+        method: "POST",
+        headers: h.headers,
+        body: JSON.stringify({ name: "EMPTY", baseCurrency: "USD" }),
+      })
+      const pf = await res0.json()
+      await h.db.insert(portfolioCashTransactions).values({
+        userId: h.user.id, portfolioId: pf.id, type: "DEPOSIT", amount: "100", currency: "USD",
+      })
+      await a.request(`/api/portfolios/${pf.id}/positions`, {
+        method: "POST",
+        headers: h.headers,
+        body: JSON.stringify({ symbol: "AAPL", quantity: 1, price: 100, currency: "USD" }),
+      })
+      await priceOpenPositions(h.db, pf.id, 100)
+      // Spend the whole deposit so nothing is left in cash.
+      await h.db.insert(portfolioCashTransactions).values({
+        userId: h.user.id, portfolioId: pf.id, type: "WITHDRAWAL", amount: "-100", currency: "USD",
+      })
+
+      const res = await a.request("/api/portfolios/total-metrics", { headers: h.headers })
+      const body = await res.json()
+      const rows = (body.cashBreakdown ?? []) as Array<{ weight: number }>
+      for (const r of rows) expect(Number.isFinite(r.weight)).toBe(true)
+    } finally {
+      unmockInstrumentsFx()
+    }
+  })
+
   it("GET /total-metrics — converts per-portfolio values to the aggregate base (§48.6e B5)", async () => {
     const h = await makeHarness()
     const a = app(h.db)
