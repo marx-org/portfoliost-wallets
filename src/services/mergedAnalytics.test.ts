@@ -1,5 +1,9 @@
-import { describe, expect, it } from "vitest"
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import { crossRate } from "@marx2/contracts/fx"
+import { makeHarness } from "../routes/test-utils.js"
+import { portfolioCashTransactions, portfolios } from "../db/schema.js"
+import { computeSnapshotBatch, type SnapshotRow as BatchRow } from "./backfill.js"
+import { __resetBackfillRunnerForTests } from "./backfill-runner.js"
 import {
   buildMergedPerformance,
   sumSnapshotsByDate,
@@ -170,5 +174,170 @@ describe("buildMergedPerformance (§46.1)", () => {
     expect(perf.totalReturn).toBe(0)
     expect(perf.totalReturnPercent).toBe(0)
     expect(perf.timeSeries).toEqual([])
+  })
+})
+/**
+ * §63.3 — the consolidated series must be Σ positions + cash, per day.
+ *
+ * The unit tests above cannot make this claim: `sumSnapshotsByDate*` takes
+ * `value` as an opaque number and has no idea cash exists. Cash enters one layer
+ * up, in `computeSnapshotBatch` (§62.4, `totalValue += cashDay`). So the only
+ * honest test of the requirement crosses the real chain — cash ledger → batch →
+ * merge — and that is what this block does.
+ *
+ * This is the one §63.3 item that was never verified, and it is the reason the
+ * headline and the chart could disagree for a session: `/total-metrics` adds the
+ * live cash balance, the chart reads stored rows, and if cash were missing from
+ * the stored rows the two would differ by exactly the cash balance.
+ */
+describe("§63.3: the consolidated series is Σ positions + cash", () => {
+  beforeEach(() => {
+    process.env.INSTRUMENTS_URL = "http://instruments:3000"
+  })
+  afterEach(() => {
+    vi.unstubAllGlobals()
+    delete process.env.INSTRUMENTS_URL
+    __resetBackfillRunnerForTests()
+  })
+
+  /** 1:1 FX everywhere; one symbol priced flat, so value moves only with cash. */
+  function stubFlatPrice(symbol: string, close: number) {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = String(input)
+        if (url.includes("/api/internal/fx-rates")) {
+          return new Response(JSON.stringify({ rate: 1, asOf: "2026-07-03" }), { status: 200 })
+        }
+        return new Response(
+          JSON.stringify({
+            symbol,
+            dates: ["2026-07-01", "2026-07-02", "2026-07-03"],
+            closes: [close, close, close],
+            currency: "PLN",
+            stale: false,
+          }),
+          { status: 200 },
+        )
+      }),
+    )
+  }
+
+  /** Mirrors the /merged route: the batch rows carry no currency, the route
+   * joins each portfolio's own `baseCurrency` on before merging. */
+  function asMergedRows(rows: BatchRow[], pfId: string, ccy: string): SnapshotRow[] {
+    return rows.map((r) => ({
+      portfolioId: pfId,
+      baseCurrency: ccy,
+      snapshotDate: r.snapshotDate,
+      value: Number(r.value),
+      invested: Number(r.invested),
+    }))
+  }
+
+  async function seedCashPortfolio(name: string, ccy = "PLN") {
+    const h = await makeHarness(`633-${name}`)
+    const [pf] = await h.db
+      .insert(portfolios)
+      .values({ userId: h.user.id, name, baseCurrency: ccy })
+      .returning()
+    return { h, pf }
+  }
+
+  it("a deposit raises the merged line on its own date, with no trade that day", async () => {
+    // The requirement in §63.3's own words: "a deposit moves the consolidated
+    // line up on that day". A cash-only portfolio makes it unambiguous — there
+    // are no positions at all, so anything that moves the line came from cash.
+    const { h, pf } = await seedCashPortfolio("cash-only")
+    stubFlatPrice("AAA", 100)
+    await h.db.insert(portfolioCashTransactions).values([
+      { userId: h.user.id, portfolioId: pf.id, type: "DEPOSIT", amount: "1000", currency: "PLN", transactionDate: "2026-07-01" },
+      { userId: h.user.id, portfolioId: pf.id, type: "DEPOSIT", amount: "2000", currency: "PLN", transactionDate: "2026-07-03" },
+    ])
+
+    const batch = await computeSnapshotBatch(h.db, pf.id, "Bearer t", new Date("2026-07-04T00:00:00Z"))
+    const merged = buildMergedPerformance(
+      sumSnapshotsByDateForwardFilled(asMergedRows(batch.rows, pf.id, "PLN"), () => 1, "PLN"),
+    )
+
+    const at = (d: string) => merged.timeSeries.find((p) => p.date === d)?.value
+    expect(at("2026-07-01")).toBe(1000)
+    expect(at("2026-07-02")).toBe(1000)
+    // +2000 on the 03rd, from a cash row and nothing else.
+    expect(at("2026-07-03")).toBe(3000)
+    // And the headline the dashboard prints must equal that last point — the
+    // reconciliation §63.3 was opened for.
+    expect(merged.totalValue).toBe(at("2026-07-03"))
+  })
+
+  it("NEGATIVE cash reduces the consolidated line rather than being clamped or hidden", async () => {
+    // XTB and IKE Beata are margin accounts and their ledgers run below zero. A
+    // clamp would report a solvent fleet; dropping the day would punch a hole in
+    // the chart. §62.4 says a negative balance reduces the total, which is truth.
+    const { h, pf } = await seedCashPortfolio("margin")
+    stubFlatPrice("AAA", 100)
+    await h.db.insert(portfolioCashTransactions).values([
+      { userId: h.user.id, portfolioId: pf.id, type: "DEPOSIT", amount: "5000", currency: "PLN", transactionDate: "2026-07-01" },
+      { userId: h.user.id, portfolioId: pf.id, type: "WITHDRAWAL", amount: "-8000", currency: "PLN", transactionDate: "2026-07-02" },
+    ])
+
+    const batch = await computeSnapshotBatch(h.db, pf.id, "Bearer t", new Date("2026-07-04T00:00:00Z"))
+    const merged = buildMergedPerformance(
+      sumSnapshotsByDateForwardFilled(asMergedRows(batch.rows, pf.id, "PLN"), () => 1, "PLN"),
+    )
+
+    expect(merged.timeSeries.find((p) => p.date === "2026-07-02")?.value).toBe(-3000)
+    expect(merged.totalValue).toBe(-3000)
+  })
+
+  it("the merged line equals Σ per-portfolio (positions + cash) on every date", async () => {
+    // The identity the section exists to enforce, across two portfolios so the
+    // merge is actually doing something.
+    const a = await seedCashPortfolio("A")
+    const b = await seedCashPortfolio("B")
+    stubFlatPrice("AAA", 100)
+
+    for (const { h, pf, amt } of [
+      { h: a.h, pf: a.pf, amt: "1000" },
+      { h: b.h, pf: b.pf, amt: "2500" },
+    ]) {
+      await h.db.insert(portfolioCashTransactions).values(
+        [1, 2, 3].map((d) => ({
+          userId: h.user.id,
+          portfolioId: pf.id,
+          type: "DEPOSIT" as const,
+          amount: amt,
+          currency: "PLN",
+          transactionDate: `2026-07-0${d}`,
+        })),
+      )
+    }
+
+    const rowsA = (await computeSnapshotBatch(a.h.db, a.pf.id, "Bearer t", new Date("2026-07-04T00:00:00Z"))).rows
+    const rowsB = (await computeSnapshotBatch(b.h.db, b.pf.id, "Bearer t", new Date("2026-07-04T00:00:00Z"))).rows
+    const merged = buildMergedPerformance(
+      sumSnapshotsByDateForwardFilled(
+        [...asMergedRows(rowsA, a.pf.id, "PLN"), ...asMergedRows(rowsB, b.pf.id, "PLN")],
+        () => 1,
+        "PLN",
+      ),
+    )
+
+    // Per-portfolio last points, summed, on each date.
+    const lastOf = (rows: typeof rowsA) => {
+      const m = new Map<string, number>()
+      for (const r of rows) m.set(r.snapshotDate, Number(r.value))
+      return m
+    }
+    const la = lastOf(rowsA)
+    const lb = lastOf(rowsB)
+    for (const p of merged.timeSeries) {
+      expect(p.value).toBe((la.get(p.date) ?? 0) + (lb.get(p.date) ?? 0))
+    }
+    // Deposits accumulate day over day (3 × 1000 for A, 3 × 2500 for B), which
+    // is what a real ledger does and is a stronger check than a single deposit:
+    // a merge that read only the LAST row per portfolio would still pass a
+    // one-deposit test.
+    expect(merged.totalValue).toBe(3 * 1000 + 3 * 2500)
   })
 })
