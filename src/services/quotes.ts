@@ -281,6 +281,9 @@ export async function refreshQuotesUnlocked(
     instrumentCurrency: string | null
     quoteCurrency: string | null
   }> = []
+  // How many positions were priced from a LIVE quote (not the stored-MV
+  // fallback below). Used to decide whether today's snapshot may be written.
+  let quotedCount = 0
 
   await Promise.all(
     rows.map(async (p) => {
@@ -363,6 +366,7 @@ export async function refreshQuotesUnlocked(
       const dayChange = quote.change * qty
       const dayChangePct = quote.percentChange
 
+      quotedCount += 1
       liveValues.push({
         marketValue: String(mv),
         averageCostBasis: p.averageCostBasis,
@@ -391,8 +395,40 @@ export async function refreshQuotesUnlocked(
   )
 
   // H5 — snapshot-on-read: upsert today's portfolio value into value_snapshots.
-  // Best-effort: errors are swallowed so they never affect the positions response.
-  void snapshotPortfolioValue(db, authToken, portfolioId, liveValues, now).catch(() => undefined)
+  //
+  // Best-effort, as before: errors are swallowed so a snapshot failure can
+  // never affect the positions response. But the write is **awaited**, and that
+  // is the whole fix. `await` on an already-caught promise cannot throw, so the
+  // "best-effort" contract is untouched — only the timing changes.
+  //
+  // §63.2 (2026-09-30). This was `void …`, i.e. fire-and-forget, and the
+  // recompute in backfill.ts runs `syncCurrentValueFromSnapshots` on the very
+  // next line. So `portfolios.current_value` was synced from the *previous*
+  // (price-bar) snapshot before this live one landed, and the stored card
+  // disagreed with the headline that `/summary-metrics` computes on read.
+  //
+  // It read as "two valuation paths that were never unified", and **9 of 10
+  // PROD portfolios hid it**: they are cash-only or hold unpriced bonds, so
+  // both paths produce the same number and the race is invisible. Only a
+  // portfolio with priced positions exposed it — IBKR, +3,401 PLN, a gap that
+  // *grew* across a recompute instead of closing.
+  //
+  // The comment in backfill.ts claiming "refreshQuotesUnlocked upserts today's
+  // snapshot itself" was true only because nothing checked. It is now true
+  // because the ordering is guaranteed.
+  //
+  // Second half of the fix, and it only became reachable once the write was
+  // awaited. The fallback path above pushes the position's **stored**
+  // `marketValue`, which is `0` until a position has been quoted once — so for
+  // a freshly seeded or freshly re-imported portfolio, pricing *nothing* would
+  // write today's snapshot as 0 and, now that this write is ordered before
+  // `syncCurrentValueFromSnapshots`, set `current_value` to 0 and wipe the
+  // headline. The old fire-and-forget accidentally hid that by writing its bad
+  // row too late. So: if we hold positions and priced none of them, do not
+  // touch today's snapshot at all — the backfilled series stays authoritative.
+  if (quotedCount === 0) return
+
+  await snapshotPortfolioValue(db, authToken, portfolioId, liveValues, now).catch(() => undefined)
 }
 
 /**

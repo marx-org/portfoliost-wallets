@@ -132,6 +132,78 @@ describe("refreshQuotes (D58)", () => {
     expect(updated.priceAsOf).toBeTruthy()
   })
 
+  // §63.2 (2026-09-30). The snapshot write used to be `void …`, and the
+  // recompute syncs `current_value` from the latest snapshot on the next line —
+  // so the stored card was written from the PREVIOUS (price-bar) snapshot and
+  // disagreed with the live headline. 9 of 10 PROD portfolios could not see it
+  // (cash-only or unpriced bonds make both paths agree); only a portfolio with
+  // priced positions did, and there the gap survived a recompute.
+  //
+  // The test is about ORDERING, not arithmetic, so it makes the snapshot slow:
+  // if refreshQuotes resolves before the row exists, the race is back.
+  it("does not resolve before today's snapshot has been written (the §63.2 race)", async () => {
+    const { db, user } = await makeHarness("q-race")
+    const { pf, pos } = await seedPortfolioAndPosition(db, user.id, { qty: 10, avg: 150 })
+
+    // Slow the snapshot's own dependency (FX resolution) so a fire-and-forget
+    // write cannot possibly have landed by the time refreshQuotes returns.
+    mockFetch(180, 3, 1.7)
+    const realFetch = globalThis.fetch
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        if (String(input).includes("/api/internal/fx-rates")) {
+          await new Promise((r) => setTimeout(r, 40))
+        }
+        return (realFetch as (a: unknown, b?: unknown) => Promise<Response>)(input, init)
+      }),
+    )
+
+    await refreshQuotes(db, user.id, pf.id, "Bearer test-token")
+
+    // Read IMMEDIATELY, with no extra awaits — this is the assertion the old
+    // `void` failed.
+    const snaps = await db
+      .select()
+      .from(valueSnapshots)
+      .where(eq(valueSnapshots.portfolioId, pf.id))
+    expect(snaps).toHaveLength(1)
+    const [updated] = await db.select().from(positions).where(eq(positions.id, pos.id))
+    // The snapshot must reflect the LIVE quote (10 × 180), not a stored value.
+    expect(Number(snaps[0].value)).toBeCloseTo(1800)
+    expect(Number(snaps[0].value)).toBeCloseTo(Number(updated.marketValue))
+  })
+
+  // The second half of the §63.2 fix. Awaiting the snapshot write made a
+  // latent hazard reachable: the no-quote fallback pushes the position's
+  // STORED marketValue, which is 0 until a position has been quoted once. If we
+  // hold positions and priced none, writing today's snapshot as 0 would set
+  // `current_value` to 0 and wipe the headline — the old fire-and-forget hid
+  // that by writing too late.
+  it("does not write today's snapshot when it holds positions but priced none", async () => {
+    const { db, user } = await makeHarness("q-noclobber")
+    const { pf, pos } = await seedPortfolioAndPosition(db, user.id, { qty: 10, avg: 150 })
+    // A good backfilled value that must survive.
+    await db.insert(valueSnapshots).values({
+      portfolioId: pf.id,
+      snapshotDate: new Date().toISOString().slice(0, 10),
+      value: "1600",
+      invested: "1500",
+    })
+
+    // instruments is unreachable: no quote, no profile.
+    vi.stubGlobal("fetch", vi.fn(async () => new Response("nope", { status: 503 })))
+
+    await refreshQuotes(db, user.id, pf.id, "Bearer test-token")
+
+    const snaps = await db
+      .select()
+      .from(valueSnapshots)
+      .where(eq(valueSnapshots.portfolioId, pf.id))
+    expect(snaps).toHaveLength(1)
+    expect(Number(snaps[0].value)).toBeCloseTo(1600) // NOT overwritten with 0
+  })
+
   it("populates companyName, sector, country from instrument profile", async () => {
     const { db, user } = await makeHarness("q-user-5")
     const { pf, pos } = await seedPortfolioAndPosition(db, user.id, { qty: 5, avg: 200 })
