@@ -1281,6 +1281,99 @@ describe("Aggregates & metrics (§15 Phase G)", () => {
   // that cannot sum to 100%. The weight is a share of GROSS exposure; the
   // signed balance is still reported, because the user confirms the sign split
   // is real. This test pins both halves against exactly that shape.
+  it("two consecutive /total-metrics calls are BYTE-IDENTICAL (§63.3)", async () => {
+    // PROD 2026-09-27: `totalValue` came back 196,514.50 on one call and
+    // 270,027.49 on the next, a minute apart, then stable — a 73,513 swing in a
+    // number the user reads as a headline. "A headline that flickers is worse than
+    // a wrong one, because it cannot be reasoned about."
+    //
+    // The mechanism was observed but never pinned, and that is why this sat open:
+    // it was blocked on a PROD measurement nobody could reproduce. Since §76.1
+    // reads calculate nothing and §76.4 left one writer per (portfolio, date),
+    // the plausible cause is the read-path refresh that USED to run behind this
+    // route. So the claim is testable rather than historical — and what is
+    // asserted is the property, not the explanation.
+    const h = await makeHarness()
+    const a = app(h.db)
+    mockInstrumentsFx({ table: { USD: 1.08, PLN: 4.3 } })
+    try {
+      for (const [name, cash, mv] of [["A", 1000, 0], ["B", 300, 700], ["C", 0, 0]] as const) {
+        const res = await a.request("/api/portfolios", {
+          method: "POST", headers: h.headers,
+          body: JSON.stringify({ name, currency: "USD", baseCurrency: "PLN" }),
+        })
+        const { id } = await res.json()
+        if (cash > 0) {
+          await h.db.insert(portfolioCashTransactions).values({
+            userId: h.user.id, portfolioId: id, type: "DEPOSIT", amount: String(cash), currency: "PLN",
+          })
+        }
+        if (mv > 0) {
+          await a.request(`/api/portfolios/${id}/positions`, {
+            method: "POST", headers: h.headers,
+            body: JSON.stringify({ symbol: "SNT.WA", quantity: 1, price: mv, currency: "PLN" }),
+          })
+          await priceOpenPositions(h.db, id, mv)
+        }
+      }
+
+      const first = await (await a.request("/api/portfolios/total-metrics", { headers: h.headers })).text()
+      const second = await (await a.request("/api/portfolios/total-metrics", { headers: h.headers })).text()
+      // Byte-identical, not `toBeCloseTo`: a headline that rounds differently
+      // between calls is the same defect at a smaller scale.
+      expect(second).toBe(first)
+
+      // …and still identical after a portfolio read, which is the call that used
+      // to trigger the write behind the flicker.
+      const list = await (await a.request("/api/portfolios", { headers: h.headers })).json()
+      await a.request(`/api/portfolios/${list[0].id}/positions`, { headers: h.headers })
+      const third = await (await a.request("/api/portfolios/total-metrics", { headers: h.headers })).text()
+      expect(third).toBe(first)
+    } finally { unmockInstrumentsFx() }
+  })
+
+  it("a /total-metrics read writes nothing — the mechanism behind §63.3's flicker", async () => {
+    // The stronger form, and the one that catches a regression rather than a
+    // coincidence: whatever the 73,513 swing was, it required this route to MOVE
+    // stored state between calls. If a future edit reintroduces a write this fails
+    // even when the two calls happen to agree.
+    const h = await makeHarness()
+    const a = app(h.db)
+    mockInstrumentsFx({ table: { USD: 1.08, PLN: 4.3 } })
+    try {
+      const res = await a.request("/api/portfolios", {
+        method: "POST", headers: h.headers,
+        body: JSON.stringify({ name: "P", currency: "USD", baseCurrency: "PLN" }),
+      })
+      const { id } = await res.json()
+      await h.db.insert(portfolioCashTransactions).values({
+        userId: h.user.id, portfolioId: id, type: "DEPOSIT", amount: "1000", currency: "PLN",
+      })
+      await a.request(`/api/portfolios/${id}/positions`, {
+        method: "POST", headers: h.headers,
+        body: JSON.stringify({ symbol: "SNT.WA", quantity: 1, price: 700, currency: "PLN" }),
+      })
+      await priceOpenPositions(h.db, id, 700)
+
+      const state = async () => ({
+        positions: await h.db
+          .select({ mv: positions.marketValue, asOf: positions.priceAsOf })
+          .from(positions).where(eq(positions.portfolioId, id)),
+        currentValue: (await h.db.select({ v: portfolios.currentValue })
+          .from(portfolios).where(eq(portfolios.id, id)))[0].v,
+        snapshots: await h.db.select().from(valueSnapshots).where(eq(valueSnapshots.portfolioId, id)),
+      })
+
+      const before = await state()
+      await a.request("/api/portfolios/total-metrics", { headers: h.headers })
+      const after = await state()
+
+      expect(after.positions).toEqual(before.positions)
+      expect(after.currentValue).toBe(before.currentValue)
+      expect(after.snapshots).toEqual(before.snapshots)
+    } finally { unmockInstrumentsFx() }
+  })
+
   it("cashBreakdown weights are shares of GROSS exposure, and always sum to 100% (§70.5)", async () => {
     const h = await makeHarness()
     const a = app(h.db)
