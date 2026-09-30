@@ -10,8 +10,9 @@ import {
   getBackfillStatus,
   runBackfill,
   recalcPortfolioHistory,
+  recalcPortfolioSeries,
 } from "./backfill.js"
-import { snapshotPortfolioValue } from "./quotes.js"
+import { snapshotPortfolioValue, __resetQuoteCachesForTests } from "./quotes.js"
 import { __resetBackfillRunnerForTests } from "./backfill-runner.js"
 
 // ── mock fetch for instruments price-bars ──────────────────────────────
@@ -602,6 +603,157 @@ describe("§72.30 — a gap anywhere in the window is reported, not just on the 
       .where(eq(portfolioBackfillMetadata.portfolioId, pf.id))
     // CLOSED is net zero across the window, so it is never held and never a gap.
     expect(meta?.gapSymbols ?? null).toBeNull()
+  })
+})
+
+describe("§76.3 — recalcPortfolioSeries (additive re-value behind the mutation queue)", () => {
+  beforeEach(() => {
+    process.env.INSTRUMENTS_URL = "http://instruments:3000"
+  })
+  afterEach(() => {
+    vi.unstubAllGlobals()
+    delete process.env.INSTRUMENTS_URL
+    __resetBackfillRunnerForTests()
+    // §76.3 — these two tests make a live quote SUCCEED, which populates the
+    // process-wide quote cache. Without this, the later `recalcPortfolioHistory`
+    // suites in this file run against a warm cache, price from it, and write a
+    // today's-snapshot row that their assertions say must not exist.
+    __resetQuoteCachesForTests()
+  })
+
+  /**
+   * `mockPriceBars` alone is not enough to prove the pricing tail: it 404s
+   * anything that is not a /price-bars request, so the QUOTE lookup the tail
+   * depends on fails and the position is legitimately left unpriced. That is
+   * correct behaviour, but it would make this test pass for the wrong reason —
+   * so this mock answers bars, quotes and profiles.
+   */
+  function mockBarsAndQuotes(
+    series: Record<string, { dates: string[]; closes: number[]; currency?: string; rateToBase?: number }>,
+    quotePrice: number,
+  ) {
+    const inner = vi.mocked(globalThis.fetch).getMockImplementation()!
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockImplementation((url: string, init?: RequestInit) => {
+        const u = String(url)
+        if (u.includes("/price-bars")) return inner(u, init)
+        if (u.includes("/profile")) {
+          return Promise.resolve({
+            ok: true,
+            status: 200,
+            json: async () => ({
+              ticker: "AAPL",
+              name: "Apple Inc.",
+              country: "US",
+              finnhubIndustry: "Technology",
+              currency: "USD",
+              currencySource: "provider",
+            }),
+          })
+        }
+        if (u.includes("/quote")) {
+          return Promise.resolve({
+            ok: true,
+            status: 200,
+            json: async () => ({
+              symbol: "AAPL",
+              currentPrice: quotePrice,
+              change: 0,
+              percentChange: 0,
+              currency: "USD",
+            }),
+          })
+        }
+        return inner(u, init)
+      }),
+    )
+  }
+
+  /**
+   * The contract that matters, stated once: the additive pass rewrites values in
+   * place but never deletes a row, so a day outside the recomputed window (before
+   * the earliest trade) SURVIVES where force would drop it. That is the one
+   * behaviour the mutation queue gave up, and it is asserted rather than implied.
+   */
+  it("re-values the window in place and leaves an out-of-window orphan row", async () => {
+    const { db, user } = await makeHarness("series-user-1")
+    const pf = await seedPortfolio(db, user.id)
+    await seedBuy(db, user.id, pf.id, "AAPL", 10, 150, "2026-07-01")
+    await seedPosition(db, user.id, pf.id, "AAPL", 10, 150)
+
+    await db.insert(valueSnapshots).values([
+      { portfolioId: pf.id, snapshotDate: "2026-06-20", value: "555", invested: "555" },
+      { portfolioId: pf.id, snapshotDate: "2026-07-01", value: "1", invested: "1" },
+    ])
+
+    mockPriceBars({
+      AAPL: {
+        dates: ["2026-07-01", "2026-07-02", "2026-07-03"],
+        closes: [150, 155, 160],
+      },
+    })
+
+    await recalcPortfolioSeries(db, pf.id, "Bearer test", new Date("2026-07-04T00:00:00Z"))
+
+    const snaps = await db
+      .select()
+      .from(valueSnapshots)
+      .where(eq(valueSnapshots.portfolioId, pf.id))
+      .orderBy(valueSnapshots.snapshotDate)
+
+    // The stale value ON 07-01 is corrected — upsert recomputes current data.
+    const first = snaps.find((r) => r.snapshotDate === "2026-07-01")!
+    expect(Number(first.value)).toBeCloseTo(1500, 0)
+
+    // The whole window is present.
+    expect(snaps.map((r) => r.snapshotDate)).toContain("2026-07-03")
+
+    // …and the pre-window orphan is STILL THERE. force would have deleted it.
+    expect(snaps.map((r) => r.snapshotDate)).toContain("2026-06-20")
+    expect(Number(snaps.find((r) => r.snapshotDate === "2026-06-20")!.value)).toBe(555)
+  })
+
+  it("prices positions and syncs current_value — the §70 import requirement", async () => {
+    const { db, user } = await makeHarness("series-user-2")
+    const pf = await seedPortfolio(db, user.id)
+    await seedBuy(db, user.id, pf.id, "AAPL", 10, 150, "2026-07-01")
+    await seedPosition(db, user.id, pf.id, "AAPL", 10, 150)
+
+    mockPriceBars({
+      AAPL: {
+        dates: ["2026-07-01", "2026-07-02", "2026-07-03"],
+        closes: [150, 155, 160],
+      },
+    })
+    mockBarsAndQuotes(
+      {
+        AAPL: {
+          dates: ["2026-07-01", "2026-07-02", "2026-07-03"],
+          closes: [150, 155, 160],
+        },
+      },
+      160,
+    )
+
+    await recalcPortfolioSeries(db, pf.id, "Bearer test", new Date("2026-07-04T00:00:00Z"))
+
+    // An import fires neither refreshQuotes nor portfolio-open, so if this pass
+    // did not price, every open position would keep a NULL market_value — §70's
+    // failure, where a full history sat beside 99 unpriced positions.
+    const [pos] = await db
+      .select({ mv: positions.marketValue, src: positions.priceSource })
+      .from(positions)
+      .where(eq(positions.portfolioId, pf.id))
+    expect(pos.mv).not.toBeNull()
+    expect(Number(pos.mv)).toBeGreaterThan(0)
+
+    // current_value tracks the newest snapshot (§53.5).
+    const [row] = await db
+      .select({ cv: portfolios.currentValue })
+      .from(portfolios)
+      .where(eq(portfolios.id, pf.id))
+    expect(Number(row.cv)).toBeGreaterThan(0)
   })
 })
 

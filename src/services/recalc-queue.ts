@@ -23,7 +23,7 @@
  * deployment is harmless.
  */
 import type { DB } from "../db/index.js"
-import { recalcPortfolioHistory } from "./backfill.js"
+import { recalcPortfolioSeries } from "./backfill.js"
 import { abortActiveBackfill, enqueueBackfill, __resetBackfillRunnerForTests } from "./backfill-runner.js"
 
 const GRACE_MS = Number(process.env.RECALC_GRACE_MS ?? 3000)
@@ -53,8 +53,16 @@ export function notifyTransactionsChanged(db: DB, portfolioId: string, authToken
     job.timer = null
     jobs.delete(portfolioId)
     const token = job.token
+    // §76.3 — ADDITIVE, not `recalcPortfolioHistory`. This used to delete every
+    // snapshot row and rebuild the series, 3s after the mutation route had
+    // already priced the same positions through `refreshQuotes`. The two passes
+    // ended in the same state, so the delete bought only the ability to drop rows
+    // outside the recomputed window — a wipe-and-reimport, which has its own
+    // endpoint (`POST /:id/recompute` with no `mode`). Coalescing (the grace
+    // timer) and serialization (the shared runner) are unaffected: a burst of
+    // transactions still collapses to ONE pass.
     void enqueueBackfill(portfolioId, (signal) =>
-      recalcPortfolioHistory(db, portfolioId, token, new Date(), signal),
+      recalcPortfolioSeries(db, portfolioId, token, new Date(), signal),
     )
   }, GRACE_MS)
 }

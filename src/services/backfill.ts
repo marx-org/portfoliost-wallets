@@ -1132,3 +1132,65 @@ export async function recalcPortfolioHistory(
     )
   }
 }
+
+/**
+ * §76.3 — the ADDITIVE re-value pass, with the pricing tail.
+ *
+ * `recalcPortfolioHistory` (force) and this are the same computation with one
+ * difference: force `DELETE`s every snapshot row for the portfolio and rebuilds,
+ * this writes over the top. Both end by pricing positions and syncing
+ * `current_value`, so both leave the portfolio in the same state.
+ *
+ * Why the additive one now backs the mutation queue:
+ *
+ *   A single position edit used to run TWO passes. The route called
+ *   `refreshQuotes` (pricing + today's snapshot, awaited, so the 201 could
+ *   return a live price), then `notifyTransactionsChanged` armed a 3s timer
+ *   that ran `recalcPortfolioHistory` — which ends with `refreshQuotesUnlocked`
+ *   anyway. So the second pass re-did the first pass's work, and between them
+ *   deleted and rewrote ~1,661 snapshot rows on the IBKR portfolio to add one
+ *   position.
+ *
+ *   The destructive half bought almost nothing: `computeSnapshotBatch` already
+ *   recomputes every day from the earliest BUY/SELL trade through today using
+ *   current data, so upsert *corrects* historical values rather than leaving
+ *   them stale. What only force can do is drop rows that no longer belong to
+ *   the window at all — i.e. after the earliest trade is deleted, or a
+ *   wipe-and-reimport. That is a deliberate, rare, whole-history operation, and
+ *   it already has its own path: `POST /:id/recompute` with no `mode`, which is
+ *   what §63.6's re-import uses. A user adding one position is not that.
+ *
+ * The pricing tail is NOT optional here and is kept for §70's reason: the bulk
+ * import (`routes/import.ts`) triggers neither `refreshQuotes` nor
+ * portfolio-open, so if this pass did not price, an import would leave every
+ * open position with a NULL `market_value` — the exact failure §70 records,
+ * where a full 18,488-row history sat beside 99 unpriced positions and the
+ * headline quietly understated net worth.
+ *
+ * Honors `signal` like every other pass, so an aborted pass writes nothing and
+ * the queue restarts with the latest state.
+ */
+export function recalcPortfolioSeries(
+  db: DB,
+  portfolioId: string,
+  authToken: string,
+  now = new Date(),
+  signal?: AbortSignal,
+): Promise<void> {
+  const today = now.toISOString().slice(0, 10)
+  return runBackfillCore(db, portfolioId, authToken, now, signal, today).then(async () => {
+    // The upsert already synced current_value from the newest snapshot; price the
+    // positions after it so today's snapshot carries today's quote, matching the
+    // ordering recalcPortfolioHistory documents as load-bearing.
+    const [owner] = await db
+      .select({ userId: portfolios.userId })
+      .from(portfolios)
+      .where(eq(portfolios.id, portfolioId))
+      .limit(1)
+    if (!owner) return
+    await refreshQuotesUnlocked(db, owner.userId, portfolioId, authToken)
+    throwIfAborted(signal)
+    await recomputeReturnColumns(db, portfolioId)
+    await syncCurrentValueFromSnapshots(db, portfolioId)
+  })
+}

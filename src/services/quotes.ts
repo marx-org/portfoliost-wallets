@@ -53,6 +53,23 @@ interface CachedProfile {
 const quoteCache = new Map<string, CachedQuote>()
 const profileCache = new Map<string, CachedProfile>()
 
+/**
+ * Test-only: drop both module-level caches.
+ *
+ * They are process-wide and keyed by symbol, so a suite that makes a live quote
+ * succeed leaks that price into every later suite in the same file — which then
+ * takes a different branch than it would in isolation. §76.3 hit exactly this: a
+ * test that proved the pricing tail works warmed `quoteCache`, and a later
+ * `recalcPortfolioHistory` test then found the cache hot, priced from it, and
+ * wrote today's snapshot-on-read row that its own assertion said must not exist.
+ * Same convention as `__resetBackfillRunnerForTests` /
+ * `__resetRecalcQueueForTests`.
+ */
+export function __resetQuoteCachesForTests(): void {
+  quoteCache.clear()
+  profileCache.clear()
+}
+
 // ── Config (read at call time so tests can set env vars before calling) ──
 
 /** How long a cached entry is considered fresh (ms). Override via env. */

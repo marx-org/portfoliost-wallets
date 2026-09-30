@@ -1,17 +1,21 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import { makeHarness } from "../routes/test-utils.js"
 import { portfolios } from "../db/schema.js"
-import { recalcPortfolioHistory } from "./backfill.js"
+import { recalcPortfolioSeries } from "./backfill.js"
 import { notifyTransactionsChanged, __resetRecalcQueueForTests } from "./recalc-queue.js"
 
-// The queue's job is scheduling/coalescing — recalcPortfolioHistory itself is
+// The queue's job is scheduling/coalescing — recalcPortfolioSeries itself is
 // covered by backfill.test.ts, so here it is fully mocked and controlled.
+//
+// §76.3 switched the queue from `recalcPortfolioHistory` (DELETE + rebuild) to
+// `recalcPortfolioSeries` (additive upsert + the same pricing tail), so the
+// mock follows the name the queue actually calls.
 vi.mock("./backfill.js", async (importOriginal) => {
   const actual = await importOriginal<typeof import("./backfill.js")>()
-  return { ...actual, recalcPortfolioHistory: vi.fn() }
+  return { ...actual, recalcPortfolioSeries: vi.fn() }
 })
 
-const mockedRecalc = vi.mocked(recalcPortfolioHistory)
+const mockedRecalc = vi.mocked(recalcPortfolioSeries)
 
 async function seedPortfolio(db: Awaited<ReturnType<typeof makeHarness>>["db"], userId: string, name = "Queue PF") {
   const [pf] = await db
@@ -125,5 +129,68 @@ describe("recalc-queue (background recalc on transaction changes)", () => {
     await vi.advanceTimersByTimeAsync(0)
     expect(mockedRecalc).toHaveBeenCalledTimes(2)
     expect(mockedRecalc.mock.calls[1][1]).toBe(pfB.id)
+  })
+  it("§76.3 — a single mutation enqueues exactly ONE pass, and it is the additive one", async () => {
+    const { db, user } = await makeHarness("queue-user-5")
+    const pf = await seedPortfolio(db, user.id)
+    mockedRecalc.mockResolvedValue(undefined)
+
+    notifyTransactionsChanged(db, pf.id, "Bearer test")
+    await vi.advanceTimersByTimeAsync(3000)
+
+    // One change → one pass. Not two (the old shape ran refreshQuotes AND this),
+    // and not zero (the burst-coalescing must not swallow a lone edit).
+    expect(mockedRecalc).toHaveBeenCalledTimes(1)
+    expect(mockedRecalc).toHaveBeenCalledWith(
+      db,
+      pf.id,
+      "Bearer test",
+      expect.any(Date),
+      expect.any(AbortSignal),
+    )
+  })
+
+  it("§76.3 — concurrent mutations cannot interleave into a torn series", async () => {
+    const { db, user } = await makeHarness("queue-user-6")
+    const pf = await seedPortfolio(db, user.id)
+
+    // Two overlapping passes attempt to start; the runner must let only one hold
+    // the slot at a time, and the loser must be superseded rather than run beside
+    // it — two writers on the same (portfolioId, snapshotDate) is the §63.2 race.
+    const observed: string[] = []
+    let concurrent = 0
+    let peak = 0
+    let release: () => void = () => {}
+    const gate = new Promise<void>((resolve) => {
+      release = resolve
+    })
+
+    mockedRecalc.mockImplementation(async (_db, id) => {
+      concurrent++
+      peak = Math.max(peak, concurrent)
+      observed.push(`start:${id}`)
+      if (observed.length === 1) await gate
+      observed.push(`end:${id}`)
+      concurrent--
+    })
+
+    notifyTransactionsChanged(db, pf.id, "Bearer test")
+    await vi.advanceTimersByTimeAsync(3000)
+    expect(observed).toEqual([`start:${pf.id}`])
+
+    // A second mutation lands mid-pass: the in-flight one is aborted and a fresh
+    // pass is queued. It must not run until the first has released the slot.
+    notifyTransactionsChanged(db, pf.id, "Bearer test")
+    release()
+    await vi.advanceTimersByTimeAsync(0)
+
+    // Peak concurrency must be 1 — a torn series requires two at once.
+    expect(peak).toBe(1)
+    // And the interleaving, if any, must be start→end, never start→start.
+    for (let i = 0; i + 1 < observed.length; i += 2) {
+      expect(observed[i]).toMatch(/^start:/)
+      expect(observed[i + 1]).toMatch(/^end:/)
+      expect(observed[i].slice(6)).toBe(observed[i + 1].slice(4))
+    }
   })
 })
