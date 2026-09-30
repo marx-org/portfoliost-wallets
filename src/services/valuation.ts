@@ -64,6 +64,51 @@ export interface PositionValueRow {
   instrumentCurrency: string | null
 }
 
+/**
+ * §63.2 — the composition rule that BOTH valuation paths share.
+ *
+ * **Neither path can be made to call the other, and the reason is the inputs,
+ * not the code.** The live path (`splitPortfolioValue`) receives a market value
+ * in each position's OWN instrument currency and converts it per row. The
+ * history path (`computeSnapshotBatch`) receives a close that `fetchPriceSeries`
+ * has **already** converted into the portfolio's base currency (§48.3), so it has
+ * no instrument currency to convert and no market value per day. So this is not
+ * "one function called twice" — that reading of §63.2 is not achievable, and
+ * writing it as if it were would have meant re-deriving one path's inputs inside
+ * the other.
+ *
+ * What IS duplicated — and what this removes — is everything *after* a per-row
+ * number exists:
+ *  - a row with no price contributes NOTHING and is counted, never substituted
+ *    (§70 — a cost basis is not a market value, and it is plausible, which is
+ *    why it went unnoticed for a session);
+ *  - `totalValue` is the sum by construction, so no caller can disagree with
+ *    another about what "value" means (§68);
+ *  - cash is added last and never clamped (§62 — a margin account's negative
+ *    balance reduces the total, which is the truth).
+ *
+ * Those three rules were written twice and could drift independently, which is
+ * the exact failure §68 exists to prevent.
+ *
+ * @param contributions per-row values in the portfolio's base currency, or
+ *   `null`/`undefined` for a row that is held but unpriced.
+ */
+export function composePortfolioValue(
+  contributions: Iterable<number | null | undefined>,
+  cashValue: number,
+): PortfolioValueSplit {
+  let instrumentsValue = 0
+  let unpricedPositions = 0
+  for (const c of contributions) {
+    if (c == null) {
+      unpricedPositions++
+      continue
+    }
+    instrumentsValue += c
+  }
+  return { instrumentsValue, cashValue, totalValue: instrumentsValue + cashValue, unpricedPositions }
+}
+
 export async function splitPortfolioValue(
   toBase: (ccy: string) => Promise<number>,
   positions: PositionValueRow[],
@@ -75,14 +120,17 @@ export async function splitPortfolioValue(
    */
   onPosition?: (info: { valueCcy: string; mv: number | null; contrib: number; unpriced: boolean }) => void,
 ): Promise<PortfolioValueSplit> {
-  let instrumentsValue = 0
-  let unpricedPositions = 0
+  // Per-row conversion stays HERE, in the live path: this function is handed a
+  // market value in the position's own currency and has to convert it. The
+  // backfill receives pre-converted closes and cannot use this function at all —
+  // see `composePortfolioValue`, which is the part the two genuinely share.
+  const contributions: (number | null)[] = []
   for (const p of positions) {
     // §70 — NO cost-basis fallback. An unpriced position is worth an unknown
     // amount, not its purchase price, and reporting the purchase price as the
     // value is a lie that looks like a number.
     if (p.marketValue == null) {
-      unpricedPositions++
+      contributions.push(null)
       onPosition?.({ valueCcy: (p.instrumentCurrency ?? "").toUpperCase(), mv: null, contrib: 0, unpriced: true })
       continue
     }
@@ -92,17 +140,20 @@ export async function splitPortfolioValue(
     // currency (§66.4). A number is never invented here.
     const valueCcy = (p.instrumentCurrency ?? "").toUpperCase()
     const contrib = mv * (await toBase(valueCcy))
-    instrumentsValue += contrib
+    contributions.push(contrib)
     onPosition?.({ valueCcy, mv, contrib, unpriced: false })
   }
   let cashValue = 0
   for (const [ccy, balance] of cashBalances) cashValue += balance * (await toBase(ccy))
+  // §63.2 — the composition (unpriced ⇒ 0 + counted, total = sum, cash last and
+  // unclamped) is `composePortfolioValue`'s, shared with the backfill.
+  //
   // NOT rounded here. Rounding is a presentation decision and belongs at the JSON
   // boundary: the snapshot path persists 8dp, and rounding to cents inside this
   // function made snapshotPortfolioValue disagree with the backfill pipeline
   // (§53.6 asserts the two agree to 7 decimal places). Each route rounds its own
   // response; this returns what the arithmetic actually produced.
-  return { instrumentsValue, cashValue, totalValue: instrumentsValue + cashValue, unpricedPositions }
+  return composePortfolioValue(contributions, cashValue)
 }
 
 /**

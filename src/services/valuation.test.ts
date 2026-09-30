@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it } from "vitest"
 import { makeHarness } from "../routes/test-utils.js"
-import { dominantPriceSource, oldestPriceAsOf, snapshotRate, splitPortfolioValue } from "./valuation.js"
+import { composePortfolioValue, dominantPriceSource, oldestPriceAsOf, snapshotRate, splitPortfolioValue } from "./valuation.js"
 import { mockInstrumentsFx, unmockInstrumentsFx } from "../test-fx-mock.js"
 
 afterEach(() => unmockInstrumentsFx())
@@ -156,3 +156,61 @@ describe("§70.2: price provenance", () => {
   })
 })
 
+
+/**
+ * §63.2 — the composition rule shared by the live and history valuation paths.
+ *
+ * This exists as a direct test because the failure it guards is not a wrong
+ * number today — it is the two paths drifting apart tomorrow. The backfill and
+ * the live quote path are NOT the same computation over the same inputs (the
+ * live path converts out of each position's own currency; the batch receives
+ * closes already in base), so they cannot be collapsed into one function. What
+ * they can share is everything *after* a per-row number exists, and that is here.
+ *
+ * The per-path tests still matter and are not redundant: `backfill.test.ts:1102`
+ * asserts the two paths agree to 7 decimal places, which is an end-to-end
+ * statement this cannot make. This one states the rule each path is built on, so
+ * a change to it fails in one place instead of surfacing as a divergence.
+ */
+describe("§63.2: composePortfolioValue", () => {
+  it("sums contributions, adds cash, and counts unpriced rows as zero", () => {
+    expect(composePortfolioValue([100, 250, null, 50], 500)).toEqual({
+      instrumentsValue: 400, cashValue: 500, totalValue: 900, unpricedPositions: 1,
+    })
+  })
+
+  it("an unpriced row contributes NOTHING — never a substituted value", () => {
+    // The §70 rule, in the shape that matters: the caller passes `null`, so the
+    // only way a cost basis could appear is if this function invented one.
+    const priced = composePortfolioValue([1000], 0)
+    const withGhost = composePortfolioValue([1000, null], 0)
+    expect(withGhost.instrumentsValue).toBe(priced.instrumentsValue)
+    expect(withGhost.unpricedPositions).toBe(1)
+  })
+
+  it("negative cash reduces the total and is never clamped (§62, margin accounts)", () => {
+    // IBKR and IKE Beata both run negative. A clamp to zero would report a
+    // solvent portfolio.
+    expect(composePortfolioValue([1000], -1200).totalValue).toBe(-200)
+  })
+
+  it("totalValue is the sum by construction, so no caller can disagree (§68)", () => {
+    const cases: [number[], number][] = [[[], 0], [[0.1, 0.2], 0.3], [[1e8, -1e8], 5]]
+    for (const [c, cash] of cases) {
+      const r = composePortfolioValue(c, cash)
+      expect(r.totalValue).toBe(r.instrumentsValue + r.cashValue)
+    }
+  })
+
+  it("does not round — rounding belongs at the JSON boundary", () => {
+    // §53.6 asserts the two paths agree to 7dp. Rounding in here is what broke
+    // that once, so the absence of rounding is part of the contract.
+    const r = composePortfolioValue([0.1, 0.2], 0)
+    expect(r.instrumentsValue).toBe(0.1 + 0.2)
+    expect(r.instrumentsValue).not.toBe(0.3)
+  })
+
+  it("treats undefined and null alike — both mean 'no price'", () => {
+    expect(composePortfolioValue([100, undefined, null], 0).unpricedPositions).toBe(2)
+  })
+})

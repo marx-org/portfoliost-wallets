@@ -31,6 +31,11 @@ import {
   resolvedFxRate,
 } from "./instruments-fx.js"
 import { cashBalanceSeries, dailyExternalFlows } from "./cashLedger.js"
+// §63.2 — `composePortfolioValue` only. `splitPortfolioValue` is deliberately NOT
+// imported: the live path converts each position out of its own instrument
+// currency, and the closes reaching this file are already in the portfolio's base
+// (§48.3), so it cannot be used here. The shared part is the composition.
+import { composePortfolioValue } from "./valuation.js"
 import { enqueueBackfill } from "./backfill-runner.js"
 import { refreshQuotesUnlocked } from "./quotes.js"
 import {
@@ -949,17 +954,37 @@ export async function computeSnapshotBatch(
   }
 
   for (const day of days) {
-    let totalValue = 0
+    // §63.2 — `composePortfolioValue` is the rule both valuation paths share:
+    // a held-but-unpriced row contributes 0 and is counted, `totalValue` is the
+    // sum by construction, and cash is added last and never clamped (§62 — a
+    // margin account's negative balance reduces the total). It was written twice
+    // here and in `valuation.ts` and could drift; §68 is the rule that says it
+    // must not.
+    //
+    // What stays HERE is the per-row arithmetic, and it is genuinely different:
+    // the close arriving from `fetchPriceSeries` is already in the portfolio's
+    // base currency (§48.3), so there is no instrument currency to convert and
+    // `splitPortfolioValue` cannot be used here at all.
+    //
+    // `unpricedPositions` from the call is DELIBERATELY NOT used for the abort
+    // guard. §72.31 separated `unpricedLastDay` from this because folding
+    // mid-window gaps into the array that drives `isUnpriceable` made a healthy
+    // portfolio look unpriceable and would have destroyed the history of every
+    // portfolio that ever held an illiquid bond. The two counts answer different
+    // questions; do not "simplify" them into one.
+    const contributions: (number | null)[] = []
     let totalInvested = 0
     for (const sym of symbols) {
       const qty = qtyMaps.get(sym)?.get(day) ?? 0
+      // Not held on this day ⇒ contributes nothing AND is not unpriced: the
+      // position does not exist yet, so there is no missing price to report.
       if (qty <= 0) continue
       const price = priceMaps.get(sym)?.get(day)
-      if (price == null) continue
-      // plan §48.3 — the close is already in the portfolio base currency
-      // (server-side conversion); the value path is qty × close.
-      totalValue += qty * price
-      if (recalcDebug && day === days[days.length - 1]) {
+      // Held but unpriced ⇒ null, which `composePortfolioValue` counts. This
+      // used to be a bare `continue`, which is the same number but had no way to
+      // say so.
+      contributions.push(price == null ? null : qty * price)
+      if (recalcDebug && price != null && day === days[days.length - 1]) {
         console.log(
           `[recalc-debug] pf=${portfolioId} day=${day} sym=${sym} qty=${qty} close=${price} contrib=${(qty * price).toFixed(2)} base=${base}`,
         )
@@ -969,7 +994,7 @@ export async function computeSnapshotBatch(
     // day's close); `invested` stays the position cost basis so TWR/MWR keep
     // treating cash as external flow (netFlow) rather than invested capital.
     const cashDay = cashSeries.get(day) ?? 0
-    totalValue += cashDay
+    const { totalValue } = composePortfolioValue(contributions, cashDay)
     totalInvested = cumulativeFlows.get(day) ?? 0
     if (recalcDebug && day === days[days.length - 1]) {
       console.log(
