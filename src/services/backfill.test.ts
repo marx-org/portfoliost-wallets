@@ -511,6 +511,12 @@ describe("§63.8 — backfill records held-but-unpriced symbols (no silent under
       .from(portfolioBackfillMetadata)
       .where(eq(portfolioBackfillMetadata.portfolioId, pf.id))
     expect(meta?.gapSymbols).toEqual(["BBB"])
+    // §72.30 — BBB is still held, so it is BOTH a history gap and a current one.
+    const [held] = await db
+      .select({ heldGapSymbols: portfolioBackfillMetadata.heldGapSymbols })
+      .from(portfolioBackfillMetadata)
+      .where(eq(portfolioBackfillMetadata.portfolioId, pf.id))
+    expect(held?.heldGapSymbols).toEqual(["BBB"])
 
     // And the stored value is the partial sum (AAA only) — the under-report the
     // flag exists to surface.
@@ -583,6 +589,43 @@ describe("§72.30 — a gap anywhere in the window is reported, not just on the 
     expect(meta?.gapSymbols).toEqual(["ILLIQ"])
     // Still completes: a permanently unpriceable symbol must not strand the portfolio.
     expect(meta?.status).toBe("complete")
+
+    // §72.30 — and the CURRENT-value claim is empty. ILLIQ was sold on day 2, so
+    // the latest stored point is complete; the history is the partial sum. This
+    // is the distinction PROD got wrong on 2026-10-01, when IKE Beata's banner
+    // read "Value excludes 7 positions without price history" and all 7 were
+    // closed positions. The gap is real; the claim about the current value is not.
+    const [held] = await db
+      .select({ heldGapSymbols: portfolioBackfillMetadata.heldGapSymbols })
+      .from(portfolioBackfillMetadata)
+      .where(eq(portfolioBackfillMetadata.portfolioId, pf.id))
+    expect(held?.heldGapSymbols ?? null).toBeNull()
+  })
+
+  it("reports a symbol that is BOTH a history gap and still held", async () => {
+    const { db, user } = await makeHarness("both-gap-user")
+    const pf = await seedPortfolio(db, user.id)
+    // SOLD: held earlier, no bars, gone by the last day → history only.
+    // HELD: still held, no bars → history AND current.
+    await seedBuy(db, user.id, pf.id, "SOLD", 10, 100, "2026-07-01")
+    await seedSell(db, user.id, pf.id, "SOLD", 10, 120, "2026-07-02")
+    await seedBuy(db, user.id, pf.id, "HELD", 5, 200, "2026-07-01")
+    await seedBuy(db, user.id, pf.id, "AAA", 10, 100, "2026-07-01")
+
+    mockPriceBars({ AAA: { dates: ["2026-07-01", "2026-07-02"], closes: [100, 110] } })
+
+    await runBackfill(db, pf.id, "Bearer t", new Date("2026-07-03T00:00:00Z"))
+
+    const [meta] = await db
+      .select({
+        gapSymbols: portfolioBackfillMetadata.gapSymbols,
+        heldGapSymbols: portfolioBackfillMetadata.heldGapSymbols,
+      })
+      .from(portfolioBackfillMetadata)
+      .where(eq(portfolioBackfillMetadata.portfolioId, pf.id))
+    expect(meta?.gapSymbols).toEqual(expect.arrayContaining(["SOLD", "HELD"]))
+    // Only HELD is excluded from the value the user is looking at now.
+    expect(meta?.heldGapSymbols).toEqual(["HELD"])
   })
 
   it("does not flag a symbol that was never held inside the window", async () => {

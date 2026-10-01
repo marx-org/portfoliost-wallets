@@ -71,6 +71,13 @@
       "when": 1790514044945,
       "tag": "0009_illegal_komodo",
       "breakpoints": true
+    },
+    {
+      "idx": 10,
+      "version": "7",
+      "when": 1790600000000,
+      "tag": "0010_held_gap_symbols",
+      "breakpoints": true
     }
   ]
 }

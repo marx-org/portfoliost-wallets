@@ -475,14 +475,25 @@ export async function getBackfillStatus(
  * when every held symbol was priced). Surfaced by `GET /:id/analytics` so the
  * SPA can flag the value as a partial sum instead of a wrong total.
  */
-export async function getGapSymbols(db: DB, portfolioId: string): Promise<string[] | null> {
+export async function getGapSymbols(
+  db: DB,
+  portfolioId: string,
+): Promise<{ gapSymbols: string[] | null; heldGapSymbols: string[] | null }> {
   const rows = await db
-    .select({ gap: portfolioBackfillMetadata.gapSymbols })
+    .select({ gap: portfolioBackfillMetadata.gapSymbols, held: portfolioBackfillMetadata.heldGapSymbols })
     .from(portfolioBackfillMetadata)
     .where(eq(portfolioBackfillMetadata.portfolioId, portfolioId))
     .limit(1)
   const gap = rows[0]?.gap
-  return gap && gap.length > 0 ? gap : null
+  const held = rows[0]?.held
+  return {
+    gapSymbols: gap && gap.length > 0 ? gap : null,
+    // A row written before this column existed has `held == null` while `gap` is
+    // populated. Falling back to the full list there would re-introduce exactly
+    // the false warning §72.30 split the field to remove, so an unknown subset
+    // reads as "no confirmed current gap" and the next backfill fills it in.
+    heldGapSymbols: held && held.length > 0 ? held : null,
+  }
 }
 
 async function setBackfillStatus(
@@ -654,6 +665,22 @@ export interface SnapshotBatch {
    */
   gapSymbols: string[]
   /**
+   * §72.30 — the subset of `gapSymbols` still HELD on the window's last day.
+   *
+   * `gapSymbols` is window-wide: it lists every symbol that was held on *any*
+   * day and lacked a bar on at least one such day. That is the right answer to
+   * "is this history a partial sum?" and the wrong answer to "is the value I am
+   * looking at right now short?" — the two came back as one field, and PROD
+   * (2026-10-01) rendered the consequence: the banner read "Value excludes 7
+   * positions without price history" for IKE Beata, whose 7 flagged symbols were
+   * **all closed**. Its current value was complete. A warning that is wrong about
+   * the number in front of the user trains them to ignore the real one.
+   *
+   * Empty while `gapSymbols` is non-empty is the normal, healthy case: the
+   * history has holes, today's value does not.
+   */
+  heldGapSymbols: string[]
+  /**
    * §63.10 — held symbols the pass was asked to price (qty > 0 on the window's
    * last day). `unpricedLastDay === heldSymbols` means the pass priced *nothing*,
    * which is never a legitimate result: it is what a transport/auth failure looks
@@ -691,7 +718,7 @@ export interface SnapshotBatch {
 
 /** No history to backfill (no BUY/SELL or cash yet) — shared by every guard. */
 const EMPTY_BATCH: SnapshotBatch = {
-  rows: [], gapSymbols: [], heldSymbols: 0, unpricedLastDay: 0, fxCoverageHoles: new Map(),
+  rows: [], gapSymbols: [], heldGapSymbols: [], heldSymbols: 0, unpricedLastDay: 0, fxCoverageHoles: new Map(),
 }
 
 /**
@@ -733,16 +760,21 @@ export async function persistGapSymbols(
   db: DB,
   portfolioId: string,
   gapSymbols: string[] | null,
+  /** §72.30 — the still-held subset. Defaults to the full list for callers that
+   *  only have one (a forced rebuild of a window whose last day is the only day
+   *  that matters); the normal backfill pass supplies both. */
+  heldGapSymbols?: string[] | null,
 ): Promise<void> {
   // Empty = every held symbol priced → store NULL ("no gap") rather than [] so
   // consumers can treat null as the clean state.
   const gap = gapSymbols && gapSymbols.length > 0 ? gapSymbols : null
+  const held = heldGapSymbols && heldGapSymbols.length > 0 ? heldGapSymbols : null
   await db
     .insert(portfolioBackfillMetadata)
-    .values({ portfolioId, status: "pending", gapSymbols: gap })
+    .values({ portfolioId, status: "pending", gapSymbols: gap, heldGapSymbols: held })
     .onConflictDoUpdate({
       target: portfolioBackfillMetadata.portfolioId,
-      set: { gapSymbols: gap },
+      set: { gapSymbols: gap, heldGapSymbols: held },
     })
 }
 
@@ -1010,6 +1042,11 @@ export async function computeSnapshotBatch(
   // By the last day they were closed, so the old check saw nothing to report.
   const lastDay = days[days.length - 1]
   const gapSymbols: string[] = []
+  // §72.30 — the same scan, narrowed to the window's last day. `gapSymbols`
+  // answers "was this history a partial sum?" and this answers "is the value in
+  // front of the user right now short?" — the two are different claims and PROD
+  // showed the conflation is visible, not theoretical.
+  const heldGapSymbols: string[] = []
   let heldCount = 0
   let unpricedLastDay = 0
   for (const sym of symbols) {
@@ -1025,6 +1062,7 @@ export async function computeSnapshotBatch(
       if (!prices || !prices.has(lastDay)) {
         unpricedLastDay += 1
         if (!gapSymbols.includes(sym)) gapSymbols.push(sym)
+        heldGapSymbols.push(sym)
       }
     }
     for (const day of days) {
@@ -1103,7 +1141,14 @@ export async function computeSnapshotBatch(
     }
   }
 
-  return { rows: snapBatch, gapSymbols, heldSymbols: heldCount, unpricedLastDay, fxCoverageHoles: fxCoverage }
+  return {
+    rows: snapBatch,
+    gapSymbols,
+    heldGapSymbols,
+    heldSymbols: heldCount,
+    unpricedLastDay,
+    fxCoverageHoles: fxCoverage,
+  }
 }
 
 async function _runBackfillCore(
@@ -1117,7 +1162,7 @@ async function _runBackfillCore(
   const batch = await computeSnapshotBatch(db, portfolioId, authToken, now, signal, toOverride)
   // §63.10 — never overwrite good values with a pass that priced nothing.
   if (isUnpriceable(batch)) throw new UnpriceablePortfolioError(portfolioId, batch.heldSymbols)
-  await persistGapSymbols(db, portfolioId, batch.gapSymbols)
+  await persistGapSymbols(db, portfolioId, batch.gapSymbols, batch.heldGapSymbols)
   if (batch.rows.length === 0) return
 
   // Bulk upsert in chunks to avoid huge parameter lists
@@ -1171,7 +1216,7 @@ export async function recalcPortfolioHistory(
       await tx.delete(valueSnapshots).where(eq(valueSnapshots.portfolioId, portfolioId))
       // §63.8 — record the held-but-unpriced symbols atomically with the
       // delete+rebuild so the value is never presented without its gap flag.
-      await persistGapSymbols(tx, portfolioId, batch.gapSymbols)
+      await persistGapSymbols(tx, portfolioId, batch.gapSymbols, batch.heldGapSymbols)
       if (batch.rows.length > 0) {
         const CHUNK = 100
         for (let i = 0; i < batch.rows.length; i += CHUNK) {

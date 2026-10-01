@@ -355,7 +355,21 @@ export const portfolioBackfillMetadata = portfoliosSchema.table(
     // §63.8 — symbols the latest backfill pass held (qty > 0 on the window's
     // last day) but had NO price bar for → the stored value is a *partial*
     // sum (silently under-reported). null/absent = every held symbol priced.
+    //
+    // §72.30 — WINDOW-WIDE, not last-day. It is the report for the *history*:
+    // a symbol held in 2022 with no bar then, and sold since, still belongs in
+    // it. That is why it is NOT the field a UI uses to say "the value you are
+    // looking at is short" — see `heldGapSymbols`.
     gapSymbols: text("gap_symbols").array(),
+    // §72.30 — the subset of `gapSymbols` still held on the window's last day.
+    // Non-empty means the LATEST stored point is itself a partial sum.
+    //
+    // Split out because the two claims were one field and PROD showed the cost:
+    // the SPA rendered "Value excludes 7 positions without price history" for
+    // IKE Beata on 2026-10-01, whose 7 flagged symbols were all CLOSED. The
+    // current value was complete. A warning that is wrong about the number in
+    // front of the user is worse than no warning, because it is believed.
+    heldGapSymbols: text("held_gap_symbols").array(),
   },
 )
 

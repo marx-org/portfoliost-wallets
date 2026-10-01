@@ -172,6 +172,53 @@ describe("GET /:id/analytics — benchmarks (D46/D48)", () => {
     const res = await a.request(`/api/portfolios/${pf.id}/analytics?timeframe=1Y`, { headers })
     const body = await res.json()
     expect(body.gapSymbols).toBeNull()
+    expect(body.heldGapSymbols).toBeNull()
+  })
+
+  /**
+   * §72.30 — the API must return BOTH claims, because they are different. This is
+   * the shape PROD was in on 2026-10-01 and the reason a UI built on
+   * `gapSymbols` alone told the user their value was short when it was complete:
+   * a window-wide list of symbols that had all been sold by the last day.
+   */
+  it("separates the window-wide history gap from the still-held current gap (§72.30)", async () => {
+    const { db, user, headers } = await makeHarness("gap-api-split")
+    const a = app(db)
+    const pf = await seedPortfolio(db, user.id)
+    const days = calendarDays("2026-07-01", "2026-07-03")
+    await seedSnapshots(db, pf.id, days)
+    await db.insert(portfolioBackfillMetadata).values({
+      portfolioId: pf.id,
+      status: "complete",
+      // SOLD was held earlier and closed; HELD is still held. Only HELD makes
+      // the CURRENT value a partial sum.
+      gapSymbols: ["SOLD", "HELD"],
+      heldGapSymbols: ["HELD"],
+    })
+
+    const res = await a.request(`/api/portfolios/${pf.id}/analytics?timeframe=1Y`, { headers })
+    const body = await res.json()
+    expect(body.gapSymbols).toEqual(["SOLD", "HELD"])
+    expect(body.heldGapSymbols).toEqual(["HELD"])
+  })
+
+  it("does not report a current gap for a row written before the split existed", async () => {
+    // A pre-migration row has gapSymbols and no heldGapSymbols. Falling back to
+    // the full list would re-introduce exactly the false warning the split
+    // removed, so an unknown subset must read as "no confirmed current gap".
+    const { db, user, headers } = await makeHarness("gap-api-legacy")
+    const a = app(db)
+    const pf = await seedPortfolio(db, user.id)
+    const days = calendarDays("2026-07-01", "2026-07-03")
+    await seedSnapshots(db, pf.id, days)
+    await db
+      .insert(portfolioBackfillMetadata)
+      .values({ portfolioId: pf.id, status: "complete", gapSymbols: ["OLD"], heldGapSymbols: null })
+
+    const res = await a.request(`/api/portfolios/${pf.id}/analytics?timeframe=1Y`, { headers })
+    const body = await res.json()
+    expect(body.gapSymbols).toEqual(["OLD"])
+    expect(body.heldGapSymbols).toBeNull()
   })
 
   it("accepts benchmarkCalcType param without error", async () => {

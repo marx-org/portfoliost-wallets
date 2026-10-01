@@ -1307,14 +1307,19 @@ async function resolveAggregateBase(
         .map((s) => ({ symbol: s.symbol, name: s.name, timeSeries: s.timeSeries, returnPercent: s.returnPercent, volatility: s.volatility }))
     }
 
-    // §63.8 — held positions the latest backfill pass had no price bar for;
-    // when present the `value` series is a partial sum and the SPA flags it.
-    const gapSymbols = await getGapSymbols(database, id)
+    // §63.8 — held positions the latest backfill pass had no price bar for.
+    // §72.30 — the two are different claims and both are returned: `gapSymbols`
+    // says the stored HISTORY is a partial sum, `heldGapSymbols` says the value
+    // in front of the user right now is short. Conflating them produced a banner
+    // that reported 7 missing positions on a portfolio whose current value was
+    // complete (all 7 were closed positions).
+    const { gapSymbols, heldGapSymbols } = await getGapSymbols(database, id)
 
     return c.json({
       timeframe,
       backfillStatus: "complete",
       gapSymbols,
+      heldGapSymbols,
       performance: {
         timeSeries,
         totalValue,
