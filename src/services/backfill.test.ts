@@ -1509,6 +1509,94 @@ describe("§72.21: fxCoverageHoles reaches analytics — persisted as counts, su
   })
 })
 
+/**
+ * §78.5 — a held-but-unpriced position contributes 0 to `value` while its cash
+ * leg has already been deducted, so buying one is indistinguishable from a loss.
+ * PROD: IKE Marek's −76.1% on 2021-11-09 was 5,717.65 of bonds that 404
+ * upstream. These tests pin the amount that makes that legible.
+ */
+describe("§78.5: unpricedValue attributes the step an unpriceable buy leaves behind", () => {
+  beforeEach(() => {
+    process.env.INSTRUMENTS_URL = "http://instruments:3000"
+  })
+  afterEach(() => {
+    vi.unstubAllGlobals()
+    delete process.env.INSTRUMENTS_URL
+    __resetBackfillRunnerForTests()
+  })
+
+  /** AAA prices normally; BOND 404s, exactly like INS0922 in PROD. */
+  function stubInstruments(series: Record<string, { dates: string[]; closes: number[] }>) {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = String(input)
+        if (url.includes("/api/internal/fx-rates")) {
+          const q = new URL(url).searchParams
+          const from = (q.get("from") ?? "").toUpperCase()
+          const to = (q.get("to") ?? "PLN").toUpperCase()
+          return new Response(JSON.stringify({ rate: from === to ? 1 : 1, asOf: "2026-07-02" }), { status: 200 })
+        }
+        const sym = decodeURIComponent(url.match(/\/instruments\/([^/]+)\/price-bars/)?.[1] ?? "")
+        const data = series[sym]
+        if (!data) return new Response("nope", { status: 404 })
+        return new Response(
+          JSON.stringify({ symbol: sym, dates: data.dates, closes: data.closes, currency: "PLN", stale: false }),
+          { status: 200 },
+        )
+      }),
+    )
+  }
+
+  it("counts a held-but-unpriced position at cost, and zeroes it once sold", async () => {
+    const { db, user } = await makeHarness("785-unpriced")
+    const pf = await seedPortfolio(db, user.id, "PLN")
+    // Buy 26 bonds at 102.05 = 2,653.30, and a priceable share for contrast.
+    await seedBuy(db, user.id, pf.id, "BOND", 26, 102.05, "2026-07-01", "PLN")
+    await seedBuy(db, user.id, pf.id, "AAA", 10, 100, "2026-07-01", "PLN")
+    await seedPosition(db, user.id, pf.id, "BOND", 26, 102.05, "PLN")
+    await seedPosition(db, user.id, pf.id, "AAA", 10, 100, "PLN")
+    stubInstruments({ AAA: { dates: ["2026-07-01", "2026-07-02", "2026-07-03"], closes: [100, 100, 100] } })
+
+    const batch = await computeSnapshotBatch(db, pf.id, "Bearer t", new Date("2026-07-04T00:00:00Z"))
+
+    const at = (d: string) => batch.rows.find((r) => r.snapshotDate === d)
+    // The whole point: the bond is held and has no price, so `value` counts it
+    // as 0 — and `unpricedValue` says how much 0 stands for.
+    expect(Number(at("2026-07-02")!.unpricedValue)).toBeCloseTo(2653.3, 2)
+    expect(batch.gapSymbols).toContain("BOND")
+    // A priceable position contributes nothing to the withheld figure.
+    expect(Number(at("2026-07-02")!.value)).toBeCloseTo(1000, 2)
+  })
+
+  it("unpricedValue is 0 — not the cost — on a day before the purchase", async () => {
+    // A position that does not exist yet has no missing price to report, which
+    // is the same rule `contributions` already follows.
+    const { db, user } = await makeHarness("785-before")
+    const pf = await seedPortfolio(db, user.id, "PLN")
+    await seedBuy(db, user.id, pf.id, "BOND", 26, 102.05, "2026-07-02", "PLN")
+    await seedPosition(db, user.id, pf.id, "BOND", 26, 102.05, "PLN")
+    stubInstruments({ AAA: { dates: ["2026-07-01"], closes: [100] } })
+
+    const batch = await computeSnapshotBatch(db, pf.id, "Bearer t", new Date("2026-07-04T00:00:00Z"))
+    const first = batch.rows.find((r) => r.snapshotDate === "2026-07-01")
+    expect(first === undefined || Number(first.unpricedValue) === 0).toBe(true)
+  })
+
+  it("a fully-priced portfolio reports 0 on every day", async () => {
+    const { db, user } = await makeHarness("785-clean")
+    const pf = await seedPortfolio(db, user.id, "PLN")
+    await seedBuy(db, user.id, pf.id, "AAA", 10, 100, "2026-07-01", "PLN")
+    await seedPosition(db, user.id, pf.id, "AAA", 10, 100, "PLN")
+    stubInstruments({
+      AAA: { dates: ["2026-07-01", "2026-07-02", "2026-07-03"], closes: [100, 101, 102] },
+    })
+
+    const batch = await computeSnapshotBatch(db, pf.id, "Bearer t", new Date("2026-07-04T00:00:00Z"))
+    for (const r of batch.rows) expect(Number(r.unpricedValue)).toBe(0)
+  })
+})
+
 describe("§62.4 — snapshots include cash; netFlow is external-only", () => {
   beforeEach(() => {
     process.env.INSTRUMENTS_URL = "http://instruments:3000"

@@ -325,6 +325,14 @@ export const valueSnapshots = portfoliosSchema.table(
     value: numeric("value", { precision: 20, scale: 8 }).notNull(),
     invested: numeric("invested", { precision: 20, scale: 8 }).notNull(),
     netFlow: numeric("net_flow", { precision: 20, scale: 8 }).notNull().default("0"),
+    // §78.5 — base-currency COST of positions held on this day that have no
+    // price. `value` already excludes them, so this is the only place the
+    // withheld amount exists. default 0 rather than nullable: a row written
+    // before this column existed had no unpriced positions recorded, and reading
+    // that as "worth 0 unpriced" would be the opposite of true for exactly the
+    // portfolios that need it — so existing rows are backfilled by the next
+    // recompute, and readers should treat a pre-migration row as unknown.
+    unpricedValue: numeric("unpriced_value", { precision: 20, scale: 8 }).notNull().default("0"),
     // §53.2 — widened from numeric(20,8): an XIRR that "converges" to a
     // garbage rate produced cumulative_mwr ≈ 1e12 → 'numeric field overflow'.
     // (The §53.1 solver guard makes this a belt-and-braces bound.)

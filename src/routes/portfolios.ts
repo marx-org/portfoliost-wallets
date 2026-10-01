@@ -1244,6 +1244,8 @@ async function resolveAggregateBase(
         snapshotDate: valueSnapshots.snapshotDate,
         value: valueSnapshots.value,
         invested: valueSnapshots.invested,
+        // §78.5 — read back so the chart can attribute a step. See below.
+        unpricedValue: valueSnapshots.unpricedValue,
         cumulativeTwr: valueSnapshots.cumulativeTwr,
         cumulativeMwr: valueSnapshots.cumulativeMwr,
         cumulativeSimple: valueSnapshots.cumulativeSimple,
@@ -1260,6 +1262,12 @@ async function resolveAggregateBase(
       // Cumulative net money-in (same currency as value) — the "invested"
       // line the performance chart overlays (value − invested = profit).
       invested: Number(r.invested),
+      // §78.5 — how much of `value` is NOT here. Absent rather than 0 on a
+      // pre-migration row: `unpriced_value` defaults to 0, so a row written
+      // before the column existed reads as "nothing withheld", which is the
+      // opposite of true for the portfolios that most need it. `undefined`
+      // lets the UI say "unknown" instead of "complete".
+      unpricedValue: r.unpricedValue === null ? undefined : Number(r.unpricedValue),
       cumulativeTwr: r.cumulativeTwr !== null ? Number(r.cumulativeTwr) : undefined,
       cumulativeMwr: r.cumulativeMwr !== null ? Number(r.cumulativeMwr) : undefined,
       cumulativeSimple: r.cumulativeSimple !== null ? Number(r.cumulativeSimple) : undefined,

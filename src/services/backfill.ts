@@ -713,6 +713,17 @@ export interface SnapshotRow {
   value: string
   invested: string
   netFlow: string
+  /**
+   * §78.5 — base-currency cost of positions held on this day that have **no
+   * price**. `value` excludes them (a held-but-unpriced row contributes 0), so
+   * without this column the series cannot distinguish "the market fell" from
+   * "money is parked in something nothing can quote".
+   *
+   * Stored per day rather than as a window summary because the symptom is a
+   * step on a specific date — IKE Marek's −76.1% on 2021-11-09 was 5 717,65 of
+   * bonds — and a total cannot place it.
+   */
+  unpricedValue: string
 }
 
 /**
@@ -949,6 +960,8 @@ export async function computeSnapshotBatch(
       symbol: portfolioTransactions.instrumentSymbol,
       type: portfolioTransactions.type,
       quantity: portfolioTransactions.quantity,
+      price: portfolioTransactions.price,
+      exchangeRate: portfolioTransactions.exchangeRate,
       executedAt: portfolioTransactions.executedAt,
       instrumentCurrency: portfolioTransactions.instrumentCurrency,
       externalId: portfolioTransactions.externalId,
@@ -1008,7 +1021,23 @@ export async function computeSnapshotBatch(
 
   // 3. Build cumulative qty_held per symbol per day.
   //    For each symbol: sorted list of (date, deltaQty) then accumulated.
-  type QtyEvent = { date: string; delta: number }
+  //
+  //    §78.5 — each event also carries a `costDelta`, the money that leg moved in
+  //    the portfolio's base currency, accumulated into `costMaps` alongside.
+  //
+  //    **This exists because a held-but-unpriced position contributes 0 to
+  //    `value` while its cash leg has already left, so buying one looks exactly
+  //    like a loss.** Measured on PROD: IKE Marek bought INS0922 + VOX0224 on
+  //    2021-11-09 for 5 717,65 and the value fell 5 728,51 — a −76.1% day that
+  //    was never a market move. §78.3's answer is "accept the partial sum and say
+  //    so", and saying so needs the amount: `gapSymbols` names the symbol, but a
+  //    chart cannot attribute a step without knowing it was 5 717,65 of bonds.
+  //
+  //    NOT `positions.average_cost_basis`, deliberately: that column is populated
+  //    only for positions that exist today, and these were all closed years ago.
+  //    Replaying the legs is the only way to price a window that is mostly closed
+  //    positions. It is the same arithmetic as `qtyMaps`, one more accumulator.
+  type QtyEvent = { date: string; delta: number; costDelta: number }
   const symbolEvents = new Map<string, QtyEvent[]>()
   for (const tx of txRows) {
     if (!tx.symbol) continue
@@ -1017,8 +1046,16 @@ export async function computeSnapshotBatch(
         tx.type === "BUY" ? Number(tx.quantity) : -Number(tx.quantity)
       const date = toDateStr(tx.executedAt) ?? ""
       if (!date) continue
+    // `exchange_rate` is the rate the import applied to reach the portfolio's
+    // base, and these bonds are PLN-denominated at rate 1, so `qty x price x
+    // rate` is base currency. A null rate is treated as 1: the same choice the
+    // import makes, and a wrong currency guess here would only affect a figure
+    // that is explicitly labelled "this much could not be priced".
+    const price = Number(tx.price ?? 0)
+    const rate = Number(tx.exchangeRate ?? 1) || 1
+    const costDelta = (tx.type === "BUY" ? 1 : -1) * Math.abs(delta) * price * rate
     const arr = symbolEvents.get(tx.symbol) ?? []
-    arr.push({ date, delta })
+    arr.push({ date, delta, costDelta })
     symbolEvents.set(tx.symbol, arr)
   }
 
@@ -1034,19 +1071,26 @@ export async function computeSnapshotBatch(
   //    qty_held(sym, day) = sum of deltas where date <= day
   const days = calendarDays(from, to)
   const qtyMaps = new Map<string, Map<string, number>>()
+  // §78.5 — cumulative COST BASIS per symbol per day, same shape as `qtyMaps`.
+  const costMaps = new Map<string, Map<string, number>>()
   for (const [sym, events] of symbolEvents) {
     const sorted = events.slice().sort((a, b) => a.date.localeCompare(b.date))
     const dayQty = new Map<string, number>()
+    const dayCost = new Map<string, number>()
     let cum = 0
+    let cumCost = 0
     let ei = 0
     for (const day of days) {
       while (ei < sorted.length && sorted[ei].date <= day) {
         cum += sorted[ei].delta
+        cumCost += sorted[ei].costDelta
         ei++
       }
       dayQty.set(day, Math.max(0, cum))
+      dayCost.set(day, Math.max(0, cumCost))
     }
     qtyMaps.set(sym, dayQty)
+    costMaps.set(sym, dayCost)
   }
 
   // §63.10.5 — only ask for symbols this portfolio actually held INSIDE the
@@ -1208,6 +1252,11 @@ export async function computeSnapshotBatch(
     // questions; do not "simplify" them into one.
     const contributions: (number | null)[] = []
     let totalInvested = 0
+    // §78.5 — the base-currency cost of everything held TODAY that has no price.
+    // This is the number that makes an unpriceable buy legible: `value` has
+    // already had the cash deducted, so without this the series shows a loss that
+    // is really money parked in something nothing can quote.
+    let unpricedCost = 0
     for (const sym of symbols) {
       const qty = qtyMaps.get(sym)?.get(day) ?? 0
       // Not held on this day ⇒ contributes nothing AND is not unpriced: the
@@ -1218,6 +1267,7 @@ export async function computeSnapshotBatch(
       // used to be a bare `continue`, which is the same number but had no way to
       // say so.
       contributions.push(price == null ? null : qty * price)
+      if (price == null) unpricedCost += costMaps.get(sym)?.get(day) ?? 0
       if (recalcDebug && price != null && day === days[days.length - 1]) {
         console.log(
           `[recalc-debug] pf=${portfolioId} day=${day} sym=${sym} qty=${qty} close=${price} contrib=${(qty * price).toFixed(2)} base=${base}`,
@@ -1251,6 +1301,7 @@ export async function computeSnapshotBatch(
         value: totalValue.toFixed(8),
         invested: totalInvested.toFixed(8),
         netFlow: (dailyFlows.get(day) ?? 0).toFixed(8),
+        unpricedValue: unpricedCost.toFixed(8),
       })
     }
   }
@@ -1292,6 +1343,10 @@ async function _runBackfillCore(
           value: sql`excluded.value`,
           invested: sql`excluded.invested`,
           netFlow: sql`excluded.net_flow`,
+          // §78.5 — must be in the upsert's `set`, not just the insert column, or
+          // a recompute would update `value` and leave the withheld amount
+          // describing the previous run's coverage.
+          unpricedValue: sql`excluded.unpriced_value`,
         },
       })
   }
