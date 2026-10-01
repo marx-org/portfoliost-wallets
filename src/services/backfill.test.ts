@@ -7,7 +7,10 @@ import {
   buildPriceMap,
   calendarDays,
   computeSnapshotBatch,
+  fxCoverageCounts,
   getBackfillStatus,
+  getGapSymbols,
+  persistGapSymbols,
   runBackfill,
   recalcPortfolioHistory,
   recalcPortfolioSeries,
@@ -1333,6 +1336,110 @@ describe("§72.21: fxCoverageHoles reports holes that gapSymbols structurally ca
 
     const batch = await computeSnapshotBatch(db, pf.id, "Bearer t", new Date("2026-07-04T00:00:00Z"))
     expect(batch.fxCoverageHoles.size).toBe(0)
+  })
+})
+
+describe("§72.21: fxCoverageHoles reaches analytics — persisted as counts, surfaced, and honest about absence", () => {
+  beforeEach(() => {
+    process.env.INSTRUMENTS_URL = "http://instruments:3000"
+  })
+  afterEach(() => {
+    vi.unstubAllGlobals()
+    delete process.env.INSTRUMENTS_URL
+    __resetBackfillRunnerForTests()
+  })
+
+  function stubInstruments(series: Record<string, { dates: string[]; closes: number[]; ccy: string }>) {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = String(input)
+        if (url.includes("/api/internal/fx-rates")) {
+          const q = new URL(url).searchParams
+          const from = (q.get("from") ?? "").toUpperCase()
+          const to = (q.get("to") ?? "PLN").toUpperCase()
+          return new Response(JSON.stringify({ rate: from === to ? 1 : 1, asOf: "2026-07-02" }), { status: 200 })
+        }
+        const sym = decodeURIComponent(url.match(/\/instruments\/([^/]+)\/price-bars/)?.[1] ?? "")
+        const data = series[sym]
+        if (!data) return new Response("nope", { status: 404 })
+        const target = new URL(url).searchParams.get("currency")?.toUpperCase() ?? null
+        return new Response(
+          JSON.stringify({ symbol: sym, dates: data.dates, closes: data.closes, currency: target ?? data.ccy, stale: false }),
+          { status: 200 },
+        )
+      }),
+    )
+  }
+
+  it("reduces dates to counts and refuses to write a zero", () => {
+    // The contract says minimum: 1, and a zero would be a lie — the map only
+    // holds symbols that HAVE a hole.
+    expect(fxCoverageCounts(new Map([["AAA", ["2026-07-02", "2026-07-03"]]]))).toEqual({ AAA: 2 })
+    expect(fxCoverageCounts(new Map([["AAA", []]]))).toBeNull()
+    expect(fxCoverageCounts(new Map())).toBeNull()
+    expect(fxCoverageCounts(null)).toBeNull()
+    expect(fxCoverageCounts(undefined)).toBeNull()
+  })
+
+  it("persists the counts through a backfill and reads them back", async () => {
+    const { db, user } = await makeHarness("7221-persist")
+    const pf = await seedPortfolio(db, user.id, "PLN")
+    await seedBuy(db, user.id, pf.id, "AAA", 10, 100, "2026-07-01", "PLN")
+    await seedPosition(db, user.id, pf.id, "AAA", 10, 100, "PLN")
+    stubInstruments({ AAA: { dates: ["2026-07-01", "2026-07-03"], closes: [100, 102], ccy: "PLN" } })
+
+    await runBackfill(db, pf.id, "Bearer t", new Date("2026-07-04T00:00:00Z"))
+
+    const got = await getGapSymbols(db, pf.id)
+    // The count, not the dates — and it survives the pod, which is the point.
+    expect(got.fxCoverageHoles).toEqual({ AAA: 1 })
+    // …and it coexists with the other two reports rather than replacing them.
+    // Both are `null` and not `[]`: the scattered hole is invisible to
+    // `gapSymbols`, and null-means-clean is the convention this reader already
+    // established for the other two, so the new field follows it rather than
+    // introducing a third shape.
+    expect(got.gapSymbols).toBeNull()
+    expect(got.heldGapSymbols).toBeNull()
+  })
+
+  it("an OMITTED argument leaves an existing measurement alone; null clears it", async () => {
+    // The distinction that stops a partial caller from erasing a real finding.
+    // `undefined` means "I did not measure this", not "measured, found none".
+    const { db, user } = await makeHarness("7221-omit")
+    const pf = await seedPortfolio(db, user.id, "PLN")
+
+    await persistGapSymbols(db, pf.id, null, null, { AAA: 3 })
+    expect((await getGapSymbols(db, pf.id)).fxCoverageHoles).toEqual({ AAA: 3 })
+
+    // A caller that knows nothing about FX coverage must not wipe the record.
+    await persistGapSymbols(db, pf.id, null, null)
+    expect((await getGapSymbols(db, pf.id)).fxCoverageHoles).toEqual({ AAA: 3 })
+
+    // Passing an empty map is a positive statement of "none", and does clear it.
+    await persistGapSymbols(db, pf.id, null, null, {})
+    expect((await getGapSymbols(db, pf.id)).fxCoverageHoles).toBeNull()
+  })
+
+  it("a portfolio with no holes reports null, not {}", async () => {
+    // `{}` and null are different claims to a consumer: "measured, clean" vs
+    // "not measured". The stored value is null so absent means what it says.
+    const { db, user } = await makeHarness("7221-none")
+    const pf = await seedPortfolio(db, user.id, "PLN")
+    await seedBuy(db, user.id, pf.id, "AAA", 10, 100, "2026-07-01", "PLN")
+    await seedPosition(db, user.id, pf.id, "AAA", 10, 100, "PLN")
+    stubInstruments({
+      AAA: { dates: ["2026-07-01", "2026-07-02", "2026-07-03"], closes: [100, 101, 102], ccy: "PLN" },
+    })
+
+    await runBackfill(db, pf.id, "Bearer t", new Date("2026-07-04T00:00:00Z"))
+
+    const [meta] = await db
+      .select()
+      .from(portfolioBackfillMetadata)
+      .where(eq(portfolioBackfillMetadata.portfolioId, pf.id))
+    expect(meta?.fxCoverageHoles ?? null).toBeNull()
+    expect((await getGapSymbols(db, pf.id)).fxCoverageHoles).toBeNull()
   })
 })
 

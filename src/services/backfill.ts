@@ -478,14 +478,26 @@ export async function getBackfillStatus(
 export async function getGapSymbols(
   db: DB,
   portfolioId: string,
-): Promise<{ gapSymbols: string[] | null; heldGapSymbols: string[] | null }> {
+): Promise<{
+  gapSymbols: string[] | null
+  heldGapSymbols: string[] | null
+  fxCoverageHoles: Record<string, number> | null
+}> {
   const rows = await db
-    .select({ gap: portfolioBackfillMetadata.gapSymbols, held: portfolioBackfillMetadata.heldGapSymbols })
+    .select({
+      gap: portfolioBackfillMetadata.gapSymbols,
+      held: portfolioBackfillMetadata.heldGapSymbols,
+      // §72.21 — a row written before this column existed has null, which means
+      // "not measured", not "none". It surfaces as absent and the next backfill
+      // fills it in, exactly like `heldGapSymbols`.
+      holes: portfolioBackfillMetadata.fxCoverageHoles,
+    })
     .from(portfolioBackfillMetadata)
     .where(eq(portfolioBackfillMetadata.portfolioId, portfolioId))
     .limit(1)
   const gap = rows[0]?.gap
   const held = rows[0]?.held
+  const holes = rows[0]?.holes
   return {
     gapSymbols: gap && gap.length > 0 ? gap : null,
     // A row written before this column existed has `held == null` while `gap` is
@@ -493,6 +505,7 @@ export async function getGapSymbols(
     // the false warning §72.30 split the field to remove, so an unknown subset
     // reads as "no confirmed current gap" and the next backfill fills it in.
     heldGapSymbols: held && held.length > 0 ? held : null,
+    fxCoverageHoles: holes && Object.keys(holes).length > 0 ? holes : null,
   }
 }
 
@@ -744,6 +757,32 @@ export class UnpriceablePortfolioError extends Error {
   }
 }
 
+/**
+ * §72.21 — reduce `fxCoverageHoles` (symbol → the hole dates) to the counts that
+ * get persisted and returned.
+ *
+ * **Counts, not dates, on purpose.** The dates behind these can run to thousands
+ * over a wide window, and they are not what a UI states: "SAP.DE is missing 12
+ * held days" is the claim, and the dates would be an unreadable dump on a
+ * summary row. The per-day detail is still available where it belongs — on the
+ * price-bar series, as `unconvertedDates` (§72.10), which separates "dropped for
+ * want of an FX rate" from "no history at all". At the valuation layer those two
+ * are one absence, so this must not pretend to know which it was.
+ */
+export function fxCoverageCounts(
+  holes: Map<string, string[]> | null | undefined,
+): Record<string, number> | null {
+  if (!holes || holes.size === 0) return null
+  const out: Record<string, number> = {}
+  for (const [sym, dates] of holes) {
+    // A zero would be a lie (the map only holds symbols with ≥1 hole) and would
+    // trip the contract's `minimum: 1`, so it is dropped rather than written.
+    const n = dates.length
+    if (n > 0) out[sym] = n
+  }
+  return Object.keys(out).length > 0 ? out : null
+}
+
 export function isUnpriceable(batch: SnapshotBatch): boolean {
   // §72.30 — last-day view only. Deliberately NOT gapSymbols.length: that is a
   // window-wide report now, and a portfolio can be fully priced today while
@@ -764,17 +803,37 @@ export async function persistGapSymbols(
    *  only have one (a forced rebuild of a window whose last day is the only day
    *  that matters); the normal backfill pass supplies both. */
   heldGapSymbols?: string[] | null,
+  /** §72.21 — symbol → held days with no returned bar. `undefined` means "this
+   *  caller does not measure it" and leaves any existing value alone; `null` or an
+   *  empty map clears it. The distinction is load-bearing: an omitted argument must
+   *  not read as "measured, and there were none", or a partial caller would
+   *  silently erase a real finding. */
+  fxCoverageHoles?: Record<string, number> | null,
 ): Promise<void> {
   // Empty = every held symbol priced → store NULL ("no gap") rather than [] so
   // consumers can treat null as the clean state.
   const gap = gapSymbols && gapSymbols.length > 0 ? gapSymbols : null
   const held = heldGapSymbols && heldGapSymbols.length > 0 ? heldGapSymbols : null
+  const holes =
+    fxCoverageHoles !== undefined && Object.keys(fxCoverageHoles ?? {}).length > 0
+      ? fxCoverageHoles
+      : null
   await db
     .insert(portfolioBackfillMetadata)
-    .values({ portfolioId, status: "pending", gapSymbols: gap, heldGapSymbols: held })
+    .values({
+      portfolioId,
+      status: "pending",
+      gapSymbols: gap,
+      heldGapSymbols: held,
+      ...(fxCoverageHoles !== undefined ? { fxCoverageHoles: holes } : {}),
+    })
     .onConflictDoUpdate({
       target: portfolioBackfillMetadata.portfolioId,
-      set: { gapSymbols: gap, heldGapSymbols: held },
+      set: {
+        gapSymbols: gap,
+        heldGapSymbols: held,
+        ...(fxCoverageHoles !== undefined ? { fxCoverageHoles: holes } : {}),
+      },
     })
 }
 
@@ -1162,7 +1221,7 @@ async function _runBackfillCore(
   const batch = await computeSnapshotBatch(db, portfolioId, authToken, now, signal, toOverride)
   // §63.10 — never overwrite good values with a pass that priced nothing.
   if (isUnpriceable(batch)) throw new UnpriceablePortfolioError(portfolioId, batch.heldSymbols)
-  await persistGapSymbols(db, portfolioId, batch.gapSymbols, batch.heldGapSymbols)
+  await persistGapSymbols(db, portfolioId, batch.gapSymbols, batch.heldGapSymbols, fxCoverageCounts(batch.fxCoverageHoles))
   if (batch.rows.length === 0) return
 
   // Bulk upsert in chunks to avoid huge parameter lists
@@ -1216,7 +1275,7 @@ export async function recalcPortfolioHistory(
       await tx.delete(valueSnapshots).where(eq(valueSnapshots.portfolioId, portfolioId))
       // §63.8 — record the held-but-unpriced symbols atomically with the
       // delete+rebuild so the value is never presented without its gap flag.
-      await persistGapSymbols(tx, portfolioId, batch.gapSymbols, batch.heldGapSymbols)
+      await persistGapSymbols(tx, portfolioId, batch.gapSymbols, batch.heldGapSymbols, fxCoverageCounts(batch.fxCoverageHoles))
       if (batch.rows.length > 0) {
         const CHUNK = 100
         for (let i = 0; i < batch.rows.length; i += CHUNK) {

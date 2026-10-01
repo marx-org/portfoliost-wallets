@@ -1313,13 +1313,19 @@ async function resolveAggregateBase(
     // in front of the user right now is short. Conflating them produced a banner
     // that reported 7 missing positions on a portfolio whose current value was
     // complete (all 7 were closed positions).
-    const { gapSymbols, heldGapSymbols } = await getGapSymbols(database, id)
+    const { gapSymbols, heldGapSymbols, fxCoverageHoles } = await getGapSymbols(database, id)
 
     return c.json({
       timeframe,
       backfillStatus: "complete",
       gapSymbols,
       heldGapSymbols,
+      // §72.21 — a THIRD claim, and the only one about steps in the middle of the
+      // series rather than at its ends. `gapSymbols` catches a prefix hole (reads as
+      // "no history"); `heldGapSymbols` catches "today is short". Neither can see a
+      // symbol that is priced every day except a few, which is the shape §72.17 took
+      // and the one that renders as a fake return.
+      fxCoverageHoles,
       performance: {
         timeSeries,
         totalValue,

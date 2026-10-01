@@ -3259,6 +3259,10 @@ export interface components {
             gapSymbols?: string[] | null;
             /** @description gapSymbols still held on the window's last day. Non-empty ⇒ the latest stored value excludes them. Empty while `gapSymbols` is non-empty ⇒ the history is a partial sum but the current value is complete, and the UI must say that instead of "value is short". */
             heldGapSymbols?: string[] | null;
+            /** @description symbol → number of held days with no returned bar, across the backfill window. Non-empty ⇒ the stored history has coverage steps that are not market moves, and the UI should say so rather than let a step read as a real return. Empty/absent ⇒ no such holes. Overlaps `gapSymbols` freely: a symbol may be listed in both, and means something different by each. */
+            fxCoverageHoles?: {
+                [key: string]: number;
+            } | null;
         };
         PortfolioSnapshot: {
             allocation?: {

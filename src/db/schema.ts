@@ -370,6 +370,19 @@ export const portfolioBackfillMetadata = portfoliosSchema.table(
     // current value was complete. A warning that is wrong about the number in
     // front of the user is worse than no warning, because it is believed.
     heldGapSymbols: text("held_gap_symbols").array(),
+    // §72.21 — symbol → number of held days on which the price series came back
+    // with NO bar. jsonb rather than a second text[] because the useful part is
+    // the COUNT, not the membership: a symbol in both this and `gapSymbols` means
+    // something different by each, and "N days" is what a UI can state.
+    //
+    // jsonb, not text[] of "SYM:12": the dates behind these counts can run to
+    // thousands over a wide window and are not what this reports.
+    //
+    // null/absent = no symbol had a hole. Deliberately NOT nullable-to-empty, for
+    // the same reason as `gapSymbols`: consumers need to tell "no holes" from
+    // "not measured yet" — a row written before this column existed has null while
+    // the backfill has certainly run.
+    fxCoverageHoles: jsonb("fx_coverage_holes").$type<Record<string, number>>(),
   },
 )
 

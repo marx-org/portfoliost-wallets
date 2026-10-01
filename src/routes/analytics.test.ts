@@ -221,6 +221,55 @@ describe("GET /:id/analytics — benchmarks (D46/D48)", () => {
     expect(body.heldGapSymbols).toBeNull()
   })
 
+  /**
+   * §72.21 — the THIRD coverage claim, and the only one about steps in the middle
+   * of a series. `gapSymbols` catches a prefix hole and reads as "no history";
+   * `heldGapSymbols` catches "today is short". A symbol priced every day but a
+   * few is neither, is not flagged by either, and renders as a fake return —
+   * which is the shape §72.17's damage took.
+   */
+  it("surfaces fxCoverageHoles alongside the other two, as counts (§72.21)", async () => {
+    const { db, user, headers } = await makeHarness("fxholes-api")
+    const a = app(db)
+    const pf = await seedPortfolio(db, user.id)
+    const days = calendarDays("2026-07-01", "2026-07-03")
+    await seedSnapshots(db, pf.id, days)
+    // AAA: a prefix hole, so it is BOTH a gapSymbol and an FX hole — the overlap
+    // is allowed and the two mean different things by each. BBB: scattered only.
+    await db.insert(portfolioBackfillMetadata).values({
+      portfolioId: pf.id,
+      status: "complete",
+      gapSymbols: ["AAA"],
+      heldGapSymbols: ["AAA"],
+      fxCoverageHoles: { AAA: 12, BBB: 2 },
+    })
+
+    const res = await a.request(`/api/portfolios/${pf.id}/analytics?timeframe=1Y`, { headers })
+    expect(res.status).toBe(200)
+    const body = await res.json()
+    expect(body.fxCoverageHoles).toEqual({ AAA: 12, BBB: 2 })
+    expect(body.gapSymbols).toEqual(["AAA"])
+    expect(body.heldGapSymbols).toEqual(["AAA"])
+  })
+
+  it("reports fxCoverageHoles null for a portfolio with no holes, and for a legacy row", async () => {
+    // Two different absences that must not look alike to a consumer: "measured,
+    // clean" and "not measured". Both null here, which is why the contract says
+    // absent rather than {} — a UI cannot claim clean history on an unmeasured row.
+    const { db, user, headers } = await makeHarness("fxholes-api-null")
+    const a = app(db)
+    const pf = await seedPortfolio(db, user.id)
+    const days = calendarDays("2026-07-01", "2026-07-03")
+    await seedSnapshots(db, pf.id, days)
+    await db
+      .insert(portfolioBackfillMetadata)
+      .values({ portfolioId: pf.id, status: "complete", gapSymbols: null, fxCoverageHoles: null })
+
+    const res = await a.request(`/api/portfolios/${pf.id}/analytics?timeframe=1Y`, { headers })
+    const body = await res.json()
+    expect(body.fxCoverageHoles).toBeNull()
+  })
+
   it("accepts benchmarkCalcType param without error", async () => {
     const { db, user, headers } = await makeHarness("abe-calc")
     const a = app(db)
