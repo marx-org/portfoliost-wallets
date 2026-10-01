@@ -161,13 +161,22 @@ export function createInternalRoutes(db?: DB) {
     const database = getDbInstance()
     try {
       const { cashBalanceSeries, cashBalances } = await import("../services/cashLedger.js")
+      // §63.10 — this route has no user identity, so the FX layer needs the
+      // shared service token. Passing `null` does not fall back to an
+      // unauthenticated call: it makes instruments answer 401, which
+      // `strict: true` turns into an abort. That is the correct outcome and it
+      // is what happened on the first deploy of this route — the guard caught a
+      // missing credential rather than degrading every foreign-currency row 1:1
+      // into a confident wrong number.
+      const { resolveServiceToken } = await import("../services/instruments-fx.js")
+      const token = resolveServiceToken()
       const rows = await database.select().from(portfolios)
       const out = []
       for (const p of rows) {
         // The window's START is irrelevant to the answer and is the expensive
         // part (every day is a row), so ask for the single day asked for.
-        const series = await cashBalanceSeries(database, null, p.id, asOf, asOf, p.baseCurrency, { strict: true })
-        const perCurrency = await cashBalances(database, "", p.id)
+        const series = await cashBalanceSeries(database, token, p.id, asOf, asOf, p.baseCurrency, { strict: true })
+        const perCurrency = await cashBalances(database, token, p.id)
         out.push({
           id: p.id,
           name: p.name,

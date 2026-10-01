@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest"
+import { afterEach, beforeEach, describe, expect, it } from "vitest"
 import { Hono } from "hono"
 import { eq } from "drizzle-orm"
 import { createInternalRoutes } from "./internal.js"
@@ -341,6 +341,17 @@ describe("POST /internal/apply-split (§23.6)", () => {
  * today, or the days in between are reported as a discrepancy.
  */
 describe("§63.4: GET /internal/cash-balances", () => {
+  // The route has no user identity, so the FX layer needs the shared service
+  // token. Without it `resolveServiceToken` throws — which is the §63.10
+  // behaviour working, not a test setup detail: it is what stopped the first
+  // deploy of this route from degrading every foreign-currency row 1:1.
+  beforeEach(() => {
+    process.env.INSTRUMENTS_SERVICE_TOKEN = "test-service-token"
+  })
+  afterEach(() => {
+    delete process.env.INSTRUMENTS_SERVICE_TOKEN
+  })
+
   async function seedDeposit(h: Harness, portfolioId: string, amount: number, ccy: string, on: string) {
     const res = await h.app.request("/api/import/transactions", {
       method: "POST",
@@ -408,5 +419,23 @@ describe("§63.4: GET /internal/cash-balances", () => {
     await seedPortfolio(h)
     const res = await h.app.request("/internal/cash-balances?asOf=2024-02-01")
     expect(res.status).toBe(200)
+  })
+
+  /**
+   * Found by deploying this route: with no `INSTRUMENTS_SERVICE_TOKEN` the FX
+   * lookup 401s, `strict: true` turns that into an abort, and the route answers
+   * 500. The alternative — `authToken: null`, which is what this called first —
+   * degrades every foreign-currency row to a 1:1 conversion and returns a
+   * confidently wrong number. Asserted so the credential cannot be dropped again
+   * without this failing.
+   */
+  it("fails loudly rather than degrading FX, when the service token is absent", async () => {
+    delete process.env.INSTRUMENTS_SERVICE_TOKEN
+    const h = await boot()
+    const { portfolioId } = await seedPortfolio(h)
+    await seedDeposit(h, portfolioId, 100, "GBP", "2024-01-15")
+
+    const res = await h.app.request("/internal/cash-balances?asOf=2024-02-01")
+    expect(res.status).toBe(500)
   })
 })
