@@ -331,3 +331,82 @@ describe("POST /internal/apply-split (§23.6)", () => {
     expect((await res.json()).updatedTransactions).toBe(1)
   })
 })
+
+/**
+ * §63.4 — the derived side of the Gotówka reconciliation.
+ *
+ * The recon used to compare the user's sheet against itself, so it could only
+ * ever confirm the workbook is internally consistent. It needs wallets' own
+ * replayed ledger, and it needs it AS OF the sheet's last row rather than as of
+ * today, or the days in between are reported as a discrepancy.
+ */
+describe("§63.4: GET /internal/cash-balances", () => {
+  async function seedDeposit(h: Harness, portfolioId: string, amount: number, ccy: string, on: string) {
+    const res = await h.app.request("/api/import/transactions", {
+      method: "POST",
+      headers: { ...h.headers, "content-type": "application/json" },
+      body: JSON.stringify({
+        source: { externalSource: "google-sheets:transakcje", spreadsheetId: "spr-1", sheet: "tx" },
+        transactions: [
+          {
+            externalId: `dep-${Math.random().toString(36).slice(2, 8)}`,
+            portfolioName: "Transakcje",
+            executedAt: `${on}T10:00:00.000Z`,
+            cashTx: { type: "DEPOSIT", amount, currency: ccy, transactionDate: on },
+          },
+        ],
+      }),
+    })
+    expect(res.status).toBe(200)
+  }
+
+  it("returns the derived per-currency balance and its base-currency total", async () => {
+    const h = await boot()
+    const { portfolioId } = await seedPortfolio(h)
+    await seedDeposit(h, portfolioId, 1000, "PLN", "2024-01-15")
+
+    const res = await h.app.request("/internal/cash-balances?asOf=2024-02-01")
+    expect(res.status).toBe(200)
+    const body = await res.json()
+    expect(body.asOf).toBe("2024-02-01")
+    const row = body.portfolios.find((p: { id: string }) => p.id === portfolioId)
+    expect(row.baseCurrency).toBe("PLN")
+    expect(row.total).toBeCloseTo(1000, 2)
+    expect(row.balances).toEqual([{ currency: "PLN", balance: 1000 }])
+  })
+
+  /**
+   * The load-bearing property. A default of "today" would make the recon compare
+   * a stale sheet row against a fresh balance, and the operator would be shown a
+   * discrepancy made of the days in between.
+   */
+  it("is as-of the requested date, not as-of today", async () => {
+    const h = await boot()
+    const { portfolioId } = await seedPortfolio(h)
+    await seedDeposit(h, portfolioId, 1000, "PLN", "2024-01-15")
+    await seedDeposit(h, portfolioId, 500, "PLN", "2024-06-15")
+
+    const early = await (await h.app.request("/internal/cash-balances?asOf=2024-02-01")).json()
+    const late = await (await h.app.request("/internal/cash-balances?asOf=2024-07-01")).json()
+    const find = (b: { portfolios: { id: string; total: number }[] }) =>
+      b.portfolios.find((p) => p.id === portfolioId)!.total
+
+    expect(find(early)).toBeCloseTo(1000, 2)
+    expect(find(late)).toBeCloseTo(1500, 2)
+  })
+
+  it("rejects a missing or malformed asOf with 422", async () => {
+    const h = await boot()
+    for (const q of ["", "?asOf=", "?asOf=29-09-2026", "?asOf=yesterday"]) {
+      const res = await h.app.request(`/internal/cash-balances${q}`)
+      expect(res.status, `asOf=${q}`).toBe(422)
+    }
+  })
+
+  it("needs no JWT (internal network only)", async () => {
+    const h = await boot()
+    await seedPortfolio(h)
+    const res = await h.app.request("/internal/cash-balances?asOf=2024-02-01")
+    expect(res.status).toBe(200)
+  })
+})

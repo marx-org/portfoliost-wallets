@@ -122,6 +122,69 @@ export function createInternalRoutes(db?: DB) {
     }
   })
 
+  /**
+   * §63.4 — the DERIVED cash balance per portfolio, as of a date.
+   *
+   * The Gotówka reconciliation is only worth anything if the two sides of the
+   * comparison come from different places. It used to build both from the
+   * user's own workbook — the sheet's `Gotówka` column replayed with the
+   * sheet's own signed `cashFlow` column — so it checked the sheet against
+   * itself, and a sheet with missing rows agrees with itself and is still
+   * wrong. That is exactly the failure §63.4 was opened for.
+   *
+   * This endpoint is the derived side: `cashBalanceSeries` replays every
+   * imported cash movement and trade funding effect, so it knows about flows
+   * the sheet never recorded. It is a base-currency total per portfolio
+   * because that is the only basis on which it can be compared to anything —
+   * the sheet's columns are per-currency and the derived ledger is per-currency
+   * too, and no single currency total is comparable across a multi-currency
+   * account. (Measured in PROD 2026-10-01: IBKR's derived split is 8 currencies
+   * with mixed signs, EUR +70,779 against USD −39,041, which nets to 24,255 PLN.
+   * The per-currency balances are returned as well, so a caller can see the
+   * netting instead of having to trust it.)
+   *
+   * `asOf` is required rather than defaulted: a reconciliation that silently
+   * compared a sheet's last row against a balance as of *today* would report
+   * the intervening days as a discrepancy. The Gotówka sheet's last row is
+   * 2026-09-29 while the import runs on 2026-10-01, so that is a 1,200 PLN
+   * error manufactured by the comparison itself.
+   *
+   * `strict` is on: a transport or auth failure must abort rather than
+   * degrade every foreign-currency row 1:1 into a confident wrong number
+   * (§63.10's rule, and the reason the FX layer has the flag at all).
+   */
+  routes.get("/cash-balances", async (c) => {
+    const asOf = c.req.query("asOf")
+    if (!asOf || !/^\d{4}-\d{2}-\d{2}$/.test(asOf)) {
+      return c.json({ message: "ValidationError", detail: "asOf=YYYY-MM-DD is required" }, 422)
+    }
+    const database = getDbInstance()
+    try {
+      const { cashBalanceSeries, cashBalances } = await import("../services/cashLedger.js")
+      const rows = await database.select().from(portfolios)
+      const out = []
+      for (const p of rows) {
+        // The window's START is irrelevant to the answer and is the expensive
+        // part (every day is a row), so ask for the single day asked for.
+        const series = await cashBalanceSeries(database, null, p.id, asOf, asOf, p.baseCurrency, { strict: true })
+        const perCurrency = await cashBalances(database, "", p.id)
+        out.push({
+          id: p.id,
+          name: p.name,
+          baseCurrency: p.baseCurrency,
+          total: series.get(asOf) ?? 0,
+          balances: [...perCurrency.entries()]
+            .map(([currency, balance]) => ({ currency, balance: round2(balance) }))
+            .sort((a, b) => a.currency.localeCompare(b.currency)),
+        })
+      }
+      return c.json({ asOf, portfolios: out })
+    } catch (err) {
+      console.error("[internal] cash-balances", err)
+      return c.json({ message: "Internal error" }, 500)
+    }
+  })
+
   return routes
 }
 
