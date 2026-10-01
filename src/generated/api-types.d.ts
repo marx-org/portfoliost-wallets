@@ -3724,6 +3724,27 @@ export interface components {
                 message?: string;
             }[];
             syncRun?: components["schemas"]["SyncRun"];
+            /**
+             * @description Portfolios whose history this import changed, each with the number of
+             *     rows inserted into it. Empty/absent when the batch inserted nothing.
+             *     This is the set a full re-backfill was queued for, so it is also the
+             *     set to look at when a chart looks stale after an import.
+             */
+            affectedPortfolios?: {
+                /** Format: uuid */
+                portfolioId: string;
+                /** @description Portfolio name at import time — an operator reading a log wants the name */
+                name?: string | null;
+                /** @description Rows INSERTED into this portfolio by this batch. */
+                rowCount: number;
+            }[];
+            /**
+             * @description Whether a re-backfill was enqueued. Distinguishes "nothing changed, so
+             *     nothing to rebuild" (false) from "rebuild queued but the queue is
+             *     backed up" — which the caller can then read off
+             *     `portfolio_backfill_metadata` instead of guessing from a log line.
+             */
+            backfillQueued?: boolean;
         };
         SyncRun: {
             id: number;

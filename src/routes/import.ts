@@ -497,14 +497,35 @@ export function createImportRoutes(db?: DB) {
 
     const { source, transactions } = parsed.data
     const errors: NonNullable<ImportTransactionsResponse["errors"]> = []
-    const affectedPortfolios = new Set<string>()
+    /**
+     * §69.3 — portfolios this batch actually INSERTED into, and by how many
+     * rows. Keyed on insert, not on "the row named this portfolio".
+     *
+     * **It used to be added to before the insert** (right after the portfolio
+     * resolved), which meant a batch of already-present rows still marked every
+     * portfolio touched and queued a full rebuild for each. Measured in PROD
+     * 2026-10-01: sync run 317 reported `inserted_wtx=0, inserted_ptx=0,
+     * skipped=48` — a completely idempotent no-op — and still rebuilt all ten
+     * portfolios over 16:14:16 → 16:15:46, about three minutes of database work
+     * to change nothing.
+     *
+     * That cost is paid on **every** "Run Sync", which the admin page offers as a
+     * routine action, so it is not a one-off: a sync run on an unchanged sheet
+     * is the *expected* case, not the exception. §69.3's own note budgeted "~2 min
+     * per 10 portfolios" without noticing the rebuild is unconditional.
+     *
+     * A row that throws, or that dedupes to `inserted: false`, must not appear
+     * here — the rebuild would recompute an unchanged history and then report a
+     * portfolio as touched that was not.
+     */
+    const insertedByPortfolio = new Map<string, { name: string; rowCount: number }>()
     let insertedCashTx = 0
     let insertedPtx = 0
     let inserted = 0
     let skipped = 0
 
     for (const row of transactions) {
-      let outcome: { inserted: boolean } | null = null
+      let outcome: { inserted: boolean; portfolioId: string; portfolioName: string } | null = null
       try {
         outcome = await database.transaction(async (tx) => {
           // The row's source portfolio: the ptx's id, or resolved by name via
@@ -521,8 +542,6 @@ export function createImportRoutes(db?: DB) {
             )
           }
 
-          affectedPortfolios.add(portfolio.id)
-
           // Idempotency: a re-submitted row's ptx externalId already present
           // → skip (the old design deduped on the wallet leg's unique externalId;
           // pure-trade rows have no cash leg, so dedup on the ptx instead).
@@ -537,7 +556,9 @@ export function createImportRoutes(db?: DB) {
                 ),
               )
               .limit(1)
-            if (dupPtx) return { inserted: false }
+            // §69.3 — carries the portfolio identity out so a SKIPPED row never
+            // marks the portfolio as touched; see `insertedByPortfolio`.
+            if (dupPtx) return { inserted: false, portfolioId: portfolio.id, portfolioName: portfolio.name }
           }
 
           // AU=0 rows carry no cashTx (pure trade): skip the cash leg.
@@ -546,7 +567,7 @@ export function createImportRoutes(db?: DB) {
               source,
               row,
             })
-            if (!ct.inserted) return { inserted: false }
+            if (!ct.inserted) return { inserted: false, portfolioId: portfolio.id, portfolioName: portfolio.name }
           }
 
           if (ptx) {
@@ -555,10 +576,9 @@ export function createImportRoutes(db?: DB) {
               row,
               ptx,
             })
-            affectedPortfolios.add(ptx.portfolioId)
             insertedPtx++
           }
-          return { inserted: true }
+          return { inserted: true, portfolioId: portfolio.id, portfolioName: portfolio.name }
         })
       } catch (err) {
         errors.push(
@@ -576,10 +596,15 @@ export function createImportRoutes(db?: DB) {
         inserted++
         // count only rows that actually carried a cash leg (pure trades → 0)
         if (row.cashTx) insertedCashTx++
+        // §69.3 — counted HERE, on an actual insert, not when the row merely
+        // named the portfolio. See the note on `insertedByPortfolio`.
+        const entry = insertedByPortfolio.get(outcome.portfolioId)
+        if (entry) entry.rowCount++
+        else insertedByPortfolio.set(outcome.portfolioId, { name: outcome.portfolioName, rowCount: 1 })
       } else if (outcome?.inserted === false) skipped++
     }
 
-    for (const portfolioId of affectedPortfolios) {
+    for (const portfolioId of insertedByPortfolio.keys()) {
       await recomputeImportPortfolioTotals(database, c.req.header("Authorization") ?? null, identity.id, portfolioId)
     }
 
@@ -635,21 +660,38 @@ export function createImportRoutes(db?: DB) {
     // per-row notify would thrash that queue for no benefit. Fire-and-forget:
     // the enqueue resolves when the slot is consumed, and failures are recorded
     // in portfolio_backfill_metadata, so nothing here can fail the import.
-    for (const portfolioId of affectedPortfolios) {
+    for (const portfolioId of insertedByPortfolio.keys()) {
       notifyTransactionsChanged(database, portfolioId, c.req.header("Authorization") ?? "")
     }
-    if (affectedPortfolios.size > 0) {
+    if (insertedByPortfolio.size > 0) {
+      const detail = [...insertedByPortfolio.entries()]
+        .map(([id, v]) => `${v.name || id}(${v.rowCount})`)
+        .join(", ")
       console.warn(
-        `[import] §69.3: re-backfill queued for ${affectedPortfolios.size} touched portfolio/plfolios ` +
-        `(full rebuild each, serialized) — a bulk import changes history, not just today.`,
+        `[import] §69.3: re-backfill queued for ${insertedByPortfolio.size} touched portfolio(s): ` +
+          `${detail} — full rebuild each, serialized. A bulk import changes history, not just today.`,
       )
     }
+
+    // §69.3 — the operator can now see what the import changed. It used to be a
+    // stderr line and nothing else, so "did my re-import reach IKE Beata?" was
+    // only answerable by waiting to see the chart move. `rowCount` counts rows
+    // INSERTED, so an all-skipped batch reports an empty list and
+    // `backfillQueued: false` — which is the signal that a re-run of an unchanged
+    // sheet did nothing, rather than a silent rebuild that also did nothing.
+    const affectedPortfolios = [...insertedByPortfolio.entries()].map(([portfolioId, v]) => ({
+      portfolioId,
+      name: v.name,
+      rowCount: v.rowCount,
+    }))
 
     return c.json({
       inserted,
       skipped,
       errors,
       syncRun: syncRunToContract(syncRunRow),
+      affectedPortfolios,
+      backfillQueued: insertedByPortfolio.size > 0,
     } satisfies ImportTransactionsResponse)
   })
 
@@ -788,7 +830,7 @@ export function createImportRoutes(db?: DB) {
 
 async function resolvePortfolioByName(tx: DB, userId: string, name: string) {
   const [portfolio] = await tx
-    .select({ id: portfolios.id, baseCurrency: portfolios.baseCurrency })
+    .select({ id: portfolios.id, name: portfolios.name, baseCurrency: portfolios.baseCurrency })
     .from(portfolios)
     .where(and(eq(portfolios.userId, userId), eq(portfolios.name, name)))
     .limit(1)
@@ -797,7 +839,7 @@ async function resolvePortfolioByName(tx: DB, userId: string, name: string) {
 
 async function portfolioOwnedById(tx: DB, userId: string, portfolioId: string) {
   const [portfolio] = await tx
-    .select({ id: portfolios.id, baseCurrency: portfolios.baseCurrency })
+    .select({ id: portfolios.id, name: portfolios.name, baseCurrency: portfolios.baseCurrency })
     .from(portfolios)
     .where(and(eq(portfolios.id, portfolioId), eq(portfolios.userId, userId)))
     .limit(1)

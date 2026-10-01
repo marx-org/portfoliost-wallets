@@ -47,6 +47,22 @@ function postTransactions(h: Harness, transactions: Record<string, unknown>[]) {
   })
 }
 
+/**
+ * The `startedAt` of every backfill pass, as a comparable snapshot.
+ *
+ * §69.3's notify is fire-and-forget, so the response cannot prove whether a
+ * rebuild was queued — only that the bookkeeping said so. Asserting on the
+ * response alone would pass against a handler that reports `backfillQueued:
+ * false` and still calls `notifyTransactionsChanged` on every row. This reads
+ * the state the notify actually writes.
+ */
+async function backfillStartedAts(h: Harness): Promise<string[]> {
+  const rows = await h.db
+    .select({ startedAt: portfolioBackfillMetadata.startedAt })
+    .from(portfolioBackfillMetadata)
+  return rows.map((r) => String(r.startedAt))
+}
+
 function buyRow(
   portfolioId: string,
   over: Record<string, unknown> = {},
@@ -1182,6 +1198,131 @@ describe("§69.3: the bulk import queues a re-backfill for what it touched", () 
     const again = await postTransactions(h, rows)
     expect(again.status).toBe(200)
     expect((await again.json()).skipped).toBe(2)
+  })
+
+  /**
+   * The PROD defect this closes, in the shape PROD had it.
+   *
+   * `affectedPortfolios` was populated as soon as a row *named* a portfolio,
+   * before the insert, so a batch where every row was already present still
+   * marked every portfolio and queued a full rebuild for each. Measured in PROD
+   * on 2026-10-01: sync run 317 reported `inserted_wtx=0, inserted_ptx=0,
+   * skipped=48` and still rebuilt all ten portfolios across 16:14:16 →
+   * 16:15:46 — about three minutes of database work to change nothing.
+   *
+   * That is the *expected* case, not an edge case: "Run Sync" on an unchanged
+   * sheet is what an operator does routinely, and the sheet is a fortnight stale
+   * in places. §69.3's own note budgeted "~2 min per 10 portfolios" without
+   * noticing the rebuild was unconditional.
+   */
+  it("a no-op re-import queues NOTHING, and says so", async () => {
+    const h = await boot()
+    const { portfolioId } = await seedPortfolio(h)
+    const rows = [
+      {
+        externalId: "e69-noop-1",
+        portfolioName: "Transakcje",
+        executedAt: "2024-01-10T10:00:00.000Z",
+        cashTx: { type: "DEPOSIT", amount: 1000, currency: "USD" },
+      },
+      {
+        externalId: "e69-noop-2",
+        portfolioName: "Transakcje",
+        executedAt: "2024-01-15T10:00:00.000Z",
+        portfolioTx: { portfolioId, type: "BUY", instrumentSymbol: "AAPL", quantity: 10, price: 100, currency: "USD" },
+      },
+    ]
+    await postTransactions(h, rows)
+
+    // Re-post the identical batch: nothing new, so nothing may be queued.
+    const before = await backfillStartedAts(h)
+    const res = await postTransactions(h, rows)
+    expect(res.status).toBe(200)
+    const body = await res.json()
+    expect(body.inserted).toBe(0)
+    expect(body.skipped).toBe(2)
+    // the assertion that fails against the old pre-insert bookkeeping
+    expect(body.affectedPortfolios).toEqual([])
+    expect(body.backfillQueued).toBe(false)
+    // and nothing was queued behind the response either
+    await new Promise((r) => setTimeout(r, 50))
+    expect(await backfillStartedAts(h)).toEqual(before)
+  })
+
+  it("reports which portfolios changed, with inserted row counts and names", async () => {
+    const h = await boot()
+    const { portfolioId } = await seedPortfolio(h)
+    const res = await postTransactions(h, [
+      {
+        externalId: "e69-r-1",
+        portfolioName: "Transakcje",
+        executedAt: "2024-01-10T10:00:00.000Z",
+        cashTx: { type: "DEPOSIT", amount: 1000, currency: "USD" },
+      },
+      {
+        externalId: "e69-r-2",
+        portfolioName: "Transakcje",
+        executedAt: "2024-01-12T10:00:00.000Z",
+        cashTx: { type: "DEPOSIT", amount: 500, currency: "USD" },
+      },
+      {
+        externalId: "e69-r-3",
+        portfolioName: "Transakcje",
+        executedAt: "2024-01-15T10:00:00.000Z",
+        portfolioTx: { portfolioId, type: "BUY", instrumentSymbol: "AAPL", quantity: 10, price: 100, currency: "USD" },
+      },
+    ])
+    const body = await res.json()
+    expect(body.backfillQueued).toBe(true)
+    expect(body.affectedPortfolios).toHaveLength(1)
+    // 3 rows INSERTED, and the name is what an operator reads
+    expect(body.affectedPortfolios[0].rowCount).toBe(3)
+    expect(body.affectedPortfolios[0].portfolioId).toBe(portfolioId)
+    expect(body.affectedPortfolios[0].name).toBe("Transakcje")
+  })
+
+  it("counts only inserted rows, so a mixed batch reports the new ones only", async () => {
+    const h = await boot()
+    const { portfolioId } = await seedPortfolio(h)
+    const existing = {
+      externalId: "e69-m-1",
+      portfolioName: "Transakcje",
+      executedAt: "2024-01-10T10:00:00.000Z",
+      cashTx: { type: "DEPOSIT", amount: 1000, currency: "USD" },
+    }
+    await postTransactions(h, [existing])
+
+    const res = await postTransactions(h, [
+      existing, // already present → skipped
+      {
+        externalId: "e69-m-2",
+        portfolioName: "Transakcje",
+        executedAt: "2024-01-20T10:00:00.000Z",
+        cashTx: { type: "DEPOSIT", amount: 250, currency: "USD" },
+      },
+    ])
+    const body = await res.json()
+    expect(body.inserted).toBe(1)
+    expect(body.skipped).toBe(1)
+    // 1, not 2 — the report must not imply a rebuild larger than the change
+    expect(body.affectedPortfolios[0].rowCount).toBe(1)
+  })
+
+  it("a row that errors touches nothing", async () => {
+    const h = await boot()
+    await seedPortfolio(h)
+    const res = await postTransactions(h, [
+      {
+        externalId: "e69-err",
+        portfolioName: "No Such Portfolio",
+        executedAt: "2024-01-10T10:00:00.000Z",
+        cashTx: { type: "DEPOSIT", amount: 1000, currency: "USD" },
+      },
+    ])
+    const body = await res.json()
+    expect(body.errors.length).toBe(1)
+    expect(body.affectedPortfolios).toEqual([])
+    expect(body.backfillQueued).toBe(false)
   })
 })
 
