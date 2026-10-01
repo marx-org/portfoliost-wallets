@@ -1337,6 +1337,72 @@ describe("§72.21: fxCoverageHoles reports holes that gapSymbols structurally ca
     const batch = await computeSnapshotBatch(db, pf.id, "Bearer t", new Date("2026-07-04T00:00:00Z"))
     expect(batch.fxCoverageHoles.size).toBe(0)
   })
+
+  /**
+   * The regression this whole block exists for. The first shipped version of
+   * `fxCoverageHoles` compared a held day against the returned bars and called the
+   * difference a hole, and PROD then reported **820** for a single symbol and 108
+   * symbols' worth for IBKR. `days` is `calendarDays` — every calendar day — so
+   * **1,148 of 1,222 SAP.DE "holes" were weekends**. A metric whose findings are
+   * 94% the definition of the day is not a metric.
+   *
+   * Three assertions, because each exclusion is separately load-bearing:
+   * a weekend is not a hole, a long closure is not a hole, and a single missing
+   * weekday bracketed by bars still is.
+   */
+  it("weekends and closure spans are NOT holes; a bracketed weekday still is", async () => {
+    const { db, user } = await makeHarness("7221-closures")
+    const pf = await seedPortfolio(db, user.id, "PLN")
+    // 2026-06-29 Mon, 06-30 Tue, 07-01 Wed, 07-02 Thu, 07-03 Fri, 07-04 Sat,
+    // 07-05 Sun, 07-06 Mon, 07-07 Tue. Held from 06-29 through 07-07.
+    await seedBuy(db, user.id, pf.id, "AAA", 10, 100, "2026-06-29", "PLN")
+    await seedPosition(db, user.id, pf.id, "AAA", 10, 100, "PLN")
+    stubInstruments({
+      // Missing 07-01 (a Wednesday, bracketed by 06-30 and 07-02 ⇒ a real hole),
+      // 07-04/07-05 (the weekend), and 07-06 (Monday; the gap to 07-02 is 4 days,
+      // inside the window, so it stays a hole — see below).
+      AAA: { dates: ["2026-06-29", "2026-06-30", "2026-07-02", "2026-07-03", "2026-07-07"], closes: [100, 101, 102, 103, 104], ccy: "PLN" },
+    })
+
+    const batch = await computeSnapshotBatch(db, pf.id, "Bearer t", new Date("2026-07-08T00:00:00Z"))
+    const holes = batch.fxCoverageHoles.get("AAA") ?? []
+
+    // The weekend is not a hole. Before the fix these two alone were ~29% of the count.
+    expect(holes).not.toContain("2026-07-04")
+    expect(holes).not.toContain("2026-07-05")
+    // A bracketed weekday gap still is — that is the §72.17 shape and the reason
+    // this function exists.
+    expect(holes).toContain("2026-07-01")
+  })
+
+  it("a long closure is not a hole, but a short one is", async () => {
+    const { db, user } = await makeHarness("7221-span")
+    const pf = await seedPortfolio(db, user.id, "PLN")
+    // Held 2026-07-06 .. 2026-07-24.
+    await seedBuy(db, user.id, pf.id, "AAA", 10, 100, "2026-07-06", "PLN")
+    await seedPosition(db, user.id, pf.id, "AAA", 10, 100, "PLN")
+    stubInstruments({
+      // Bars resume only on 07-20, so 07-06..07-17 is a 14-day stretch with no
+      // bar either side of most of it — a holiday fortnight, not coverage loss.
+      AAA: {
+        dates: ["2026-07-06", "2026-07-20", "2026-07-21", "2026-07-22", "2026-07-23", "2026-07-24"],
+        closes: [100, 104, 105, 106, 107, 108],
+        ccy: "PLN",
+      },
+    })
+
+    const batch = await computeSnapshotBatch(db, pf.id, "Bearer t", new Date("2026-07-25T00:00:00Z"))
+    const holes = batch.fxCoverageHoles.get("AAA") ?? []
+    // The rule is symmetric: a day must have a bar within 7 days on BOTH sides to
+    // be a hole, so the middle of a fortnight-long closure is not one.
+    expect(holes).not.toContain("2026-07-10")
+    expect(holes).not.toContain("2026-07-15")
+    // 07-13 is the exact boundary — 7 days after the 07-06 bar and 7 before the
+    // 07-20 one — and is still counted. That is the documented limit made
+    // concrete: a single-day exchange holiday and a single-day coverage hole are
+    // indistinguishable here, because `days` carries no calendar.
+    expect(holes).toEqual(["2026-07-13"])
+  })
 })
 
 describe("§72.21: fxCoverageHoles reaches analytics — persisted as counts, surfaced, and honest about absence", () => {
