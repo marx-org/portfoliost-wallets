@@ -361,6 +361,130 @@ describe("GET /:id/analytics — benchmarks (D46/D48)", () => {
   })
 })
 
+/**
+ * §82.1 — the flow-neutral TWR p.a. on `performance.annualizedReturn`, the
+ * number the Performance tab's "TWR p.a." tile reads. Declared in the contract
+ * since D86 and computed by `/risk-metrics`, but never returned here.
+ */
+describe("GET /:id/analytics — performance.annualizedReturn (§82.1)", () => {
+  /** n consecutive calendar days from `from`, so elapsed days = n − 1. */
+  function daysFrom(from: string, n: number): string[] {
+    return calendarDays(from, new Date(Date.parse(`${from}T00:00:00Z`) + (n - 1) * 86400000).toISOString().slice(0, 10))
+  }
+
+  /** A TWR index rising linearly from `from` to `to`, one point per day. */
+  async function seedTwr(
+    db: Awaited<ReturnType<typeof makeHarness>>["db"],
+    portfolioId: string,
+    dates: string[],
+    from: number,
+    to: number,
+  ) {
+    for (let i = 0; i < dates.length; i++) {
+      await db.insert(valueSnapshots).values({
+        portfolioId,
+        snapshotDate: dates[i],
+        value: "1000",
+        invested: "900",
+        netFlow: "0",
+        cumulativeTwr: String(from + ((to - from) * i) / (dates.length - 1)),
+      })
+    }
+  }
+
+  async function annualizedFor(dates: string[], from: number, to: number) {
+    const { db, user, headers } = await makeHarness(`ann-${dates.length}-${from}-${to}`)
+    const pf = await seedPortfolio(db, user.id)
+    await seedTwr(db, pf.id, dates, from, to)
+    const res = await app(db).request(`/api/portfolios/${pf.id}/analytics?timeframe=ALL`, { headers })
+    expect(res.status).toBe(200)
+    const body = await res.json()
+    return body.performance as {
+      annualizedReturn: number | null
+      annualizedReturnWithheldReason: string | null
+    }
+  }
+
+  it("annualises the flow-neutral index over ELAPSED CALENDAR DAYS", async () => {
+    // 366 points = 365 elapsed days, index 100 → 110. Exponent 365/365 = 1, so
+    // the answer is the period return itself: exactly 10%. This is the §81.2
+    // exponent pinned through the route rather than through riskMetrics.test.ts.
+    const p = await annualizedFor(daysFrom("2025-01-01", 366), 100, 110)
+    expect(p.annualizedReturn).toBe(10)
+    expect(p.annualizedReturnWithheldReason).toBeNull()
+  })
+
+  it("reports a percent, not a fraction (unit split with /risk-metrics is deliberate)", async () => {
+    const p = await annualizedFor(daysFrom("2025-01-01", 366), 100, 110)
+    // A fraction would read 0.1 here; the siblings in `performance.*` are percents.
+    expect(p.annualizedReturn).not.toBeCloseTo(0.1, 3)
+    expect(p.annualizedReturn).toBe(10)
+  })
+
+  it("compounds the 365/364 exponent for a 365-POINT (364-day) span", async () => {
+    // The plan's original fixture said "365 points → 10". A point count is not a
+    // day count: 365 daily points span 364 days, so the exponent is 365/364 and
+    // the answer is slightly ABOVE the period return. Pinning it stops anyone
+    // "simplifying" the exponent back to 1.
+    const p = await annualizedFor(daysFrom("2025-01-01", 365), 100, 110)
+    expect(p.annualizedReturn).toBeCloseTo((1.1 ** (365 / 364) - 1) * 100, 2)
+    expect(p.annualizedReturn).toBe(10.03)
+  })
+
+  it("withholds below 60 points, returning null and the reason rather than a bigger number", async () => {
+    const p = await annualizedFor(daysFrom("2025-01-01", 59), 100, 110)
+    expect(p.annualizedReturn).toBeNull()
+    expect(p.annualizedReturnWithheldReason).toBe("insufficient_history")
+  })
+
+  it("withholds a ≥60-point series that spans under 90 calendar days", async () => {
+    const p = await annualizedFor(daysFrom("2025-01-01", 80), 100, 110) // 79 days
+    expect(p.annualizedReturn).toBeNull()
+    expect(p.annualizedReturnWithheldReason).toBe("insufficient_history")
+  })
+
+  /**
+   * A deliberate deviation from the plan's original wording, which wanted a
+   * 91-point (one quarter) series withheld as "under a full year". §82.1 also
+   * required reusing `annualizedReturnWithheldReason` verbatim so this tile and
+   * the Risk tab can never disagree about the same window — and that predicate's
+   * floor is 60 points AND 90 days, which a quarter clears. One source of truth
+   * won: the tile annualises a quarter exactly as the Risk tab already does.
+   */
+  it("annualises a quarter (91 points, 90 days) — the shared predicate, not a full-year gate", async () => {
+    const p = await annualizedFor(daysFrom("2025-01-01", 91), 100, 110)
+    expect(p.annualizedReturnWithheldReason).toBeNull()
+    expect(p.annualizedReturn).toBeCloseTo((1.1 ** (365 / 90) - 1) * 100, 2)
+    expect(p.annualizedReturn).toBeGreaterThan(10) // annualising a quarter exceeds it
+  })
+
+  it("withholds a series whose cumulative_twr is absent (a null is a gap, not a −100% day)", async () => {
+    const { db, user, headers } = await makeHarness("ann-null-twr")
+    const pf = await seedPortfolio(db, user.id)
+    await seedSnapshots(db, pf.id, daysFrom("2025-01-01", 200)) // no cumulative_twr at all
+    const res = await app(db).request(`/api/portfolios/${pf.id}/analytics?timeframe=ALL`, { headers })
+    const body = await res.json()
+    expect(body.performance.annualizedReturn).toBeNull()
+    expect(body.performance.annualizedReturnWithheldReason).toBe("insufficient_history")
+  })
+
+  it("leaves timeWeightedReturn untouched — the two read different columns", async () => {
+    // `timeWeightedReturn` is the WHOLE window's period return (index − 100);
+    // `annualizedReturn` rescales that same window to a year. They are equal
+    // only when the window is exactly a year, so collapsing them would be a
+    // silent 4x error on a 3M view.
+    const p = await (async () => {
+      const { db, user, headers } = await makeHarness("ann-vs-twr")
+      const pf = await seedPortfolio(db, user.id)
+      await seedTwr(db, pf.id, daysFrom("2025-01-01", 366), 100, 110)
+      const res = await app(db).request(`/api/portfolios/${pf.id}/analytics?timeframe=ALL`, { headers })
+      return (await res.json()).performance as { timeWeightedReturn: number; annualizedReturn: number }
+    })()
+    expect(p.timeWeightedReturn).toBe(10)
+    expect(p.annualizedReturn).toBe(10) // equal only because the span IS a year
+  })
+})
+
 describe("timeframeCutoff (1W/1M/3M windowing)", () => {
   const now = new Date("2026-09-05T12:00:00Z")
 

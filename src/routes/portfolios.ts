@@ -19,7 +19,11 @@ import { enqueueBackfill } from "../services/backfill-runner.js"
 import { cashBalances, dailyExternalFlows } from "../services/cashLedger.js"
 import { debugEnabled, debugLog } from "../services/debug.js"
 import { buildPortfolioCash } from "./portfolio-cash.js"
-import { computeRiskMetrics } from "../services/riskMetrics.js"
+import {
+  annualizedReturn,
+  annualizedReturnWithheldReason,
+  computeRiskMetrics,
+} from "../services/riskMetrics.js"
 import { buildDailyReturns } from "../services/returnColumns.js"
 import { resolveRates, fxTo } from "../services/instruments-fx.js"
 import { sumSnapshotsByDateForwardFilled, buildMergedPerformance } from "../services/mergedAnalytics.js"
@@ -1289,6 +1293,31 @@ async function resolveAggregateBase(
     // Monthly returns: month-over-month growth of the flow-adjusted TWR index
     const monthlyReturns = buildMonthlyReturns(rows.map((r) => ({ date: r.snapshotDate, cumulativeTwr: r.cumulativeTwr === null ? null : Number(r.cumulativeTwr) })))
 
+    // §82.1 — TWR p.a. for the Performance tab's tile, read off the SAME stored
+    // flow-neutral index the month-over-month bars above are built from. §81.2
+    // owns both the annualisation arithmetic and the withholding predicate, so
+    // this route only calls them; a third annualiser here would be a third
+    // answer to one question, and the Risk tab and this tile would be free to
+    // disagree about the same window.
+    //
+    // Rows with no `cumulative_twr` are dropped, not coerced: a 0 in the index
+    // is a −100% day, not a gap.
+    const twrPoints = rows.flatMap((r) =>
+      r.cumulativeTwr === null ? [] : [{ date: r.snapshotDate, index: Number(r.cumulativeTwr) }],
+    )
+    const twrIndex = twrPoints.map((p) => p.index)
+    const twrDates = twrPoints.map((p) => p.date)
+    const annualizedReturnWithheld = annualizedReturnWithheldReason(twrIndex, twrDates)
+    // A PERCENT, matching every sibling in `performance.*` (totalReturnPercent,
+    // moneyWeightedReturn and timeWeightedReturn are all percents). `/risk-metrics`
+    // returns a FRACTION under the same contract field name — a unit split this
+    // section accepted deliberately, recorded here because a consumer reading both
+    // routes renders one of them 100× out.
+    const annualizedReturnPercent =
+      annualizedReturnWithheld === null
+        ? Math.round(annualizedReturn(twrIndex, twrDates) * 10000) / 100
+        : null
+
     // Benchmarks: mirror the portfolio's cash flows into each requested ticker
     // (D50) — BUYs invest cash in the benchmark, SELLs release it, seed = the
     // portfolio's invested capital at the window start. Unknown tickers dropped.
@@ -1358,6 +1387,10 @@ async function resolveAggregateBase(
         simpleReturnPercent: timeSeries.length > 0 && timeSeries[timeSeries.length - 1].cumulativeSimple !== undefined
           ? Math.round(((timeSeries[timeSeries.length - 1].cumulativeSimple! - 100)) * 100) / 100
           : null,
+        // §82.1 — declared in the contract since D86 but never returned here, so
+        // the SPA had nothing to render a TWR p.a. tile from.
+        annualizedReturn: annualizedReturnPercent,
+        annualizedReturnWithheldReason: annualizedReturnWithheld,
       },
       benchmarks,
     })

@@ -2,3 +2,6 @@ node_modules/
 dist/
 *.iml
 .env
+
+# vitest json reporter output
+.vitest/
