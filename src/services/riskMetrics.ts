@@ -3,9 +3,13 @@
  *
  * All functions take a flow-neutral daily series built by `returnColumns`:
  * `buildDailyReturns` for the per-day returns, `chainReturns` for the index
- * those returns compound into. Volatility is already computed per benchmark
- * series in returnColumns / backfill — here we re-use the same √252
- * annualisation convention for the portfolio itself.
+ * those returns compound into.
+ *
+ * §81.2 — annualisation splits by construct, not by convention:
+ * `annualizedReturn` measures a *span*, so its exponent pairs 365 days/year
+ * with elapsed calendar days. `annualizedVolatility` / `sharpeRatio` /
+ * `sortinoRatio` scale a per-day dispersion by √periods-per-year and keep the
+ * 252 trading-day convention.
  *
  * §81.1 — none of these functions take a raw portfolio *value* series. A
  * deposit moves `value` with no market move behind it, so deriving returns from
@@ -15,10 +19,18 @@
  *   computeRiskMetrics(returns, dates, riskFreeRate?) → PortfolioRiskMetrics
  */
 
-import { chainReturns } from "./returnColumns.js"
+import { chainReturns, daysBetween } from "./returnColumns.js"
 
-/** TRADING_DAYS_PER_YEAR — used for annualisation of daily returns. */
+/** TRADING_DAYS_PER_YEAR — √-scaling of a daily σ, Sharpe and Sortino. */
 const TRADING_DAYS = 252
+
+/**
+ * DAYS_PER_YEAR — the exponent's "periods per year" for a return compounded
+ * over a measured span. The snapshot series is calendar-daily (`calendarDays()`
+ * with weekend/holiday carry-forward), so this is 365, not 252. See
+ * `annualizedReturn`.
+ */
+const DAYS_PER_YEAR = 365
 
 // ---------------------------------------------------------------------------
 // Internal helpers
@@ -137,18 +149,32 @@ export function winRate(returns: number[]): number {
 }
 
 /**
- * Annualised return from the flow-neutral index, compounded daily.
+ * Annualised return from the flow-neutral index, over elapsed calendar years.
+ *
+ *   annReturn = (index_last / index_first) ^ (DAYS_PER_YEAR / elapsedDays) − 1
+ *
+ * §81.2 — the exponent has to pair a "days per year" with a step count in the
+ * same unit. The snapshot series is built from `calendarDays()` and carries
+ * weekend/holiday carry-forward, so it steps 365 times a year: the numerator
+ * is 365 and the denominator is elapsed calendar days read off the dates.
+ * Scaling by TRADING_DAYS / n instead mixed 252 with a calendar-day count, an
+ * error of 365/252 ≈ 1.45 that understated a genuine +10.0% year as +6.8% and
+ * inflated +5.0% in a quarter to +14.5% annualized.
+ *
+ * Reading the dates rather than `index.length - 1` also keeps the exponent
+ * honest across gaps in the series.
  *
  * @param index Flow-neutral index (`chainReturns` output), starting at 1.
  * @param dates ISO date strings matching `index`.
  */
 export function annualizedReturn(index: number[], dates: string[]): number {
-  if (index.length < 2) return 0
+  if (index.length < 2 || dates.length < 2) return 0
   const i0 = index[0]
   const iN = index[index.length - 1]
   if (i0 <= 0 || iN <= 0) return 0
-  const n = index.length - 1  // number of 1-day steps
-  return (iN / i0) ** (TRADING_DAYS / n) - 1
+  const elapsedDays = daysBetween(dates[0], dates[dates.length - 1])
+  if (elapsedDays <= 0) return 0
+  return (iN / i0) ** (DAYS_PER_YEAR / elapsedDays) - 1
 }
 
 /**
@@ -184,8 +210,7 @@ export function annualizedReturnWithheldReason(
   if (index.length < 60) return "insufficient_history"
   if (index.some((v) => !isFinite(v))) return "invalid_data"
   if (dates.length >= 2) {
-    const spanDays = (Date.parse(dates[dates.length - 1]) - Date.parse(dates[0])) / 86400000
-    if (spanDays < 90) return "insufficient_history"
+    if (daysBetween(dates[0], dates[dates.length - 1]) < 90) return "insufficient_history"
   }
   return null
 }

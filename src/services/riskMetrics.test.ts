@@ -198,6 +198,65 @@ describe("annualizedReturn", () => {
     const v = linearSeries(100, 1, 252)
     expect(annualizedReturn(indexOf(v), dates(252))).toBeGreaterThan(0)
   })
+
+  // §81.2 — the exponent regression. The snapshot series is calendar-daily
+  // (weekends carry forward), so a 365-point series that gains exactly 10%
+  // must read ~10% annualized. Scaling by 252/365 read it as 6.8%.
+  it("annualizes a 365-day +10% year to ~10%, not ~6.8%", () => {
+    const n = 365
+    const rising = indexOf(dates(n).map((_, i) => 100 * (1 + 0.1 * (i / (n - 1)))))
+    const ann = annualizedReturn(rising, dates(n))
+    expect(ann).toBeCloseTo(0.1, 3)
+    // The old exponent would have produced this instead.
+    const old = (rising[rising.length - 1] / rising[0]) ** (252 / (n - 1)) - 1
+    expect(old).toBeCloseTo(0.068, 3)
+  })
+
+  // §81.2 — the short-window case: +5.0% over a quarter annualises to +21.9%,
+  // because a 91-point series spans 90 days, not 252 of them. The old
+  // 252/n exponent read it as +14.6%.
+  it("annualizes a 91-day +5% quarter to ~+21.9%, not ~+14.6%", () => {
+    const n = 91
+    const rising = indexOf(dates(n).map((_, i) => 100 * (1 + 0.05 * (i / (n - 1)))))
+    const ann = annualizedReturn(rising, dates(n))
+    expect(ann).toBeCloseTo(0.2188, 3)
+    const old = (rising[rising.length - 1] / rising[0]) ** (252 / (n - 1)) - 1
+    expect(old).toBeCloseTo(0.1464, 3)
+  })
+
+  it("reads elapsed days off the dates, so a sparse series is not read as daily", () => {
+    // 100 points on a 4-day stride: 396 elapsed days, 99 steps. +10% over the
+    // window is ~+8.8% annualized. A point-count exponent gives +28.1%.
+    const baseMs = new Date("2025-01-01T00:00:00Z").getTime()
+    const ds = Array.from({ length: 100 }, (_, i) =>
+      new Date(baseMs + i * 4 * 86400000).toISOString().slice(0, 10),
+    )
+    const sparse = ds.map((_, i) => 1 + 0.1 * (i / 99))
+    const elapsed = (Date.parse(ds[ds.length - 1]) - Date.parse(ds[0])) / 86400000
+    expect(elapsed).toBe(396)
+    expect(annualizedReturn(sparse, ds)).toBeCloseTo(1.1 ** (365 / elapsed) - 1, 10)
+    expect(annualizedReturn(sparse, ds)).toBeCloseTo(0.0918, 3)
+    expect(1.1 ** (252 / 99) - 1).toBeCloseTo(0.2746, 3) // what the old exponent gave
+  })
+
+  it("is unchanged by a mid-window deposit", () => {
+    const n = 200
+    const depositDay = 100
+    const flows = new Array(n).fill(0)
+    flows[depositDay] = 50_000
+    // Prices flat across the deposit, so the two series differ only by the flow.
+    const flat = linearSeries(100, 0.5, n)
+    for (let i = depositDay; i < n; i++) flat[i] = flat[depositDay - 1]
+    const flatShifted = flat.map((v, i) => v + (i >= depositDay ? 50_000 : 0))
+    expect(annualizedReturn(indexOf(flatShifted, flows), dates(n))).toBeCloseTo(
+      annualizedReturn(indexOf(flat), dates(n)),
+      12,
+    )
+  })
+
+  it("returns 0 when the series spans no time", () => {
+    expect(annualizedReturn(indexOf([100, 200]), ["2025-01-01", "2025-01-01"])).toBe(0)
+  })
 })
 
 // ---------------------------------------------------------------------------
