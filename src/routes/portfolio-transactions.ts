@@ -324,6 +324,12 @@ const PositionCreateSchema = z.object({
   feeCurrency: z.string().length(3).optional(),
   rateSource: z.enum(["automatic", "manual"]).optional(),
   exchangeRate: z.number().positive().optional(),
+  /**
+   * §87.5 — same UI-only cash leg as `TransactionCreateSchema.cashLeg`: a new
+   * position IS a BUY, so funding it gets a linked DEPOSIT for the same reason.
+   * Omitted ⇒ no cash row, so existing callers are unaffected.
+   */
+  cashLeg: z.boolean().optional(),
   feeRateSource: z.enum(["automatic", "manual"]).optional(),
   feeExchangeRate: z.number().positive().optional(),
   openedAt: z.string().optional(),
@@ -1252,9 +1258,34 @@ export function createTransactionRoutes(db?: DB) {
           .where(eq(portfolioTransactions.id, inserted.id))
       }
 
+      // §87.5 — see the same block in POST /:id/transactions. A new position is a
+      // BUY, so its funding leg is a DEPOSIT of the same gross the replay debits:
+      // notional + the settled fees, converted into the row currency with the
+      // rate this request already resolved.
+      let cashLeg = null
+      if (body.cashLeg) {
+        const feesInRowCcy =
+          (fx.feesSettled || 0) * (fx.fields.feeCurrency === currency ? 1 : fx.fields.feeExchangeRate ?? 1)
+        const gross = round2(notional + feesInRowCcy)
+        const [cash] = await tx
+          .insert(portfolioCashTransactions)
+          .values({
+            userId: identity.id,
+            portfolioId,
+            type: "DEPOSIT",
+            amount: String(gross),
+            currency,
+            description: `Buy: ${body.instrumentName ?? symbol}`,
+            transactionDate: executedAt.toISOString().slice(0, 10),
+            linkedTradeId: inserted.id,
+          })
+          .returning()
+        cashLeg = cash
+      }
+
       await recomputePortfolioTotals(tx, c.req.header("Authorization") ?? null, identity.id, portfolioId)
 
-      return { transaction: inserted, position }
+      return { transaction: inserted, position, cashLeg }
     })
 
     if ("error" in result) {
