@@ -5,11 +5,21 @@
  * `buildDailyReturns` for the per-day returns, `chainReturns` for the index
  * those returns compound into.
  *
- * §81.2 — annualisation splits by construct, not by convention:
+ * §81.2 / §81.4 — annualisation splits by construct, not by convention.
  * `annualizedReturn` measures a *span*, so its exponent pairs 365 days/year
  * with elapsed calendar days. `annualizedVolatility` / `sharpeRatio` /
- * `sortinoRatio` scale a per-day dispersion by √periods-per-year and keep the
- * 252 trading-day convention.
+ * `sortinoRatio` scale a per-day dispersion by √(periods per year), and for
+ * *this* series that is also 365: the portfolio's daily returns come from the
+ * same calendar-daily snapshot grid, where ~104 of 365 days are weekend /
+ * holiday carry-forward and therefore exactly 0. Those flat days damp the daily
+ * σ by ≈√(261/365), so √365 recovers the true annualised σ of the trading days
+ * to within the mean-drift term, where √252 read ~17% low.
+ *
+ * Note this deliberately does *not* match the benchmark volatility in
+ * `backfill.ts`, which annualises with √252 — correctly, because it reads
+ * provider price bars, which are trading days only (verified: zero weekend bars
+ * in `instruments.price_bars_all`). Two different series, two correct
+ * constants; a shared constant would be wrong for one of them.
  *
  * §81.1 — none of these functions take a raw portfolio *value* series. A
  * deposit moves `value` with no market move behind it, so deriving returns from
@@ -21,14 +31,11 @@
 
 import { chainReturns, daysBetween } from "./returnColumns.js"
 
-/** TRADING_DAYS_PER_YEAR — √-scaling of a daily σ, Sharpe and Sortino. */
-const TRADING_DAYS = 252
-
 /**
- * DAYS_PER_YEAR — the exponent's "periods per year" for a return compounded
- * over a measured span. The snapshot series is calendar-daily (`calendarDays()`
- * with weekend/holiday carry-forward), so this is 365, not 252. See
- * `annualizedReturn`.
+ * DAYS_PER_YEAR — "periods per year" for both annualisation constructs here.
+ * The snapshot series is calendar-daily (`calendarDays()` with weekend/holiday
+ * carry-forward), so it steps 365 times a year. See the module note for why the
+ * benchmark's price-bar series uses 252 instead.
  */
 const DAYS_PER_YEAR = 365
 
@@ -53,14 +60,14 @@ function stddev(xs: number[], mu?: number): number {
 // ---------------------------------------------------------------------------
 
 /**
- * Annualised volatility of the daily return series (√TRADING_DAYS × σ_daily).
+ * Annualised volatility of the daily return series (√DAYS_PER_YEAR × σ_daily).
  * Returned as a fraction (e.g. 0.18 = 18 %).
  *
  * @param returns Daily flow-neutral returns (`buildDailyReturns` output).
  */
 export function annualizedVolatility(returns: number[]): number {
   if (returns.length < 2) return 0
-  return stddev(returns) * Math.sqrt(TRADING_DAYS)
+  return stddev(returns) * Math.sqrt(DAYS_PER_YEAR)
 }
 
 /**
@@ -83,18 +90,18 @@ export function maxDrawdown(index: number[]): number {
 
 /**
  * Sharpe ratio = (mean daily return − daily risk-free rate) / σ_daily,
- * annualised by √TRADING_DAYS.
+ * annualised by √DAYS_PER_YEAR.
  *
  * @param returns      Daily flow-neutral returns.
  * @param riskFreeRate Annual risk-free rate as a fraction (default 0.05 = 5 %).
  */
 export function sharpeRatio(returns: number[], riskFreeRate = 0.05): number {
   if (returns.length < 2) return 0
-  const dailyRf = riskFreeRate / TRADING_DAYS
+  const dailyRf = riskFreeRate / DAYS_PER_YEAR
   const excessMean = mean(returns) - dailyRf
   const sd = stddev(returns)
   if (sd === 0) return 0
-  return Math.round((excessMean / sd) * Math.sqrt(TRADING_DAYS) * 100) / 100
+  return Math.round((excessMean / sd) * Math.sqrt(DAYS_PER_YEAR) * 100) / 100
 }
 
 /**
@@ -110,7 +117,7 @@ export function sharpeRatio(returns: number[], riskFreeRate = 0.05): number {
  */
 export function sortinoRatio(returns: number[], riskFreeRate = 0.05): number {
   if (returns.length < 2) return 0
-  const dailyRf = riskFreeRate / TRADING_DAYS
+  const dailyRf = riskFreeRate / DAYS_PER_YEAR
   const excessMean = mean(returns) - dailyRf
   const downside = returns.map((r) => Math.min(r - dailyRf, 0))
   const downsideVar =
@@ -118,7 +125,7 @@ export function sortinoRatio(returns: number[], riskFreeRate = 0.05): number {
   const downsideSd = Math.sqrt(downsideVar)
   // No downside days → fall back to Sharpe (conservative lower bound)
   if (downsideSd === 0) return sharpeRatio(returns, riskFreeRate)
-  return Math.round((excessMean / downsideSd) * Math.sqrt(TRADING_DAYS) * 100) / 100
+  return Math.round((excessMean / downsideSd) * Math.sqrt(DAYS_PER_YEAR) * 100) / 100
 }
 
 /**

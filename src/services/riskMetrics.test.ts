@@ -99,6 +99,34 @@ describe("annualizedVolatility", () => {
     const volatile_ = returnsOf(linearSeries(100, 5, 60))
     expect(annualizedVolatility(volatile_)).toBeGreaterThan(annualizedVolatility(stable))
   })
+
+  // §81.4 — the √-scaling constant. A calendar-daily series carries ~104
+  // weekend/holiday days whose returns are exactly 0, which damp the daily σ by
+  // ≈√(261/365); √365 undoes that, so the figure matches the true annualised σ
+  // of the trading days to within the mean-drift term. √252 read ~17% low.
+  it("recovers the true annualised σ of a calendar-daily series with flat weekends", () => {
+    const TRADING_DAYS = 261
+    // Deterministic pseudo-random returns so the test cannot flake.
+    let seed = 12345
+    const rnd = () => ((seed = (seed * 1103515245 + 12345) % 2147483648) / 2147483648)
+    const real = Array.from({ length: TRADING_DAYS }, () => rnd() * 0.02 - 0.01)
+    const calendarDaily = [...real, ...new Array(365 - TRADING_DAYS).fill(0)]
+
+    const sdOf = (xs: number[]) => {
+      const m = xs.reduce((a, b) => a + b, 0) / xs.length
+      return Math.sqrt(xs.reduce((s, x) => s + (x - m) ** 2, 0) / (xs.length - 1))
+    }
+    const trueAnnual = sdOf(real) * Math.sqrt(TRADING_DAYS)
+
+    // √365 lands within 0.1% of the truth. The residual is the between-group
+    // variance the flat zero days add against a non-zero mean return, not a
+    // wrong constant.
+    expect(annualizedVolatility(calendarDaily) / trueAnnual).toBeCloseTo(1, 3)
+    // The flat days damp σ by ≈√(261/365).
+    expect(sdOf(calendarDaily) / sdOf(real)).toBeCloseTo(Math.sqrt(TRADING_DAYS / 365), 3)
+    // The old √252 constant lands 17% low — the gap this step closes.
+    expect((sdOf(calendarDaily) * Math.sqrt(252)) / trueAnnual).toBeCloseTo(0.831, 2)
+  })
 })
 
 // ---------------------------------------------------------------------------
