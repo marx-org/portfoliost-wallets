@@ -1020,6 +1020,28 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/portfolios/positions": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Open positions across all portfolios
+         * @description Every OPEN position the identity holds, across every one of its portfolios, each carrying `portfolioName`.
+         *     Distinct from `/portfolios/held-stocks`, which aggregates BY SYMBOL and so cannot answer "which portfolio is this row from" — the question the cumulative Performance tab's performer cards exist to answer, since the same ticker can be held in two portfolios with very different results. Unlike `/portfolios/{id}/positions` it needs no id, and it deliberately returns no portfolio-specific derived state.
+         *     `portfolioName` is null on the per-portfolio route, which keeps satisfying the same `Position` schema unchanged.
+         */
+        get: operations["getAllPositions"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/portfolios/shares": {
         parameters: {
             query?: never;
@@ -2595,6 +2617,37 @@ export interface components {
             results?: components["schemas"]["SearchResult"][];
         };
         FundamentalsData: {
+            /**
+             * @description ISO-4217 the three statements below are denominated in, or null when
+             *     they do not agree on one (plan §79.2).
+             *
+             *     The three statements are three independent provider walks, so a
+             *     single instrument can answer with income from one provider and a
+             *     balance sheet from another, in different currencies and units. That
+             *     used to be invisible: every value rendered through `formatCompact`
+             *     with no currency symbol, so a GPW name in PLN and a US name in USD
+             *     were indistinguishable on screen. Null rather than a guess — see
+             *     `currencySource` and `sources`.
+             */
+            currency?: string | null;
+            /**
+             * @description How `currency` was determined (plan §79.2). `provider` only when the
+             *     providers themselves agreed on one declaration; `estimated` when it
+             *     came from the local symbol/exchange resolver (plan §71); `unknown`
+             *     when the statements disagree or nothing declares one.
+             */
+            currencySource?: components["schemas"]["CurrencySource"];
+            /**
+             * @description Which upstream provider satisfied each statement walk (plan §79.2).
+             *     Null per field when the answer did not survive the hop — notably
+             *     when openst or cachest served a body cached before this field
+             *     existed.
+             */
+            sources?: {
+                incomeStatement?: string | null;
+                balanceSheet?: string | null;
+                cashFlow?: string | null;
+            };
             financialHighlights: {
                 incomeStatement?: {
                     year?: number;
@@ -3178,6 +3231,7 @@ export interface components {
                 [key: string]: unknown;
             };
             displayCurrency: string;
+            portfolioName?: string | null;
             logo?: string | null;
             labels?: components["schemas"]["Label"][];
         };
@@ -5400,6 +5454,28 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["HeldStocks"];
+                };
+            };
+        };
+    };
+    getAllPositions: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Positions */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        positions?: components["schemas"]["Position"][];
+                    };
                 };
             };
         };

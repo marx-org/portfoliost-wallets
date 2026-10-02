@@ -322,7 +322,15 @@ const PositionCreateSchema = z.object({
 type PositionRow = typeof positions.$inferSelect
 
 /** Example service wire shape for a single position (GET list / create / edit / remove). */
-function positionWire(
+/**
+ * The one place a `Position` becomes wire shape.
+ *
+ * §83.5 — exported so `GET /api/portfolios/positions` (the all-portfolios list)
+ * renders through the SAME function as `GET /:id/positions`. Two copies of this
+ * mapper is how the cumulative Performance tab's performer cards end up
+ * disagreeing with the per-portfolio tab about the same holding.
+ */
+export function positionWire(
   p: PositionRow,
   portfolio: { id: string; baseCurrency: string },
   totalValue: number,
@@ -394,7 +402,37 @@ function positionWire(
     metrics: null,
     displayCurrency: portfolio.baseCurrency,
     labels,
+    // §83.5 — the owning portfolio's NAME, for the all-portfolios list only.
+    // Undefined on this route, so it serialises as absent and the per-portfolio
+    // response is byte-identical to before (the contract field is nullable, not
+    // required — see openapi.yaml `Position.portfolioName`).
+    portfolioName: undefined,
   }
+}
+
+/**
+ * §83.5 — open positions for one portfolio, keyed by `portfolioId`, so a route
+ * that spans portfolios can hand each `positionWire` call the same denominator
+ * its per-portfolio twin would have used.
+ *
+ * Same fallback as `openPositionsValue` (`quantity × averageCostBasis` when
+ * `marketValue` is null) on purpose: a different denominator here would make
+ * `percentOfPortfolio` mean something else on the aggregate list.
+ */
+export async function openPositionsValueByPortfolio(
+  db: DB,
+  userId: string,
+): Promise<Map<string, number>> {
+  const rows = await db
+    .select({ portfolioId: positions.portfolioId, marketValue: positions.marketValue, quantity: positions.quantity, averageCostBasis: positions.averageCostBasis })
+    .from(positions)
+    .where(and(eq(positions.userId, userId), eq(positions.isOpen, true)))
+  const totals = new Map<string, number>()
+  for (const p of rows) {
+    const v = p.marketValue != null ? Number(p.marketValue) : Number(p.quantity) * Number(p.averageCostBasis)
+    totals.set(p.portfolioId, (totals.get(p.portfolioId) ?? 0) + v)
+  }
+  return totals
 }
 
 async function openPositionsValue(db: DB, userId: string, portfolioId: string) {

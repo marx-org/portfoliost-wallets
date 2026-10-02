@@ -27,7 +27,12 @@ import {
 import { buildDailyReturns, buildMonthlyReturns } from "../services/returnColumns.js"
 import { resolveRates, fxTo } from "../services/instruments-fx.js"
 import { sumSnapshotsByDateForwardFilled, buildMergedPerformance } from "../services/mergedAnalytics.js"
-import { createTransactionRoutes } from "./portfolio-transactions.js"
+import {
+  createTransactionRoutes,
+  openPositionsValueByPortfolio,
+  positionWire,
+} from "./portfolio-transactions.js"
+import { labelsForPositions } from "../services/labels.js"
 import type { components } from "../generated/api-types.js"
 
 type Portfolio = components["schemas"]["Portfolio"]
@@ -732,6 +737,77 @@ async function resolveAggregateBase(
       }
       throw err
     }
+  })
+
+  // GET /api/portfolios/positions — every OPEN position across every portfolio
+  // of the identity (§83.5), each carrying its portfolio's name.
+  //
+  // NOT `/held-stocks`: that aggregates BY SYMBOL across portfolios, drops P/L
+  // entirely and hardcodes `changePercent: 0`. The cumulative Performance tab
+  // needs the opposite — rows that say which portfolio they came from and how
+  // much they are worth, because one ticker can be held in two portfolios with
+  // very different results.
+  //
+  // Registered ABOVE "/:id" so "positions" is not parsed as a portfolio id —
+  // the same reason `/merged` sits where it does.
+  routes.get("/positions", async (c) => {
+    const identity = c.get("userIdentity")
+    const database = getDbInstance()
+
+    // §76.1 — a read prices nothing: no refreshQuotes here, same as
+    // GET /:id/positions.
+    const rows = await database
+      .select({ position: positions, portfolioName: portfolios.name, baseCurrency: portfolios.baseCurrency })
+      .from(positions)
+      .innerJoin(portfolios, eq(positions.portfolioId, portfolios.id))
+      .where(and(eq(positions.userId, identity.id), eq(positions.isOpen, true)))
+      // The performers cards sort on P/L; ordering here means the SPA does not
+      // have to, and the response is already in display order.
+      .orderBy(sql`${positions.unrealizedGainLoss} DESC NULLS LAST`)
+
+    const totalsByPortfolio = await openPositionsValueByPortfolio(database, identity.id)
+    // One rate table per DISTINCT portfolio base among these rows — `resolveRates`
+    // resolves INTO a single target, and a position belongs to exactly one
+    // portfolio, so a row must be converted at its own portfolio's rate or its
+    // `converted*` fields answer a question nobody asked.
+    const bases = [...new Set(rows.map((r) => (r.baseCurrency ?? "USD").toUpperCase()))]
+    const authToken = c.req.header("Authorization") ?? ""
+    const fxByBase = new Map<string, Map<string, number | null>>()
+    for (const base of bases) {
+      fxByBase.set(
+        base,
+        await resolveRates(
+          authToken,
+          base,
+          rows.filter((r) => (r.baseCurrency ?? "USD").toUpperCase() === base).map((r) => r.position.instrumentCurrency),
+        ),
+      )
+    }
+    const labelMap = await labelsForPositions(
+      database,
+      rows.map((r) => r.position.id),
+    )
+
+    const wire = rows.map((r) => {
+      const base = (r.baseCurrency ?? "USD").toUpperCase()
+      return {
+        ...positionWire(
+          r.position,
+          { id: r.position.portfolioId, baseCurrency: r.baseCurrency },
+          totalsByPortfolio.get(r.position.portfolioId) ?? 0,
+          // §83.5 — converted at the OWNING portfolio's base, so a row here is
+          // the same number its per-portfolio tab shows. The performers cards
+          // print the P/L in `instrumentCurrency` regardless; converting the whole
+          // account into one currency here would put `displayCurrency` in
+          // conflict with the portfolio the row belongs to.
+          fxByBase.get(base) ?? new Map<string, number | null>(),
+          labelMap.get(r.position.id) ?? [],
+        ),
+        portfolioName: r.portfolioName,
+      }
+    })
+
+    return c.json({ positions: wire })
   })
 
   // GET /api/portfolios/merged — combined all-portfolios performance (§46,

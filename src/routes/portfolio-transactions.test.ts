@@ -2513,3 +2513,109 @@ describe("§76.1 — GET read paths are pure (no writes)", () => {
     expect(p).toHaveProperty("currentPrice")
   })
 })
+
+/**
+ * §83.5 — `GET /api/portfolios/positions`: every open position across every
+ * portfolio, labelled with the portfolio it came from.
+ *
+ * The scoping assertion is the load-bearing one. This route takes NO id, so
+ * "another user's positions never appear" is the only thing standing between it
+ * and a cross-tenant read.
+ */
+describe("GET /api/portfolios/positions (§83.5)", () => {
+  async function makePf(h: Awaited<ReturnType<typeof makeHarness>>, name: string) {
+    const res = await app(h.db).request("/api/portfolios", {
+      method: "POST",
+      headers: h.headers,
+      body: JSON.stringify({ name, currency: "USD" }),
+    })
+    expect(res.status).toBe(201)
+    return res.json()
+  }
+
+  async function buy(
+    h: Awaited<ReturnType<typeof makeHarness>>,
+    pfId: string,
+    symbol: string,
+    qty: number,
+    price: number,
+  ) {
+    const res = await app(h.db).request(`/api/portfolios/${pfId}/transactions`, {
+      method: "POST",
+      headers: h.headers,
+      body: JSON.stringify({ ...BUY_BODY, symbol, instrumentName: symbol, quantity: qty, price }),
+    })
+    expect(res.status).toBe(201)
+  }
+
+  it("spans portfolios, labels each row, and orders by P/L desc", async () => {
+    const h = await makeHarness()
+    const a = app(h.db)
+    const broker = await makePf(h, "Broker")
+    const pension = await makePf(h, "Pension")
+    await buy(h, broker.id, "AAPL", 10, 100)
+    await buy(h, pension.id, "MSFT", 10, 300)
+    await buy(h, pension.id, "KO", 1, 50)
+    // Price them, and write the P/L column the pricing pass owns. The ORDER BY is
+    // on `unrealized_gain_loss`, and a BUY never writes it — with every row NULL
+    // the ordering assertion below would pass or fail by accident.
+    const pnlBySymbol: Record<string, number> = { AAPL: 1000, MSFT: 1500, KO: 0 }
+    for (const [symbol, pnl] of Object.entries(pnlBySymbol)) {
+      await h.db
+        .update(positions)
+        .set({ unrealizedGainLoss: String(pnl) })
+        .where(eq(positions.symbol, symbol))
+    }
+
+    const res = await a.request("/api/portfolios/positions", { headers: h.headers })
+    expect(res.status).toBe(200)
+    const body = await res.json()
+    expect(body.positions.length).toBe(3)
+    // The per-portfolio label is the whole point: the same ticker can be held in
+    // two portfolios with very different results.
+    expect(body.positions.map((p: { portfolioName: string }) => p.portfolioName).sort()).toEqual([
+      "Broker",
+      "Pension",
+      "Pension",
+    ])
+    // …and the money fields the performer cards render are present, so this is
+    // the `Position` shape and not a summary of it.
+    for (const p of body.positions) {
+      expect(typeof p.symbol).toBe("string")
+      expect(p.unrealizedGainLoss == null || typeof p.unrealizedGainLoss === "number").toBe(true)
+      expect(typeof p.percentageChange === "number" || p.percentageChange === null).toBe(true)
+      expect(typeof p.instrumentCurrency).toBe("string")
+      expect(typeof p.isOpen).toBe("boolean")
+      expect(p.portfolioId).toBeTruthy()
+    }
+    // Highest P/L first: the ordering the performer cards already rely on.
+    const pnl = body.positions.map((p: { unrealizedGainLoss: number }) => p.unrealizedGainLoss)
+    expect(pnl).toEqual([1500, 1000, 0])
+    expect(body.positions[0].symbol).toBe("MSFT")
+  })
+
+  it("never returns another identity's positions", async () => {
+    const mine = await makeHarness("user-mine")
+    const minePf = await makePf(mine, "Mine")
+    await buy(mine, minePf.id, "AAPL", 1, 100)
+
+    const other = await makeHarness("user-other")
+    const otherPf = await makePf(other, "Theirs")
+    await buy(other, otherPf.id, "TSLA", 1, 900)
+
+    const res = await app(mine.db).request("/api/portfolios/positions", { headers: mine.headers })
+    expect(res.status).toBe(200)
+    const body = await res.json()
+    expect(body.positions.map((p: { portfolioName: string }) => p.portfolioName)).toEqual(["Mine"])
+  })
+
+  it("is not captured by GET /:id", async () => {
+    // "positions" must not be parsed as a portfolio id — the same reason /merged
+    // is registered above /:id.
+    const h = await makeHarness()
+    const a = app(h.db)
+    const res = await a.request("/api/portfolios/positions", { headers: h.headers })
+    expect(res.status).toBe(200)
+    expect(await res.json()).toEqual({ positions: [] })
+  })
+})
