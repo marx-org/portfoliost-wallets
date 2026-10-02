@@ -7,6 +7,7 @@ import {
   portfolios,
   positions,
   portfolioTransactions,
+  portfolioCashTransactions,
   positionLabels,
   transactionLabels,
 } from "../db/schema.js"
@@ -53,6 +54,16 @@ const TransactionCreateSchema = z.object({
   positionId: z.string().uuid().optional(),
   executedAt: z.string().optional(),
   isGift: z.boolean().optional(),
+  /**
+   * §87.5 — also create the external cash leg for this trade: a DEPOSIT funding a BUY,
+   * a WITHDRAWAL taking out a SELL's proceeds, in the row currency, linked to the
+   * trade through `linked_trade_id` so both deletes follow.
+   *
+   * The SPA pre-ticks this from the portfolio's `cashLegOnTrade` flag and the user
+   * can still untick it per transaction; OMITTED means "no cash leg", so an
+   * existing caller that never sends it behaves exactly as before.
+   */
+  cashLeg: z.boolean().optional(),
 })
 
 const TransactionPatchSchema = z.object({
@@ -567,6 +578,40 @@ export function createTransactionRoutes(db?: DB) {
           .where(eq(portfolioTransactions.id, inserted.id))
       }
 
+      // §87.5 — the external cash leg, in the SAME transaction as the trade so a
+      // partial write cannot leave one leg without the other. Deliberately NOT
+      // gated on the portfolio's `cashLegOnTrade` flag: that flag is the form's
+      // DEFAULT (the SPA reads it and pre-ticks the box), and the per-transaction
+      // untick has to reach here, so the request is the single source of truth for
+      // what the user asked for.
+      let cashLeg = null
+      if (body.cashLeg && (body.type === "BUY" || body.type === "SELL")) {
+        // The amount mirrors the importer's `rowCcyCash`: what the trade actually
+        // moved, i.e. the net amount (notional − taxes for a dividend, though a
+        // dividend never gets a leg) PLUS the settled fees, which the replay effect
+        // subtracts from the wallet. Fees are in `fx.feeCurrency`, so a fee in
+        // another currency is converted with the rate this trade already resolved.
+        const feesInRowCcy =
+          (fx.feesSettled || 0) * (fx.fields.feeCurrency === txCcy ? 1 : fx.fields.feeExchangeRate ?? 1)
+        const gross = round2(Math.abs(netAmount) + feesInRowCcy)
+        const [cash] = await tx
+          .insert(portfolioCashTransactions)
+          .values({
+            userId: identity.id,
+            portfolioId,
+            type: body.type === "BUY" ? "DEPOSIT" : "WITHDRAWAL",
+            // DEPOSIT stores +|amount| and WITHDRAWAL −|amount| (the sign is the
+            // row's, not the caller's — same convention as the import clamp).
+            amount: String(body.type === "BUY" ? gross : -gross),
+            currency: txCcy,
+            description: `${body.type === "BUY" ? "Buy" : "Withdrawal"}: ${body.instrumentName ?? symbol}`,
+            transactionDate: executedAt.toISOString().slice(0, 10),
+            linkedTradeId: inserted.id,
+          })
+          .returning()
+        cashLeg = cash
+      }
+
       await recomputePortfolioTotals(tx, c.req.header("Authorization") ?? null, identity.id, portfolioId)
 
       const convertedFees =
@@ -596,6 +641,7 @@ export function createTransactionRoutes(db?: DB) {
           realizedGainLoss,
         },
         position,
+        cashLeg,
       }
     })
 
@@ -604,7 +650,10 @@ export function createTransactionRoutes(db?: DB) {
     }
 
     notifyTransactionsChanged(database, portfolioId, c.req.header("Authorization") ?? "")
-    return c.json({ ...result.transaction, position: result.position ?? null }, 201)
+    return c.json(
+      { ...result.transaction, position: result.position ?? null, cashLeg: result.cashLeg ?? null },
+      201,
+    )
   })
 
   // PATCH /:id/transactions/:txId — update transaction + recompute

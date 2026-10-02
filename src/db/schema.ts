@@ -78,6 +78,19 @@ export const portfolios = portfoliosSchema.table(
     totalInvested: numeric("total_invested", { precision: 20, scale: 8 }).notNull().default("0"),
     currentValue: numeric("current_value", { precision: 20, scale: 8 }).notNull().default("0"),
     isPublic: boolean("is_public").notNull().default(false),
+    /**
+     * §87.5 — UI-only. Pre-ticks the transaction form's "also create a cash
+     * transaction" box so it reflects what will actually happen.
+     *
+     * It does NOT govern the sheet import: that path uses its own hardcoded kontо
+     * list in portfoliost-sheets-sync (`ALWAYS_CASH_LEG`), and an imported AU=0
+     * trade on a portfolio with this flag ON still imports with no cash row. Two
+     * independent mechanisms on purpose — the spreadsheet's col 47 keeps its
+     * meaning for every account the list does not govern.
+     *
+     * Default `false` so no existing account changes behaviour on deploy.
+     */
+    cashLegOnTrade: boolean("cash_leg_on_trade").notNull().default(false),
     isMarginEnabled: boolean("is_margin_enabled").notNull().default(false),
     marginRate: numeric("margin_rate", { precision: 9, scale: 4 }),
     maintenanceMarginRate: numeric("maintenance_margin_rate", { precision: 9, scale: 4 }),

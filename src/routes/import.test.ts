@@ -1546,6 +1546,26 @@ describe("§87.2: the import links a cash leg to its trade", () => {
     ).toHaveLength(1)
   })
 
+  it("§87.5 INDEPENDENCE: the import never reads the portfolio's cash_leg_on_trade flag", async () => {
+    // The two mechanisms are deliberately separate: the importer obeys its own
+    // hardcoded kontо list plus the sheet's col 47, and `cashLegOnTrade` only
+    // pre-ticks a form. If this ever fails, a UI toggle is silently changing what
+    // a spreadsheet produces — which is the whole thing §87.5 keeps apart.
+    const h = await boot()
+    const { portfolioId } = await seedPortfolio(h)
+    await h.db
+      .update(portfolios)
+      .set({ cashLegOnTrade: true })
+      .where(eq(portfolios.id, portfolioId))
+
+    // an unsuffixed trade row and no cashTx at all: the AU=0 shape
+    await postTransactions(h, [
+      { externalId: "r200", portfolioName: "Transakcje", executedAt: "2024-01-01T00:00:00.000Z", portfolioTx: BUY(portfolioId) },
+    ])
+    expect((await h.db.select().from(portfolioTransactions)).length).toBe(1)
+    expect(await cashRows(h)).toHaveLength(0)
+  })
+
   it("a sale-proceeds transfer: the #t credit leg links to the sale, the debit leg stays unlinked", async () => {
     // Equate+ (SALE_PROCEEDS_TO in the mapper) posts the TRANSFER under the SALE's
     // own externalId, so the debit leg is indistinguishable from a hand-written

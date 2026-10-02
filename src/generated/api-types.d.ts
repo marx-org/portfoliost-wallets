@@ -2987,6 +2987,7 @@ export interface components {
             totalInvested: number;
             currentValue: number;
             isPublic: boolean;
+            cashLegOnTrade?: boolean;
             isMarginEnabled: boolean;
             marginRate?: number | null;
             maintenanceMarginRate?: number | null;
@@ -3008,6 +3009,7 @@ export interface components {
             strategy?: string;
             currency?: string;
             isPublic?: boolean;
+            cashLegOnTrade?: boolean;
         };
         /**
          * @description The dashboard headline aggregate, all amounts in `baseCurrency`.

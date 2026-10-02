@@ -44,6 +44,30 @@ const ISO_CURRENCY = /^[A-Za-z]{3}$/
 
 const round2 = (n: number) => Math.round(n * 100) / 100
 
+/**
+ * §87.5 — the portfolios whose UI switch starts ON.
+ *
+ * **This is a DUPLICATE of `ALWAYS_CASH_LEG` in
+ * portfoliost-sheets-sync/src/transakcje-mapper.ts**, on purpose rather than by
+ * accident: the importer's list lives in a service that has no
+ * `@marx2/contracts` dependency, and adding one to share a seven-element set of
+ * account names would be a worse trade than a documented copy. Keep the two in
+ * step — if a kontо is added to the importer's list it must be added here, or the
+ * UI will say "no cash transaction" for an account the importer always funds,
+ * which is the exact disagreement this setting exists to prevent.
+ *
+ * Named by PORTFOLIO (1:1 with the Konto per §62), which is what this file knows.
+ */
+const CASH_LEG_DEFAULT_PORTFOLIOS = new Set([
+  "Equate+",
+  "Crypto",
+  "NN TFI PPK",
+  "NN TFI PPO",
+  "Obligacje PKO SA Beata",
+  "Rach. rejestrowy PKO BP",
+  "XTB",
+])
+
 // ── Request schemas ────────────────────────────────────────────────────
 
 export const CreatePortfolioSchema = z.object({
@@ -53,6 +77,8 @@ export const CreatePortfolioSchema = z.object({
   type: z.string().optional(),
   baseCurrency: z.string().regex(ISO_CURRENCY).optional(),
   isPublic: z.boolean().optional(),
+  // §87.5 — UI-only; see the schema.ts note. Never read by the import.
+  cashLegOnTrade: z.boolean().optional(),
   isMarginEnabled: z.boolean().optional(),
   marginRate: z.number().optional(),
   maintenanceMarginRate: z.number().optional(),
@@ -65,6 +91,8 @@ export const UpdatePortfolioSchema = z.object({
   type: z.string().optional(),
   baseCurrency: z.string().regex(ISO_CURRENCY).optional(),
   isPublic: z.boolean().optional(),
+  // §87.5 — UI-only; see the schema.ts note. Never read by the import.
+  cashLegOnTrade: z.boolean().optional(),
   isMarginEnabled: z.boolean().optional(),
   marginRate: z.number().nullable().optional(),
   maintenanceMarginRate: z.number().nullable().optional(),
@@ -84,6 +112,8 @@ function serializePortfolio(p: typeof portfolios.$inferSelect) {
     totalInvested: Number(p.totalInvested),
     currentValue: Number(p.currentValue),
     isPublic: p.isPublic,
+    // §87.5 — the SPA reads this to pre-tick the form's cash checkbox.
+    cashLegOnTrade: p.cashLegOnTrade,
     isMarginEnabled: p.isMarginEnabled,
     marginRate: p.marginRate != null ? Number(p.marginRate) : null,
     maintenanceMarginRate: p.maintenanceMarginRate != null ? Number(p.maintenanceMarginRate) : null,
@@ -720,6 +750,12 @@ async function resolveAggregateBase(
           type: parsed.data.type ?? "regular",
           baseCurrency: defaultBase.toUpperCase(),
           isPublic: parsed.data.isPublic ?? false,
+          // §87.5 — a created portfolio defaults the switch ON for the kontо that
+          // already always get a cash leg from the importer, so the UI cannot
+          // disagree with what an import will do. See CASH_LEG_DEFAULT_PORTFOLIOS.
+          cashLegOnTrade:
+            parsed.data.cashLegOnTrade ??
+            CASH_LEG_DEFAULT_PORTFOLIOS.has(parsed.data.name.trim()),
           isMarginEnabled: parsed.data.isMarginEnabled ?? false,
           marginRate: parsed.data.marginRate != null ? String(parsed.data.marginRate) : null,
           maintenanceMarginRate:
@@ -1116,6 +1152,7 @@ async function resolveAggregateBase(
     if (data.type !== undefined) updates.type = data.type
     if (data.baseCurrency !== undefined) updates.baseCurrency = data.baseCurrency.toUpperCase()
     if (data.isPublic !== undefined) updates.isPublic = data.isPublic
+    if (data.cashLegOnTrade !== undefined) updates.cashLegOnTrade = data.cashLegOnTrade
     if (data.isMarginEnabled !== undefined) updates.isMarginEnabled = data.isMarginEnabled
     if (data.marginRate !== undefined) updates.marginRate = data.marginRate != null ? String(data.marginRate) : null
     if (data.maintenanceMarginRate !== undefined)

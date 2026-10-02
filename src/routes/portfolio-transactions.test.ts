@@ -2809,3 +2809,158 @@ describe("§87.2: the trade ↔ cash-leg link", () => {
     expect(after.linkedTradeId).toBe(txId)
   })
 })
+
+/**
+ * §87.5 — the UI-only "also create a cash transaction" switch.
+ *
+ * Two independent mechanisms share a name and nothing else: the IMPORT path uses
+ * the importer's own hardcoded kontо list (portfoliost-sheets-sync
+ * `ALWAYS_CASH_LEG`), and this flag only decides what the form does by default.
+ * The test that matters most is the last one — the import must not read this
+ * column — because a UI toggle that leaked into the import path would silently
+ * change what a spreadsheet produces.
+ */
+describe("§87.5: a UI-created cash leg", () => {
+  async function pf(name: string, cashLegOnTrade?: boolean) {
+    const h = await makeHarness()
+    const a = app(h.db)
+    const { id } = await (
+      await a.request("/api/portfolios", {
+        method: "POST",
+        headers: h.headers,
+        body: JSON.stringify({ name, currency: "PLN", baseCurrency: "PLN", ...(cashLegOnTrade === undefined ? {} : { cashLegOnTrade }) }),
+      })
+    ).json()
+    return { h, a, pfId: id }
+  }
+
+  const buy = (over: Record<string, unknown> = {}) => ({
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ ...BUY_BODY, currency: "PLN", ...over }),
+  })
+
+  async function legs(h: Awaited<ReturnType<typeof makeHarness>>, pfId: string) {
+    return h.db.select().from(portfolioCashTransactions).where(eq(portfolioCashTransactions.portfolioId, pfId))
+  }
+
+  it("the portfolio flag defaults ON for the kontо the importer always funds, OFF otherwise", async () => {
+    // Without this the UI would say "no cash transaction" for XTB while the
+    // importer creates one on every one of its trades — the exact disagreement
+    // the switch exists to prevent.
+    const xtb = await pf("XTB")
+    const ibkr = await pf("IBKR")
+    const xtbRow = await (await xtb.a.request(`/api/portfolios/${xtb.pfId}`, { headers: xtb.h.headers })).json()
+    const ibkrRow = await (await ibkr.a.request(`/api/portfolios/${ibkr.pfId}`, { headers: ibkr.h.headers })).json()
+    expect(xtbRow.cashLegOnTrade).toBe(true)
+    expect(ibkrRow.cashLegOnTrade).toBe(false)
+  })
+
+  it("an explicit value at creation wins over the kontо default", async () => {
+    const h = await pf("XTB", false)
+    const row = await (await h.a.request(`/api/portfolios/${h.pfId}`, { headers: h.h.headers })).json()
+    expect(row.cashLegOnTrade).toBe(false)
+  })
+
+  it("PATCH toggles it and it round-trips", async () => {
+    const h = await pf("IBKR")
+    const res = await h.a.request(`/api/portfolios/${h.pfId}`, {
+      method: "PATCH",
+      headers: { ...h.h.headers, "content-type": "application/json" },
+      body: JSON.stringify({ cashLegOnTrade: true }),
+    })
+    expect(res.status).toBe(200)
+    expect((await res.json()).cashLegOnTrade).toBe(true)
+    const row = await (await h.a.request(`/api/portfolios/${h.pfId}`, { headers: h.h.headers })).json()
+    expect(row.cashLegOnTrade).toBe(true)
+  })
+
+  it("cashLeg:true on a BUY creates a DEPOSIT linked to the trade, and deleting the buy removes it", async () => {
+    const { h, a, pfId } = await pf("XTB")
+    const res = await a.request(`/api/portfolios/${pfId}/transactions`, {
+      ...buy({ cashLeg: true }),
+      headers: { ...h.headers, "content-type": "application/json" },
+    })
+    expect(res.status).toBe(201)
+    const tx = await res.json()
+
+    const [leg] = await legs(h, pfId)
+    expect(leg.type).toBe("DEPOSIT")
+    // 10 × 150 + 4.99 fees, in the row currency, positive
+    expect(Number(leg.amount)).toBeCloseTo(1504.99, 2)
+    expect(leg.currency).toBe("PLN")
+    expect(leg.linkedTradeId).toBe(tx.id)
+    // the round trip: the deposit offsets the derived BUY draw
+    expect(Number(leg.amount)).toBeCloseTo(Number(tx.totalAmount) + 4.99, 2)
+
+    await a.request(`/api/portfolios/${pfId}/transactions/${tx.id}`, { method: "DELETE", headers: h.headers })
+    expect(await legs(h, pfId)).toHaveLength(0) // cascade, not application code
+  })
+
+  it("cashLeg:true on a SELL creates a WITHDRAWAL (the §87.1 direction, from the UI)", async () => {
+    const { h, a, pfId } = await pf("XTB")
+    await a.request(`/api/portfolios/${pfId}/transactions`, {
+      ...buy({ cashLeg: true }),
+      headers: { ...h.headers, "content-type": "application/json" },
+    })
+    const sellRes = await a.request(`/api/portfolios/${pfId}/transactions`, {
+      method: "POST",
+      headers: { ...h.headers, "content-type": "application/json" },
+      body: JSON.stringify({ type: "SELL", symbol: "AAPL", quantity: 10, price: 170, currency: "PLN", fees: 2.5, cashLeg: true }),
+    })
+    expect(sellRes.status).toBe(201)
+    const sell = await sellRes.json()
+    const all = await legs(h, pfId)
+    expect(all).toHaveLength(2)
+    const withdrawal = all.find((l) => l.type === "WITHDRAWAL")!
+    // 10 × 170 + 2.50, stored negative (the sign is the type's, not the caller's)
+    expect(Number(withdrawal.amount)).toBeCloseTo(-1702.5, 2)
+    expect(withdrawal.linkedTradeId).toBe(sell.id)
+    // mirrors the importer's "Withdrawal: <aktywo>", falling back to the symbol
+    expect(withdrawal.description).toBe("Withdrawal: AAPL")
+  })
+
+  it("no cashLeg field (an existing caller) creates NO cash row — the field is opt-in", async () => {
+    const { h, a, pfId } = await pf("XTB")
+    await a.request(`/api/portfolios/${pfId}/transactions`, {
+      ...buy(),
+      headers: { ...h.headers, "content-type": "application/json" },
+    })
+    expect(await legs(h, pfId)).toHaveLength(0)
+  })
+
+  it("cashLeg:false is honoured even when the portfolio's flag is ON (per-transaction untick)", async () => {
+    const { h, a, pfId } = await pf("XTB") // flag defaults ON for XTB
+    await a.request(`/api/portfolios/${pfId}/transactions`, {
+      ...buy({ cashLeg: false }),
+      headers: { ...h.headers, "content-type": "application/json" },
+    })
+    expect(await legs(h, pfId)).toHaveLength(0)
+  })
+
+  it("a DIVIDEND gets no cash leg (its credit is derived by replay)", async () => {
+    const { h, a, pfId } = await pf("XTB")
+    const res = await a.request(`/api/portfolios/${pfId}/transactions`, {
+      method: "POST",
+      headers: { ...h.headers, "content-type": "application/json" },
+      body: JSON.stringify({ type: "DIVIDEND", symbol: "AAPL", quantity: 10, price: 1, currency: "PLN", cashLeg: true }),
+    })
+    expect(res.status).toBe(201)
+    expect(await legs(h, pfId)).toHaveLength(0)
+  })
+
+  it("deleting the CASH leg leaves the UI-created trade alone", async () => {
+    const { h, a, pfId } = await pf("XTB")
+    const tx = await (
+      await a.request(`/api/portfolios/${pfId}/transactions`, {
+        ...buy({ cashLeg: true }),
+        headers: { ...h.headers, "content-type": "application/json" },
+      })
+    ).json()
+    const [leg] = await legs(h, pfId)
+    await a.request(`/api/portfolios/cash/transactions/${leg.id}`, { method: "DELETE", headers: h.headers })
+    expect(
+      await h.db.select().from(portfolioTransactions).where(eq(portfolioTransactions.id, tx.id)),
+    ).toHaveLength(1)
+  })
+})

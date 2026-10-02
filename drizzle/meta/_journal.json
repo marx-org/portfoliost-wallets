@@ -106,6 +106,13 @@
       "when": 1790977607049,
       "tag": "0014_cash_leg_link",
       "breakpoints": true
+    },
+    {
+      "idx": 15,
+      "version": "7",
+      "when": 1790979479891,
+      "tag": "0015_cash_leg_on_trade",
+      "breakpoints": true
     }
   ]
 }
