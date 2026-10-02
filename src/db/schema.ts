@@ -333,6 +333,15 @@ export const valueSnapshots = portfoliosSchema.table(
     // portfolios that need it — so existing rows are backfilled by the next
     // recompute, and readers should treat a pre-migration row as unknown.
     unpricedValue: numeric("unpriced_value", { precision: 20, scale: 8 }).notNull().default("0"),
+    // §72.31 — cost of positions priced from a CARRIED-FORWARD close on a day
+    // the market was open. Separate from `unpriced_value` because carry-forward
+    // means the grid HAS a price, so `unpriced_value` is structurally blind to it:
+    // PROD reported Crypto with `gapSymbols: ["BTC-USD"]`, 24 counted coverage
+    // days, and `unpriced_value` of 0 on all 1,690 days.
+    //
+    // Closures are excluded, so this is not ~29% of every series the way raw
+    // carry-forward would be.
+    carriedValue: numeric("carried_value", { precision: 20, scale: 8 }).notNull().default("0"),
     // §53.2 — widened from numeric(20,8): an XIRR that "converges" to a
     // garbage rate produced cumulative_mwr ≈ 1e12 → 'numeric field overflow'.
     // (The §53.1 solver guard makes this a belt-and-braces bound.)

@@ -3236,6 +3236,7 @@ export interface components {
                     value?: number;
                     invested?: number | null;
                     unpricedValue?: number;
+                    carriedValue?: number;
                     cumulativeTwr?: number;
                     cumulativeMwr?: number;
                     cumulativeSimple?: number;

@@ -724,6 +724,13 @@ export interface SnapshotRow {
    * bonds — and a total cannot place it.
    */
   unpricedValue: string
+  /**
+   * §72.31 — base-currency COST of positions whose price on this day is a
+   * CARRIED-FORWARD value, not a real bar for this day, and where the market was
+   * not closed. `unpricedValue` cannot see these: carry-forward means the grid has
+   * a price, so the value looks complete.
+   */
+  carriedValue: string
 }
 
 /**
@@ -1257,6 +1264,23 @@ export async function computeSnapshotBatch(
     // already had the cash deducted, so without this the series shows a loss that
     // is really money parked in something nothing can quote.
     let unpricedCost = 0
+    // §72.31 — cost of positions whose price on THIS day is a carried-forward
+    // value rather than a real bar for this day.
+    //
+    // `buildPriceMap` advances `last` and stamps it onto every subsequent day,
+    // so a day with no returned bar is priced from the previous close and `value`
+    // looks complete. Measured on PROD: Crypto reports `gapSymbols: ["BTC-USD"]`
+    // and `fxCoverageHoles` counts 24 such days, yet `unpricedValue` was 0 on all
+    // 1,690 days — because carry-forward means `price != null`, so the unpriced
+    // path never sees it. **"Partial on which days" was therefore not answerable
+    // from anything on the wire.**
+    //
+    // The weekend exclusion is not optional, and it is the §72.21 lesson applied
+    // before the mistake rather than after: carry-forward across a closure is what
+    // the grid is FOR, and counting it would put ~29% of every series into this
+    // column and bury the real holes. `isMarketClosure` is the same predicate
+    // §72.21 uses, so the two columns cannot disagree about what a closure is.
+    let carriedCost = 0
     for (const sym of symbols) {
       const qty = qtyMaps.get(sym)?.get(day) ?? 0
       // Not held on this day ⇒ contributes nothing AND is not unpriced: the
@@ -1267,7 +1291,17 @@ export async function computeSnapshotBatch(
       // used to be a bare `continue`, which is the same number but had no way to
       // say so.
       contributions.push(price == null ? null : qty * price)
-      if (price == null) unpricedCost += costMaps.get(sym)?.get(day) ?? 0
+      if (price == null) {
+        unpricedCost += costMaps.get(sym)?.get(day) ?? 0
+      } else {
+        // Priced, but possibly from a carried value. Only the series that was
+        // actually fetched can say; a symbol with no series at all is the
+        // `unpricedCost` case above and is not double-counted here.
+        const series = priceSeries.get(sym)
+        if (series && !series.dates.includes(day) && !isMarketClosure(day, series.dates)) {
+          carriedCost += costMaps.get(sym)?.get(day) ?? 0
+        }
+      }
       if (recalcDebug && price != null && day === days[days.length - 1]) {
         console.log(
           `[recalc-debug] pf=${portfolioId} day=${day} sym=${sym} qty=${qty} close=${price} contrib=${(qty * price).toFixed(2)} base=${base}`,
@@ -1302,6 +1336,7 @@ export async function computeSnapshotBatch(
         invested: totalInvested.toFixed(8),
         netFlow: (dailyFlows.get(day) ?? 0).toFixed(8),
         unpricedValue: unpricedCost.toFixed(8),
+        carriedValue: carriedCost.toFixed(8),
       })
     }
   }
@@ -1347,6 +1382,7 @@ async function _runBackfillCore(
           // a recompute would update `value` and leave the withheld amount
           // describing the previous run's coverage.
           unpricedValue: sql`excluded.unpriced_value`,
+          carriedValue: sql`excluded.carried_value`,
         },
       })
   }

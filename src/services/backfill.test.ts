@@ -1979,3 +1979,104 @@ describe("§72.16 — bars instruments could not convert are not valued", () => 
     expect(Number(rows[0].value)).toBeCloseTo(683.44, 1)
   })
 })
+
+/**
+ * §72.31 — `carriedValue`: the days the value looks complete and is not.
+ *
+ * PROD: Crypto reports `gapSymbols: ["BTC-USD"]` and `fxCoverageHoles` counts 24
+ * such days, yet `unpricedValue` was 0 on all 1,690 — because `buildPriceMap`
+ * carry-forwards the last close, so `price != null` and the unpriced path never
+ * fires. "Partial on which days" was not answerable from anything on the wire.
+ *
+ * The weekend case is the one that matters: carry-forward across a closure is
+ * what the grid is FOR, and a naive version of this column would put ~29% of
+ * every series in it and bury the real holes.
+ */
+describe("§72.31: carriedValue marks carried-forward prices, not market closures", () => {
+  beforeEach(() => {
+    process.env.INSTRUMENTS_URL = "http://instruments:3000"
+  })
+  afterEach(() => {
+    vi.unstubAllGlobals()
+    delete process.env.INSTRUMENTS_URL
+    __resetBackfillRunnerForTests()
+  })
+
+  function stubInstruments(series: Record<string, { dates: string[]; closes: number[] }>) {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = String(input)
+        if (url.includes("/api/internal/fx-rates")) {
+          const q = new URL(url).searchParams
+          const from = (q.get("from") ?? "").toUpperCase()
+          const to = (q.get("to") ?? "PLN").toUpperCase()
+          return new Response(JSON.stringify({ rate: from === to ? 1 : 1, asOf: "2026-07-02" }), { status: 200 })
+        }
+        const sym = decodeURIComponent(url.match(/\/instruments\/([^/]+)\/price-bars/)?.[1] ?? "")
+        const data = series[sym]
+        if (!data) return new Response("nope", { status: 404 })
+        return new Response(
+          JSON.stringify({ symbol: sym, dates: data.dates, closes: data.closes, currency: "PLN", stale: false }),
+          { status: 200 },
+        )
+      }),
+    )
+  }
+
+  it("a missing WEEKDAY bar is a hole; the weekend either side is not", async () => {
+    // 2026-07-01 Wed, 07-02 Thu, 07-03 Fri, 07-04 Sat, 07-05 Sun, 07-06 Mon.
+    // Series omits 07-02 (a real hole) and both weekend days (closures).
+    const { db, user } = await makeHarness("7231-carried")
+    const pf = await seedPortfolio(db, user.id, "PLN")
+    await seedBuy(db, user.id, pf.id, "AAA", 10, 100, "2026-07-01", "PLN")
+    await seedPosition(db, user.id, pf.id, "AAA", 10, 100, "PLN")
+    stubInstruments({
+      AAA: { dates: ["2026-07-01", "2026-07-03", "2026-07-06"], closes: [100, 102, 103] },
+    })
+
+    const batch = await computeSnapshotBatch(db, pf.id, "Bearer t", new Date("2026-07-07T00:00:00Z"))
+    const at = (d: string) => Number(batch.rows.find((r) => r.snapshotDate === d)?.carriedValue ?? 0)
+
+    // The hole: bracketed by bars, market open ⇒ carried, and worth reporting.
+    expect(at("2026-07-02")).toBeCloseTo(1000, 2)
+    // The weekend: carry-forward is the grid working as designed ⇒ zero.
+    expect(at("2026-07-04")).toBe(0)
+    expect(at("2026-07-05")).toBe(0)
+    // A day with a real bar is never carried.
+    expect(at("2026-07-03")).toBe(0)
+    // …and carriedValue never claims the position is unpriced — it has a price.
+    expect(Number(batch.rows.find((r) => r.snapshotDate === "2026-07-02")!.unpricedValue)).toBe(0)
+  })
+
+  it("a fully-priced series reports 0 carried on every day", async () => {
+    const { db, user } = await makeHarness("7231-clean")
+    const pf = await seedPortfolio(db, user.id, "PLN")
+    await seedBuy(db, user.id, pf.id, "AAA", 10, 100, "2026-07-01", "PLN")
+    await seedPosition(db, user.id, pf.id, "AAA", 10, 100, "PLN")
+    stubInstruments({
+      AAA: { dates: ["2026-07-01", "2026-07-02", "2026-07-03"], closes: [100, 101, 102] },
+    })
+    const batch = await computeSnapshotBatch(db, pf.id, "Bearer t", new Date("2026-07-04T00:00:00Z"))
+    for (const r of batch.rows) expect(Number(r.carriedValue)).toBe(0)
+  })
+
+  it("a long closure is not carried; a bracketed gap is", async () => {
+    const { db, user } = await makeHarness("7231-span")
+    const pf = await seedPortfolio(db, user.id, "PLN")
+    await seedBuy(db, user.id, pf.id, "AAA", 10, 100, "2026-07-06", "PLN")
+    await seedPosition(db, user.id, pf.id, "AAA", 10, 100, "PLN")
+    stubInstruments({
+      // 07-06 then nothing until 07-20: a fortnight-long closure, not coverage loss.
+      AAA: {
+        dates: ["2026-07-06", "2026-07-20", "2026-07-21", "2026-07-22", "2026-07-23", "2026-07-24"],
+        closes: [100, 104, 105, 106, 107, 108],
+      },
+    })
+    const batch = await computeSnapshotBatch(db, pf.id, "Bearer t", new Date("2026-07-25T00:00:00Z"))
+    const at = (d: string) => Number(batch.rows.find((r) => r.snapshotDate === d)?.carriedValue ?? 0)
+    expect(at("2026-07-10")).toBe(0)
+    // 07-13 is exactly 7 days either side of a bar — the boundary, still carried.
+    expect(at("2026-07-13")).toBeGreaterThan(0)
+  })
+})

@@ -1244,8 +1244,10 @@ async function resolveAggregateBase(
         snapshotDate: valueSnapshots.snapshotDate,
         value: valueSnapshots.value,
         invested: valueSnapshots.invested,
-        // §78.5 — read back so the chart can attribute a step. See below.
+        // §78.5 / §72.31 — the two withheld amounts, read back so the chart can
+        // attribute a step to a specific day.
         unpricedValue: valueSnapshots.unpricedValue,
+        carriedValue: valueSnapshots.carriedValue,
         cumulativeTwr: valueSnapshots.cumulativeTwr,
         cumulativeMwr: valueSnapshots.cumulativeMwr,
         cumulativeSimple: valueSnapshots.cumulativeSimple,
@@ -1268,6 +1270,10 @@ async function resolveAggregateBase(
       // opposite of true for the portfolios that most need it. `undefined`
       // lets the UI say "unknown" instead of "complete".
       unpricedValue: r.unpricedValue === null ? undefined : Number(r.unpricedValue),
+      // §72.31 — same treatment: absent means "not measured", and both columns
+      // default to 0, so coercing would claim "nothing withheld" on a
+      // pre-migration row.
+      carriedValue: r.carriedValue === null ? undefined : Number(r.carriedValue),
       cumulativeTwr: r.cumulativeTwr !== null ? Number(r.cumulativeTwr) : undefined,
       cumulativeMwr: r.cumulativeMwr !== null ? Number(r.cumulativeMwr) : undefined,
       cumulativeSimple: r.cumulativeSimple !== null ? Number(r.cumulativeSimple) : undefined,

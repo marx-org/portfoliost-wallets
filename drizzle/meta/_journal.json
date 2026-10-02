@@ -92,6 +92,13 @@
       "when": 1790800000000,
       "tag": "0012_unpriced_value",
       "breakpoints": true
+    },
+    {
+      "idx": 13,
+      "version": "7",
+      "when": 1790900000000,
+      "tag": "0013_carried_value",
+      "breakpoints": true
     }
   ]
 }
