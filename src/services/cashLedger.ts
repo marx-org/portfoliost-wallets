@@ -251,11 +251,16 @@ export async function cashBalanceSeries(
  * WITHDRAWAL −, TRANSFER ± its own stored leg) at that day's rate — the D50
  * replacement for the old BUY/SELL `dailyNetCashFlows` series (trades are
  * internal cash ↔ position moves, not flows).
+ *
+ * `portfolioId` is a filter, not an identity: §83.3 passes an ARRAY to sum the
+ * flows of several portfolios into one aggregate benchmark. It owns the
+ * external-only rule and the per-day historical rate, so a second flow reader
+ * written for `/merged` would get both subtly wrong.
  */
 export async function dailyExternalFlows(
   db: DB,
   authToken: string | null,
-  portfolioId: string,
+  portfolioId: string | string[],
   from: string,
   to: string,
   baseCurrency: string,
@@ -263,6 +268,8 @@ export async function dailyExternalFlows(
   opts: { strict?: boolean } = {},
 ): Promise<Map<string, number>> {
   const base = baseCurrency.toUpperCase()
+  const ids = Array.isArray(portfolioId) ? portfolioId : [portfolioId]
+  if (ids.length === 0) return new Map()
   const rows = await db
     .select({
       amount: portfolioCashTransactions.amount,
@@ -270,7 +277,11 @@ export async function dailyExternalFlows(
       transactionDate: portfolioCashTransactions.transactionDate,
     })
     .from(portfolioCashTransactions)
-    .where(eq(portfolioCashTransactions.portfolioId, portfolioId))
+    .where(
+      ids.length === 1
+        ? eq(portfolioCashTransactions.portfolioId, ids[0])
+        : inArray(portfolioCashTransactions.portfolioId, ids),
+    )
     .orderBy(portfolioCashTransactions.transactionDate)
 
   if (rows.length === 0) return new Map()

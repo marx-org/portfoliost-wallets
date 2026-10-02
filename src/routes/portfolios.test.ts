@@ -1,10 +1,11 @@
-import { afterEach, describe, expect, it, vi } from "vitest"
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import { Hono } from "hono"
 import { createPortfolioRoutes } from "./portfolios.js"
 import { makeHarness } from "./test-utils.js"
 import {
   portfolios,
   positions,
+  portfolioCashTransactions,
   portfolioTransactions,
   valueSnapshots,
 } from "../db/schema.js"
@@ -555,6 +556,121 @@ describe("GET /api/portfolios/merged (§46, §41 follow-up 1)", () => {
     }
     expect(__backfillRunnerEnqueuedForTests(), "no backfill may be enqueued by a GET").toBe(false)
     __resetBackfillRunnerForTests()
+  })
+
+  /**
+   * §83.3 — `?benchmarks=` on the aggregate. The overlay must mirror the MONEY
+   * (flows bought at the day's close), never the value ratio: a deposit into a
+   * portfolio that happens to also be flat must not read as the benchmark
+   * outperforming by exactly the deposit.
+   */
+  describe("benchmarks on the aggregate (§83.3)", () => {
+    beforeEach(() => {
+      process.env.INSTRUMENTS_URL = "http://instruments:3000"
+    })
+    afterEach(() => {
+      vi.unstubAllGlobals()
+      delete process.env.INSTRUMENTS_URL
+    })
+
+    /** 404 is the documented "no data for this key", so unknown tickers drop. */
+    function mockPriceBars(series: Record<string, { dates: string[]; closes: number[] }>) {
+      vi.stubGlobal(
+        "fetch",
+        vi.fn().mockImplementation((url: string) => {
+          const sym = decodeURIComponent(String(url).match(/\/instruments\/([^/]+)\/price-bars/)?.[1] ?? "")
+          const data = series[sym]
+          if (!data) return Promise.resolve({ ok: false, status: 404, json: async () => ({}) })
+          return Promise.resolve({
+            ok: true,
+            status: 200,
+            json: async () => ({ symbol: sym, dates: data.dates, closes: data.closes, stale: false }),
+          })
+        }),
+      )
+    }
+
+    it("buys the benchmark with the deposit, so the line moves only on flow-free days", async () => {
+      const h = await makeHarness("merged-bench-deposit")
+      const a = app(h.db)
+      const DAYS = ["2026-07-01", "2026-07-02", "2026-07-03"]
+      // SPY flat, then +10% on the last day.
+      mockPriceBars({ SPY: { dates: DAYS, closes: [100, 100, 110] } })
+
+      const pf = await seedPfWithSnapshots(h, "A", "USD", [
+        { snapshotDate: "2026-07-01", value: "1000", invested: "1000" },
+        { snapshotDate: "2026-07-02", value: "2000", invested: "2000" },
+        { snapshotDate: "2026-07-03", value: "2200", invested: "2000" },
+      ])
+      // The deposit that took invested 1000 → 2000 on the 2nd.
+      await h.db.insert(portfolioCashTransactions).values({
+        userId: h.user.id,
+        portfolioId: pf.id,
+        type: "DEPOSIT",
+        amount: "1000",
+        currency: "USD",
+        transactionDate: "2026-07-02",
+      })
+
+      const res = await a.request("/api/portfolios/merged?timeframe=ALL&benchmarks=SPY", { headers: h.headers })
+      expect(res.status).toBe(200)
+      const body = await res.json()
+      expect(body.benchmarks).toHaveLength(1)
+      const line = body.benchmarks[0].timeSeries.map((p: { value: number }) => p.value)
+      // 100 → 100 → 110. The mirror BOUGHT on the 2nd, so the deposit day is flat;
+      // a value-ratio mirror would print 200 there and report +120% overall.
+      expect(line).toEqual([100, 100, 110])
+      expect(body.benchmarks[0].returnPercent).toBe(10)
+    })
+
+    it("is not perturbed by a transfer between two of the user's own portfolios", async () => {
+      const h = await makeHarness("merged-bench-transfer")
+      const a = app(h.db)
+      const DAYS = ["2026-07-01", "2026-07-02", "2026-07-03"]
+      mockPriceBars({ SPY: { dates: DAYS, closes: [100, 100, 110] } })
+
+      const a1 = await seedPfWithSnapshots(h, "A", "USD", [
+        { snapshotDate: "2026-07-01", value: "1000", invested: "1000" },
+        { snapshotDate: "2026-07-02", value: "1000", invested: "1000" },
+        { snapshotDate: "2026-07-03", value: "1000", invested: "1000" },
+      ])
+      const b = await seedPfWithSnapshots(h, "B", "USD", [
+        { snapshotDate: "2026-07-01", value: "0", invested: "0" },
+        { snapshotDate: "2026-07-02", value: "0", invested: "0" },
+        { snapshotDate: "2026-07-03", value: "0", invested: "0" },
+      ])
+      // A paired transfer: −1000 out of A, +1000 into B, same day. Both legs are
+      // in `dailyExternalFlows`, so they cancel in the SUM — money moving between
+      // your own portfolios is not money entering the account.
+      await h.db.insert(portfolioCashTransactions).values([
+        { userId: h.user.id, portfolioId: a1.id, type: "TRANSFER", amount: "-1000", currency: "USD", transactionDate: "2026-07-02", toPortfolioId: b.id },
+        { userId: h.user.id, portfolioId: b.id, type: "TRANSFER", amount: "1000", currency: "USD", transactionDate: "2026-07-02", toPortfolioId: a1.id },
+      ])
+
+      const res = await a.request("/api/portfolios/merged?timeframe=ALL&benchmarks=SPY", { headers: h.headers })
+      expect(res.status).toBe(200)
+      const body = await res.json()
+      expect(body.benchmarks[0].returnPercent).toBe(10)
+      expect(body.benchmarks[0].timeSeries.map((p: { value: number }) => p.value)).toEqual([100, 100, 110])
+    })
+
+    it("drops unknown tickers, and stays [] with no benchmarks param", async () => {
+      const h = await makeHarness("merged-bench-unknown")
+      const a = app(h.db)
+      mockPriceBars({})
+      await seedPfWithSnapshots(h, "A", "USD", [
+        { snapshotDate: "2026-07-01", value: "500", invested: "400" },
+        { snapshotDate: "2026-07-02", value: "600", invested: "400" },
+      ])
+
+      const unknown = await (await a.request("/api/portfolios/merged?benchmarks=NOPE", { headers: h.headers })).json()
+      expect(unknown.benchmarks).toEqual([])
+      // The aggregate is still returned — a bad ticker drops the OVERLAY, not the page.
+      expect(unknown.performance.timeSeries).toHaveLength(2)
+
+      const none = await (await a.request("/api/portfolios/merged", { headers: h.headers })).json()
+      expect(none.benchmarks).toEqual([])
+    })
   })
 
   it("does not go pending for a portfolio whose only trades are from today (§48.4)", async () => {

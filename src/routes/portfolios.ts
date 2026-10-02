@@ -745,6 +745,15 @@ async function resolveAggregateBase(
   routes.get("/merged", async (c) => {
     const identity = c.get("userIdentity")
     const timeframe = c.req.query("timeframe") || "ALL"
+    // §83.3 — `benchmarks[]` is already declared on `PortfolioAnalytics`
+    // (openapi.yaml:1545); this route used to ignore the param entirely. The
+    // selection is per-request store state, not a DB column, so there is no
+    // schema to add and nothing to persist.
+    const benchmarkCalcType = c.req.query("benchmarkCalcType") || "timeWeighted"
+    const benchmarkParam = c.req.query("benchmarks")
+    const benchmarkSymbols = benchmarkParam
+      ? benchmarkParam.split(",").map((s) => s.trim()).filter(Boolean)
+      : []
     const database = getDbInstance()
 
     const portfolioRows = await database
@@ -839,6 +848,57 @@ async function resolveAggregateBase(
     )
 
     const gap = await aggregateGapSymbols(database, portfolioRows.map((p) => p.id))
+
+    // §83.3 — the aggregate benchmark overlay: the same builder, the aggregate
+    // base, and the SAME aggregate money the user actually put in.
+    //
+    //   flows          = Σ external flows across ALL of the user's portfolios
+    //   seedInvested   = the aggregate `invested` at the window start
+    //
+    // Both legs of a transfer between two of the user's own portfolios are
+    // external-only-excluded per portfolio (§62.4/D50), so neither reaches this
+    // map and moving money between your own portfolios cannot perturb the
+    // benchmark — the case a second, hand-rolled flow reader gets wrong.
+    //
+    // Its per-day rate is deliberately NOT the same constant spot rate the value
+    // series is converted at: a benchmark must pay for the flows on the day they
+    // happened, while the value series is a constant-currency restatement (§68.4).
+    // Do not "unify" them.
+    let benchmarks: NonNullable<components["schemas"]["PortfolioAnalytics"]["benchmarks"]> = []
+    const firstPoint = series[0]
+    const lastPoint = series[series.length - 1]
+    if (benchmarkSymbols.length > 0 && firstPoint && lastPoint) {
+      const authToken = c.req.header("Authorization") ?? ""
+      const flows = await dailyExternalFlows(
+        database,
+        authToken,
+        portfolioRows.map((p) => p.id),
+        firstPoint.date,
+        lastPoint.date,
+        mergedBase,
+      )
+      const calcType = (["moneyWeighted", "timeWeighted", "simple"] as const).includes(
+        benchmarkCalcType as "moneyWeighted" | "timeWeighted" | "simple",
+      )
+        ? (benchmarkCalcType as "moneyWeighted" | "timeWeighted" | "simple")
+        : "timeWeighted"
+      const built = await Promise.all(
+        benchmarkSymbols.map((sym) =>
+          buildBenchmarkSeries(sym, firstPoint.date, lastPoint.date, authToken, sym, {
+            db: database,
+            baseCurrency: mergedBase,
+            flows,
+            seedInvested: firstPoint.invested,
+            calcType,
+          }),
+        ),
+      )
+      // Unknown tickers are dropped, exactly as `/:id/analytics` does.
+      benchmarks = built
+        .filter((s): s is NonNullable<typeof s> => s !== null)
+        .map((s) => ({ symbol: s.symbol, name: s.name, timeSeries: s.timeSeries, returnPercent: s.returnPercent, volatility: s.volatility }))
+    }
+
     return c.json({
       timeframe,
       backfillStatus: pendingIds.length > 0 ? "pending" : "complete",
@@ -851,7 +911,7 @@ async function resolveAggregateBase(
       gapSymbols: gap.gapSymbols,
       heldGapSymbols: gap.heldGapSymbols,
       performance: buildMergedPerformance(series),
-      benchmarks: [],
+      benchmarks,
     } satisfies components["schemas"]["PortfolioAnalytics"])
   })
 

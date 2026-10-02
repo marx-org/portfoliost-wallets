@@ -355,7 +355,14 @@ export async function fetchPriceSeries(
  */
 export interface BenchmarkBuildContext {
   db: DB
-  portfolioId: string
+  /**
+   * §83.3 — was required and never read: `buildBenchmarkSeries` takes the flows
+   * and the seed from the caller, because the aggregate `/merged` overlay
+   * (`:83.3`) has no single portfolio to name. Left optional rather than
+   * invented: passing an arbitrary id would put a lie in a field that looks like
+   * it scopes something.
+   */
+  portfolioId?: string
   baseCurrency: string
   /** daily net cash flow (BUY − SELL) in base currency, keyed by YYYY-MM-DD */
   flows: Map<string, number>
