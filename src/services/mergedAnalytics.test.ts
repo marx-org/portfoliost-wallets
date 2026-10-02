@@ -475,3 +475,44 @@ describe("§83.2: the aggregate TWR ignores money moving in or between portfolio
     expect(buildMergedPerformance(oneUnknown).timeSeries[0].unpricedValue).toBeUndefined()
   })
 })
+
+/**
+ * §83.4 — the aggregate Drawdown card reads `computeRiskMetrics`, so the §81.3
+ * fixture has to hold on THIS path too. The bug it caught was a deposit
+ * resetting the running peak; an aggregate is where deposits are most of the
+ * story, so a second, SPA-side drawdown over the summed value would have
+ * reintroduced it at the largest possible scale.
+ */
+describe("§83.4: aggregate drawdown comes from computeRiskMetrics, not a second implementation", () => {
+  it("reports −75% on the §81.3 fixture, not −50%", () => {
+    // values [100, 50, 150, 75] with a 100 deposit on the 3rd day is a
+    // flow-neutral index of [1, 0.5, 0.5, 0.25].
+    const rows: SnapshotRow[] = [
+      row("A", "2026-01-01", 100, 100, { netFlow: 100 }),
+      row("A", "2026-01-02", 50, 100, { netFlow: 0 }),
+      row("A", "2026-01-03", 150, 200, { netFlow: 100 }),
+      row("A", "2026-01-04", 75, 200, { netFlow: 0 }),
+    ]
+    const perf = buildMergedPerformance(sumSnapshotsByDateForwardFilled(rows, RATES, "USD"))
+    expect(perf.maxDrawdown).toBeCloseTo(-0.75, 6)
+    // …and the per-point index the SPA's `currentDrawdownPercent` reads agrees
+    // with it on the peak-to-trough leg: last 25 vs peak 100.
+    const index = perf.timeSeries.map((p) => p.cumulativeTwr!)
+    expect(Math.max(...index)).toBe(100)
+    expect(index[index.length - 1]).toBeCloseTo(25, 6)
+  })
+
+  it("carries the whole Risk-tab set, and does NOT overwrite annualizedReturn's percent", () => {
+    const rows: SnapshotRow[] = [1, 2, 3].map((i) =>
+      row("A", `2026-01-0${i}`, 100 * (1 + i * 0.1), 100, { netFlow: i === 1 ? 100 : 0 }),
+    )
+    const perf = buildMergedPerformance(sumSnapshotsByDateForwardFilled(rows, RATES, "USD"))
+    for (const k of ["maxDrawdown", "sharpeRatio", "sortinoRatio", "calmarRatio", "volatility", "winRate"] as const) {
+      expect(typeof perf[k], k).toBe("number")
+    }
+    // Three points is far below the 60-point floor, so the field stays withheld
+    // as a PERCENT (null), never a risk-metrics fraction of the same name.
+    expect(perf.annualizedReturn).toBeNull()
+    expect(perf.annualizedReturnWithheldReason).toBe("insufficient_history")
+  })
+})

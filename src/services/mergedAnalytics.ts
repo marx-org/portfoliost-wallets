@@ -24,6 +24,7 @@
  */
 
 import {
+  buildDailyReturns,
   buildMwr,
   buildMonthlyReturns,
   buildSimple,
@@ -32,6 +33,7 @@ import {
 import {
   annualizedReturn,
   annualizedReturnWithheldReason,
+  computeRiskMetrics,
 } from "./riskMetrics.js"
 
 export interface SnapshotRow {
@@ -256,10 +258,19 @@ export function sumSnapshotsByDateForwardFilled(
  *   functions, so the aggregate tile withholds on exactly the predicate the
  *   per-portfolio tile uses and the two can never disagree about a window.
  * - `monthlyReturns` — the same `buildMonthlyReturns` `/:id/analytics` uses.
+ * - `maxDrawdown` / `sharpeRatio` / `sortinoRatio` / `calmarRatio` /
+ *   `volatility` / `winRate` — §83.4, straight off `computeRiskMetrics`, so the
+ *   aggregate Drawdown card and the per-portfolio Risk tab read the same
+ *   function and cannot drift. No `/merged/risk-metrics` route: the fields are
+ *   already declared on `performance`.
  *
- * Every rate is a PERCENT, matching the analytics transport (`/:id/risk-metrics`
- * ships fractions under the same field names — a deliberate split recorded at
- * that route, not something to replicate here).
+ * Units, deliberately split, because the contract field names do not disambiguate:
+ * `annualizedReturn` is a PERCENT here (the analytics transport — `/:id/analytics`
+ * ships percents, and §83.2's tile multiplies nothing), while the ratio fields
+ * keep `/:id/risk-metrics`' form (fractions; the SPA multiplies `maxDrawdown` by
+ * 100 on both routes). Shipping the risk-metrics form of `annualizedReturn` here
+ * would put one contract field at two magnitudes on one response — the defect
+ * §82.1's comment at the per-portfolio route already records.
  */
 export function buildMergedPerformance(series: MergedPoint[]) {
   const values = series.map((p) => p.value)
@@ -282,6 +293,13 @@ export function buildMergedPerformance(series: MergedPoint[]) {
   const simpleIndex = buildSimple(values)
 
   const annualizedWithheld = annualizedReturnWithheldReason(twrIndex, dates)
+
+  // §83.4 — §81.1 made `computeRiskMetrics` pure: it takes the daily
+  // flow-neutral returns and the dates, and this function already holds both. So
+  // the aggregate risk fields are a CALL, not a new route and not SPA-side
+  // arithmetic — the per-portfolio Risk tab and this Drawdown card read the same
+  // numbers because they read the same function.
+  const risk = computeRiskMetrics(buildDailyReturns(values, flows), dates)
 
   return {
     timeSeries: series.map((p, i) => ({
@@ -321,5 +339,15 @@ export function buildMergedPerformance(series: MergedPoint[]) {
         ? Math.round(annualizedReturn(twrIndex, dates) * 10000) / 100
         : null,
     annualizedReturnWithheldReason: annualizedWithheld,
+    // §83.4 — the Risk tab's numbers, on the analytics transport. `annualizedReturn`
+    // is deliberately NOT copied from here: `computeRiskMetrics` returns a
+    // FRACTION and the field above is the analytics PERCENT, both written from the
+    // same index by §82.1's function. One answer, one field, one unit.
+    maxDrawdown: risk.maxDrawdown,
+    sharpeRatio: risk.sharpeRatio,
+    sortinoRatio: risk.sortinoRatio,
+    calmarRatio: risk.calmarRatio,
+    volatility: risk.volatility,
+    winRate: risk.winRate,
   }
 }
