@@ -20,6 +20,7 @@ import { cashBalances, dailyExternalFlows } from "../services/cashLedger.js"
 import { debugEnabled, debugLog } from "../services/debug.js"
 import { buildPortfolioCash } from "./portfolio-cash.js"
 import { computeRiskMetrics } from "../services/riskMetrics.js"
+import { buildDailyReturns } from "../services/returnColumns.js"
 import { resolveRates, fxTo } from "../services/instruments-fx.js"
 import { sumSnapshotsByDateForwardFilled, buildMergedPerformance } from "../services/mergedAnalytics.js"
 import { createTransactionRoutes } from "./portfolio-transactions.js"
@@ -1470,6 +1471,7 @@ async function resolveAggregateBase(
       .select({
         snapshotDate: valueSnapshots.snapshotDate,
         value: valueSnapshots.value,
+        netFlow: valueSnapshots.netFlow,
         cumulativeTwr: valueSnapshots.cumulativeTwr,
         cumulativeMwr: valueSnapshots.cumulativeMwr,
       })
@@ -1482,13 +1484,19 @@ async function resolveAggregateBase(
       .orderBy(asc(valueSnapshots.snapshotDate))
 
     const values = rows.map((r) => Number(r.value))
+    const flows = rows.map((r) => Number(r.netFlow))
     const dates = rows.map((r) => r.snapshotDate)
+
+    // §81.1 — risk metrics must be flow-neutral: a deposit moves `value` with
+    // no market move behind it, and deriving returns from `value` booked every
+    // cash flow as a return.
+    const returns = buildDailyReturns(values, flows)
 
     // Use pre-computed MWR index as the money-weighted return scalar (last point − 100)
     const lastMwr = rows.length > 0 ? rows[rows.length - 1].cumulativeMwr : null
     const mwrPercent = lastMwr !== null ? Math.round((Number(lastMwr) - 100) * 100) / 100 : null
 
-    const metrics = computeRiskMetrics(values, dates)
+    const metrics = computeRiskMetrics(returns, dates)
 
     return c.json({
       sharpeRatio: metrics.sharpeRatio,

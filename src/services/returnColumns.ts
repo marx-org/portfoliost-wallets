@@ -25,25 +25,50 @@ export function buildSimple(values: number[]): number[] {
 
 // ---------------------------------------------------------------------------
 // TWR — daily chain-linked sub-period returns
-// HPR_t = V_t / (V_{t-1} + netFlow_t) - 1
 // ---------------------------------------------------------------------------
+
+/**
+ * §81.1 — the daily flow-neutral sub-period return series (HPR).
+ *
+ *   HPR_t = V_t / (V_{t-1} + netFlow_t) − 1
+ *
+ * `netFlow_t` is removed from the denominator so an external cash flow never
+ * books as a market return. This is the single implementation of the
+ * sub-period return: `buildTwr` chains it, and the risk metrics consume it
+ * directly, so the chart and the Risk tab cannot drift apart.
+ *
+ * Length is `values.length − 1` — index 0 has no prior day, hence no return.
+ * A zero denominator (nothing invested and nothing to lose) contributes 0.
+ */
+export function buildDailyReturns(values: number[], flows: number[]): number[] {
+  const out: number[] = []
+  for (let i = 1; i < values.length; i++) {
+    const denom = values[i - 1] + (flows[i] ?? 0)
+    out.push(denom !== 0 ? values[i] / denom - 1 : 0)
+  }
+  return out
+}
+
+/** Chain sub-period returns into a flow-neutral index starting at 1. */
+export function chainReturns(returns: number[]): number[] {
+  const index: number[] = [1]
+  let cum = 1
+  for (const r of returns) {
+    cum *= 1 + r
+    index.push(cum)
+  }
+  return index
+}
+
 export function buildTwr(values: number[], flows: number[]): number[] {
   if (values.length === 0) return []
-  const result: number[] = [100]
-  let cum = 1
-  for (let i = 1; i < values.length; i++) {
-    const denom = values[i - 1] + flows[i]
-    const hpr = denom !== 0 ? values[i] / denom - 1 : 0
-    cum *= 1 + hpr
-    result.push(Math.round(cum * 10000) / 100)
-  }
-  return result
+  return chainReturns(buildDailyReturns(values, flows)).map((v) => Math.round(v * 10000) / 100)
 }
 
 // ---------------------------------------------------------------------------
 // MWR — XIRR then de-annualise per point
 // ---------------------------------------------------------------------------
-function daysBetween(a: string, b: string): number {
+export function daysBetween(a: string, b: string): number {
   return (Date.parse(b) - Date.parse(a)) / 86400000
 }
 

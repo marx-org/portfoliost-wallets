@@ -1,14 +1,21 @@
 /**
  * Risk metrics computation for portfolio analytics (D46 plan step 2.6).
  *
- * All functions take a series of portfolio values (or returns) indexed by
- * calendar day.  Volatility is already computed per benchmark series in
- * returnColumns / backfill — here we re-use the same √252 annualisation
- * convention for the portfolio itself.
+ * All functions take a flow-neutral daily series built by `returnColumns`:
+ * `buildDailyReturns` for the per-day returns, `chainReturns` for the index
+ * those returns compound into. Volatility is already computed per benchmark
+ * series in returnColumns / backfill — here we re-use the same √252
+ * annualisation convention for the portfolio itself.
+ *
+ * §81.1 — none of these functions take a raw portfolio *value* series. A
+ * deposit moves `value` with no market move behind it, so deriving returns from
+ * it booked every cash flow as a portfolio return.
  *
  * Public API:
- *   computeRiskMetrics(values, dates, netFlows, riskFreeRate?) → PortfolioRiskMetrics
+ *   computeRiskMetrics(returns, dates, riskFreeRate?) → PortfolioRiskMetrics
  */
+
+import { chainReturns } from "./returnColumns.js"
 
 /** TRADING_DAYS_PER_YEAR — used for annualisation of daily returns. */
 const TRADING_DAYS = 252
@@ -16,19 +23,6 @@ const TRADING_DAYS = 252
 // ---------------------------------------------------------------------------
 // Internal helpers
 // ---------------------------------------------------------------------------
-
-/** Daily log-return series from an array of values (length = values.length − 1). */
-function dailyLogReturns(values: number[]): number[] {
-  const out: number[] = []
-  for (let i = 1; i < values.length; i++) {
-    if (values[i - 1] > 0 && values[i] > 0) {
-      out.push(Math.log(values[i] / values[i - 1]))
-    } else {
-      out.push(0)
-    }
-  }
-  return out
-}
 
 function mean(xs: number[]): number {
   if (xs.length === 0) return 0
@@ -47,24 +41,27 @@ function stddev(xs: number[], mu?: number): number {
 // ---------------------------------------------------------------------------
 
 /**
- * Annualised volatility of daily log-returns (√TRADING_DAYS × σ_daily).
+ * Annualised volatility of the daily return series (√TRADING_DAYS × σ_daily).
  * Returned as a fraction (e.g. 0.18 = 18 %).
+ *
+ * @param returns Daily flow-neutral returns (`buildDailyReturns` output).
  */
-export function annualizedVolatility(values: number[]): number {
-  if (values.length < 2) return 0
-  const rets = dailyLogReturns(values)
-  return stddev(rets) * Math.sqrt(TRADING_DAYS)
+export function annualizedVolatility(returns: number[]): number {
+  if (returns.length < 2) return 0
+  return stddev(returns) * Math.sqrt(TRADING_DAYS)
 }
 
 /**
  * Maximum drawdown from peak to trough as a fraction (e.g. −0.25 = −25 %).
- * Returns a negative number (or 0 when values are monotonically increasing).
+ * Returns a negative number (or 0 when the series is monotonically increasing).
+ *
+ * @param index Flow-neutral index (`chainReturns` output), starting at 1.
  */
-export function maxDrawdown(values: number[]): number {
-  if (values.length < 2) return 0
-  let peak = values[0]
+export function maxDrawdown(index: number[]): number {
+  if (index.length < 2) return 0
+  let peak = index[0]
   let mdd = 0
-  for (const v of values) {
+  for (const v of index) {
     if (v > peak) peak = v
     const dd = peak > 0 ? (v - peak) / peak : 0
     if (dd < mdd) mdd = dd
@@ -76,14 +73,14 @@ export function maxDrawdown(values: number[]): number {
  * Sharpe ratio = (mean daily return − daily risk-free rate) / σ_daily,
  * annualised by √TRADING_DAYS.
  *
- * @param riskFreeRate  Annual risk-free rate as a fraction (default 0.05 = 5 %).
+ * @param returns      Daily flow-neutral returns.
+ * @param riskFreeRate Annual risk-free rate as a fraction (default 0.05 = 5 %).
  */
-export function sharpeRatio(values: number[], riskFreeRate = 0.05): number {
-  if (values.length < 2) return 0
-  const rets = dailyLogReturns(values)
+export function sharpeRatio(returns: number[], riskFreeRate = 0.05): number {
+  if (returns.length < 2) return 0
   const dailyRf = riskFreeRate / TRADING_DAYS
-  const excessMean = mean(rets) - dailyRf
-  const sd = stddev(rets)
+  const excessMean = mean(returns) - dailyRf
+  const sd = stddev(returns)
   if (sd === 0) return 0
   return Math.round((excessMean / sd) * Math.sqrt(TRADING_DAYS) * 100) / 100
 }
@@ -96,68 +93,75 @@ export function sharpeRatio(values: number[], riskFreeRate = 0.05): number {
  * Sharpe ratio — which is a conservative lower bound for a purely positive
  * return series.
  *
- * @param riskFreeRate  Annual risk-free rate as a fraction (default 0.05).
+ * @param returns      Daily flow-neutral returns.
+ * @param riskFreeRate Annual risk-free rate as a fraction (default 0.05).
  */
-export function sortinoRatio(values: number[], riskFreeRate = 0.05): number {
-  if (values.length < 2) return 0
-  const rets = dailyLogReturns(values)
+export function sortinoRatio(returns: number[], riskFreeRate = 0.05): number {
+  if (returns.length < 2) return 0
   const dailyRf = riskFreeRate / TRADING_DAYS
-  const excessMean = mean(rets) - dailyRf
-  const downside = rets.map((r) => Math.min(r - dailyRf, 0))
+  const excessMean = mean(returns) - dailyRf
+  const downside = returns.map((r) => Math.min(r - dailyRf, 0))
   const downsideVar =
     downside.reduce((s, r) => s + r * r, 0) / Math.max(downside.length - 1, 1)
   const downsideSd = Math.sqrt(downsideVar)
   // No downside days → fall back to Sharpe (conservative lower bound)
-  if (downsideSd === 0) return sharpeRatio(values, riskFreeRate)
+  if (downsideSd === 0) return sharpeRatio(returns, riskFreeRate)
   return Math.round((excessMean / downsideSd) * Math.sqrt(TRADING_DAYS) * 100) / 100
 }
 
 /**
  * Calmar ratio = annualised return / |maxDrawdown|.
  * Returns 0 when maxDrawdown is 0 (no drawdown period).
+ *
+ * @param index Flow-neutral index (`chainReturns` output), starting at 1.
+ * @param dates ISO date strings matching `index`.
  */
-export function calmarRatio(values: number[]): number {
-  if (values.length < 2) return 0
-  const ann = annualizedReturn(values)
-  const mdd = maxDrawdown(values)
+export function calmarRatio(index: number[], dates: string[]): number {
+  if (index.length < 2) return 0
+  const ann = annualizedReturn(index, dates)
+  const mdd = maxDrawdown(index)
   if (mdd === 0) return 0
   return Math.round((ann / Math.abs(mdd)) * 100) / 100
 }
 
 /**
- * Win rate = fraction of trading days with a positive return.
+ * Win rate = fraction of days with a positive return.
  * Returned as a percentage (0–100).
+ *
+ * @param returns Daily flow-neutral returns.
  */
-export function winRate(values: number[]): number {
-  if (values.length < 2) return 0
-  const rets = dailyLogReturns(values)
-  const wins = rets.filter((r) => r > 0).length
-  return Math.round((wins / rets.length) * 10000) / 100  // 2 dp percentage
+export function winRate(returns: number[]): number {
+  if (returns.length === 0) return 0
+  const wins = returns.filter((r) => r > 0).length
+  return Math.round((wins / returns.length) * 10000) / 100  // 2 dp percentage
 }
 
 /**
- * Annualised return from a value series, compounded daily.
- * annReturn = (V_last / V_first) ^ (TRADING_DAYS / n) − 1, where n = trading days in series.
- * Falls back to 0 for series too short or with zero start.
+ * Annualised return from the flow-neutral index, compounded daily.
+ *
+ * @param index Flow-neutral index (`chainReturns` output), starting at 1.
+ * @param dates ISO date strings matching `index`.
  */
-export function annualizedReturn(values: number[]): number {
-  if (values.length < 2) return 0
-  const v0 = values[0]
-  const vn = values[values.length - 1]
-  if (v0 <= 0 || vn <= 0) return 0
-  const n = values.length - 1  // number of 1-day steps
-  return (vn / v0) ** (TRADING_DAYS / n) - 1
+export function annualizedReturn(index: number[], dates: string[]): number {
+  if (index.length < 2) return 0
+  const i0 = index[0]
+  const iN = index[index.length - 1]
+  if (i0 <= 0 || iN <= 0) return 0
+  const n = index.length - 1  // number of 1-day steps
+  return (iN / i0) ** (TRADING_DAYS / n) - 1
 }
 
 /**
- * Period return = (V_last / V_first − 1) as a percentage.
+ * Period return = (index_last / index_first − 1) as a percentage.
+ *
+ * @param index Flow-neutral index (`chainReturns` output), starting at 1.
  */
-export function periodReturnPercent(values: number[]): number {
-  if (values.length < 2) return 0
-  const v0 = values[0]
-  const vn = values[values.length - 1]
-  if (v0 <= 0) return 0
-  return Math.round(((vn / v0 - 1) * 100) * 100) / 100
+export function periodReturnPercent(index: number[]): number {
+  if (index.length < 2) return 0
+  const i0 = index[0]
+  const iN = index[index.length - 1]
+  if (i0 <= 0) return 0
+  return Math.round(((iN / i0 - 1) * 100) * 100) / 100
 }
 
 // ---------------------------------------------------------------------------
@@ -174,14 +178,13 @@ export function periodReturnPercent(values: number[]): number {
  *  - Values contain any NaN/Infinity → "invalid_data"
  */
 export function annualizedReturnWithheldReason(
-  values: number[],
+  index: number[],
   dates: string[],
 ): string | null {
-  if (values.length < 60) return "insufficient_history"
-  if (values.some((v) => !isFinite(v))) return "invalid_data"
+  if (index.length < 60) return "insufficient_history"
+  if (index.some((v) => !isFinite(v))) return "invalid_data"
   if (dates.length >= 2) {
-    const spanDays =
-      (Date.parse(dates[dates.length - 1]) - Date.parse(dates[0])) / 86400000
+    const spanDays = (Date.parse(dates[dates.length - 1]) - Date.parse(dates[0])) / 86400000
     if (spanDays < 90) return "insufficient_history"
   }
   return null
@@ -204,28 +207,30 @@ export interface RiskMetricsResult {
 }
 
 /**
- * Compute all risk metrics from a daily value series.
+ * Compute all risk metrics from the daily flow-neutral return series.
  *
- * @param values         Portfolio values in chronological order.
- * @param dates          ISO date strings matching `values` (same length).
- * @param riskFreeRate   Annual risk-free rate as a fraction (default 0.05).
+ * @param returns       Daily flow-neutral returns (`buildDailyReturns`).
+ * @param dates         ISO date strings for the *values* series, i.e. one per
+ *                      return plus the opening day (length = returns.length + 1).
+ * @param riskFreeRate  Annual risk-free rate as a fraction (default 0.05).
  */
 export function computeRiskMetrics(
-  values: number[],
+  returns: number[],
   dates: string[],
   riskFreeRate = 0.05,
 ): RiskMetricsResult {
-  const withheldReason = annualizedReturnWithheldReason(values, dates)
-  const annReturn = withheldReason === null ? annualizedReturn(values) : null
+  const index = chainReturns(returns)
+  const withheldReason = annualizedReturnWithheldReason(index, dates)
+  const annReturn = withheldReason === null ? annualizedReturn(index, dates) : null
 
   return {
-    sharpeRatio: sharpeRatio(values, riskFreeRate),
-    sortinoRatio: sortinoRatio(values, riskFreeRate),
-    calmarRatio: calmarRatio(values),
-    volatility: annualizedVolatility(values),
-    maxDrawdown: maxDrawdown(values),
-    winRate: winRate(values),
-    periodReturnPercent: periodReturnPercent(values),
+    sharpeRatio: sharpeRatio(returns, riskFreeRate),
+    sortinoRatio: sortinoRatio(returns, riskFreeRate),
+    calmarRatio: calmarRatio(index, dates),
+    volatility: annualizedVolatility(returns),
+    maxDrawdown: maxDrawdown(index),
+    winRate: winRate(returns),
+    periodReturnPercent: periodReturnPercent(index),
     annualizedReturn: annReturn !== null ? Math.round(annReturn * 10000) / 10000 : null,
     annualizedReturnWithheldReason: withheldReason,
   }
