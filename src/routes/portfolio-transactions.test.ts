@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest"
 import { Hono } from "hono"
 import { createPortfolioRoutes } from "./portfolios.js"
+import { createPortfolioCashRoutes } from "./portfolio-cash.js"
 import { createPublicShareRoutes } from "./portfolios.js"
 import { createCrossPortfolioTransactionsRoute } from "./portfolio-transactions.js"
 import { makeHarness, priceOpenPositions } from "./test-utils.js"
@@ -2617,5 +2618,194 @@ describe("GET /api/portfolios/positions (§83.5)", () => {
     const res = await a.request("/api/portfolios/positions", { headers: h.headers })
     expect(res.status).toBe(200)
     expect(await res.json()).toEqual({ positions: [] })
+  })
+})
+
+/**
+ * §87.2 — a trade and the cash leg that funds it are created together and must
+ * die together.
+ *
+ * Nothing linked them before: `linked_tx_id` is the cash↔cash transfer pair and
+ * carries no FK, and the two delete paths were independent — deleting a trade left
+ * its deposit behind, silently orphaning a money row. The fix is a real FK on the
+ * CASH row pointing at the TRADE, so both directions need no application code:
+ * `ON DELETE CASCADE` covers the direction that matters most, and deleting the
+ * cash row takes the link with it (the link WAS the row).
+ *
+ * The whole section asserts the CASCADE, not application behaviour: if someone
+ * later "helpfully" adds hand-written cleanup to the delete handler, these tests
+ * still pass, which is the intent — the invariant is the database's job now.
+ */
+describe("§87.2: the trade ↔ cash-leg link", () => {
+  async function pfWithBuy() {
+    const h = await makeHarness()
+    // the cash routes are a separate factory (src/index.ts mounts both under
+    // /api/portfolios), so §87.2 needs its own app to exercise both deletes.
+    const a = new Hono()
+    a.route("/api/portfolios", createPortfolioCashRoutes(h.db))
+    a.route("/api/portfolios", createPortfolioRoutes(h.db))
+    const { id } = await (
+      await a.request("/api/portfolios", {
+        method: "POST",
+        headers: h.headers,
+        body: JSON.stringify({ name: "XTB", currency: "PLN", baseCurrency: "PLN" }),
+      })
+    ).json()
+    const { id: txId } = await (
+      await a.request(`/api/portfolios/${id}/transactions`, {
+        method: "POST",
+        headers: h.headers,
+        body: JSON.stringify({ ...BUY_BODY, currency: "PLN" }),
+      })
+    ).json()
+    return { h, a, pfId: id, txId }
+  }
+
+  async function leg(h: Awaited<ReturnType<typeof makeHarness>>, pfId: string, over: Record<string, unknown> = {}) {
+    const [row] = await h.db
+      .insert(portfolioCashTransactions)
+      .values({
+        userId: h.user.id,
+        portfolioId: pfId,
+        type: "DEPOSIT",
+        amount: "1500",
+        currency: "PLN",
+        ...over,
+      })
+      .returning()
+    return row
+  }
+
+  const cashBalance = async (h: Awaited<ReturnType<typeof makeHarness>>, pfId: string) => {
+    const rows = await h.db
+      .select({ amount: portfolioCashTransactions.amount })
+      .from(portfolioCashTransactions)
+      .where(eq(portfolioCashTransactions.portfolioId, pfId))
+    return rows.reduce((s, r) => s + Number(r.amount), 0)
+  }
+
+  it("DELETING the trade takes its linked cash leg with it (cascade, no app code)", async () => {
+    const { h, a, pfId, txId } = await pfWithBuy()
+    await leg(h, pfId, { linkedTradeId: txId })
+    expect(await cashBalance(h, pfId)).toBe(1500)
+
+    const res = await a.request(`/api/portfolios/${pfId}/transactions/${txId}`, {
+      method: "DELETE",
+      headers: h.headers,
+    })
+    expect(res.status).toBe(204)
+
+    // the money row is GONE — not merely unreferenced
+    const left = await h.db
+      .select({ id: portfolioCashTransactions.id })
+      .from(portfolioCashTransactions)
+      .where(eq(portfolioCashTransactions.portfolioId, pfId))
+    expect(left).toHaveLength(0)
+    // and the balance moved exactly once (the derived BUY is gone with it)
+    expect(await cashBalance(h, pfId)).toBe(0)
+  })
+
+  it("DELETING the cash leg leaves the trade and its position alone", async () => {
+    const { h, a, pfId, txId } = await pfWithBuy()
+    const cash = await leg(h, pfId, { linkedTradeId: txId })
+
+    const res = await a.request(`/api/portfolios/cash/transactions/${cash.id}`, {
+      method: "DELETE",
+      headers: h.headers,
+    })
+    expect(res.status).toBe(204)
+
+    const [trade] = await h.db
+      .select({ id: portfolioTransactions.id })
+      .from(portfolioTransactions)
+      .where(eq(portfolioTransactions.id, txId))
+    expect(trade).toBeDefined()
+    // the link died WITH the cash row, so nothing is left pointing anywhere
+    expect(await cashBalance(h, pfId)).toBe(0)
+    const detail = await (await a.request(`/api/portfolios/${pfId}`, { headers: h.headers })).json()
+    const pos = detail.positions.find((p: { symbol: string }) => p.symbol === "AAPL")
+    expect(Number(pos.quantity)).toBe(10)
+  })
+
+  it("deleting an UNLINKED cash row (a hand-written Wpłata) leaves everything else alone", async () => {
+    const { h, a, pfId, txId } = await pfWithBuy()
+    const deposit = await leg(h, pfId, { linkedTradeId: txId })
+    const handWritten = await leg(h, pfId, {
+      type: "DEPOSIT",
+      amount: "250",
+      description: "Wpłata: Gotówka XTB",
+    })
+    expect(handWritten.linkedTradeId).toBeNull()
+
+    await a.request(`/api/portfolios/cash/transactions/${handWritten.id}`, {
+      method: "DELETE",
+      headers: h.headers,
+    })
+
+    const left = await h.db
+      .select({ id: portfolioCashTransactions.id })
+      .from(portfolioCashTransactions)
+      .where(eq(portfolioCashTransactions.portfolioId, pfId))
+    expect(left.map((r) => r.id)).toEqual([deposit.id])
+    // the trade and its leg are untouched
+    expect(await cashBalance(h, pfId)).toBe(1500)
+    expect(
+      await h.db
+        .select({ id: portfolioTransactions.id })
+        .from(portfolioTransactions)
+        .where(eq(portfolioTransactions.id, txId)),
+    ).toHaveLength(1)
+  })
+
+  it("an AU=0 trade has no cash row and nothing to point at (the column stays NULL)", async () => {
+    // The link is nullable on purpose: it exists only when a related cash
+    // transaction exists. No row, no key, no sentinel.
+    const { h, pfId } = await pfWithBuy()
+    const rows = await h.db
+      .select({ id: portfolioCashTransactions.id })
+      .from(portfolioCashTransactions)
+      .where(eq(portfolioCashTransactions.portfolioId, pfId))
+    expect(rows).toHaveLength(0)
+  })
+
+  it("the FK is real: a linked_trade_id pointing at no trade is rejected", async () => {
+    const { h, pfId } = await pfWithBuy()
+    await expect(leg(h, pfId, { linkedTradeId: "00000000-0000-0000-0000-000000000000" })).rejects.toThrow()
+  })
+
+  it("the migration's backfill derivation links a suffixed row to its trade", async () => {
+    // Asserted on the rule the 0014 migration uses, on a hand-built pair, because
+    // PGlite applies migrations before any test data exists and can therefore
+    // never exercise a backfill on PROD's shape.
+    const { h, pfId, txId } = await pfWithBuy()
+    const cash = await leg(h, pfId, { externalSource: "google-sheets", externalId: "r120#d" })
+    await h.db
+      .update(portfolioTransactions)
+      .set({ externalSource: "google-sheets", externalId: "r120" })
+      .where(eq(portfolioTransactions.id, txId))
+
+    // exactly the 0014 UPDATE … FROM (IS NOT DISTINCT FROM only so the assertion
+    // can read the row back on a NULL-safe match; the migration's plain `=`
+    // requires both to be set, which they are for every imported row)
+    const before = await h.db
+      .select({ linkedTradeId: portfolioCashTransactions.linkedTradeId })
+      .from(portfolioCashTransactions)
+      .where(eq(portfolioCashTransactions.id, cash.id))
+    expect(before[0].linkedTradeId).toBeNull()
+
+    await h.db.execute(sql`
+      UPDATE portfolios.portfolio_cash_transactions c
+         SET linked_trade_id = t.id
+        FROM portfolios.transactions t
+       WHERE c.linked_trade_id IS NULL
+         AND (c.external_id LIKE '%#d' OR c.external_id LIKE '%#w' OR c.external_id LIKE '%#t')
+         AND left(c.external_id, length(c.external_id) - 2) = t.external_id
+         AND c.external_source IS NOT DISTINCT FROM t.external_source
+    `)
+    const [after] = await h.db
+      .select({ linkedTradeId: portfolioCashTransactions.linkedTradeId })
+      .from(portfolioCashTransactions)
+      .where(eq(portfolioCashTransactions.id, cash.id))
+    expect(after.linkedTradeId).toBe(txId)
   })
 })

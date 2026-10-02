@@ -120,6 +120,20 @@ export const portfolioCashTransactions = portfoliosSchema.table(
     feeCurrency: char("fee_currency", { length: 3 }),
     toPortfolioId: uuid("to_portfolio_id").references(() => portfolios.id, { onDelete: "cascade" }),
     linkedTxId: uuid("linked_tx_id"),
+    /**
+     * §87.2 — the TRADE this cash leg belongs to (a `#d` deposit funding a buy, a
+     * `#w` withdrawal taking out sell proceeds). Nullable on purpose: AU=0 trades
+     * and hand-written `Wpłata`/`Wypłata` have no trade and stay NULL.
+     *
+     * The key is on the cash row, NOT on the trade, so both deletes work with no
+     * application logic: `ON DELETE CASCADE` takes the cash leg when the trade
+     * goes, and deleting the cash row leaves the trade alone because the link
+     * *was* the row. Distinct from {@link linkedTxId}, which is the cash↔cash
+     * transfer pair (D22).
+     */
+    linkedTradeId: uuid("linked_trade_id").references(() => portfolioTransactions.id, {
+      onDelete: "cascade",
+    }),
     reference: text("reference"),
     exchangeRate: numeric("exchange_rate", { precision: 20, scale: 10 }),
     rateSource: text("rate_source", { enum: ["automatic", "manual"] })
@@ -139,6 +153,7 @@ export const portfolioCashTransactions = portfoliosSchema.table(
   (t) => [
     index("idx_pctx_portfolio").on(t.portfolioId, t.transactionDate),
     index("idx_pctx_user_recent").on(t.userId, t.createdAt.desc()),
+    index("portfolio_cash_transactions_linked_trade_id_idx").on(t.linkedTradeId),
     uniqueIndex("uq_pctx_external").on(t.externalSource, t.externalId).where(sql`${t.externalId} is not null`),
     check("ck_pctx_type", sql`${t.type} in ('DEPOSIT','WITHDRAWAL','TRANSFER')`),
     check("ck_pctx_fees_type", sql`${t.feesType} in ('fixed','pct')`),

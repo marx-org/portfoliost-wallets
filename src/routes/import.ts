@@ -847,6 +847,39 @@ async function portfolioOwnedById(tx: DB, userId: string, portfolioId: string) {
 }
 
 /**
+ * §87.2 — the cash leg's own external_id carries the documented `#d` / `#w` /
+ * `#t` suffix, so the trade it funds is derivable without any extra field on the
+ * wire. Same derivation as the backfill in `0014_cash_leg_link.sql`, deliberately
+ * identical: an importer that links by a different rule than the migration would
+ * silently leave a second class of unlinked rows.
+ *
+ * Returns NULL for an unsuffixed id — that is the right answer, not a failure:
+ * a hand-written `Wpłata`/`Wypłata` and Equate+'s TRANSFER *debit* leg both carry
+ * the sheet's own id and have no trade to point at.
+ */
+const CASH_LEG_SUFFIX = /#[dwt]$/
+
+async function resolveLinkedTradeId(
+  tx: DB,
+  source: { externalSource: string },
+  cashExternalId: string,
+): Promise<string | null> {
+  if (!CASH_LEG_SUFFIX.test(cashExternalId)) return null
+  const tradeExternalId = cashExternalId.slice(0, -2)
+  const [trade] = await tx
+    .select({ id: portfolioTransactions.id })
+    .from(portfolioTransactions)
+    .where(
+      and(
+        eq(portfolioTransactions.externalSource, source.externalSource),
+        eq(portfolioTransactions.externalId, tradeExternalId),
+      ),
+    )
+    .limit(1)
+  return trade?.id ?? null
+}
+
+/**
  * Imported portfolio cash leg (§62, plan 62.5). The stored amount is the
  * row's SIGNED own-currency effect: DEPOSIT +|amount|, WITHDRAWAL −|amount|
  * (sign clamp, §58.3), TRANSFER as sent. A TRANSFER resolves
@@ -911,6 +944,11 @@ async function insertImportPortfolioCashTx(
         portfolioId,
         amount: scale8(amount),
         externalId: row.externalId,
+        // §87.2 — set in the SAME transaction as the insert, so a partial import
+        // cannot leave the leg unlinked. The mapper emits the trade leg first, so
+        // the trade is already on the row here; the reverse direction is covered
+        // by `linkCashLegsToTrade` after the trade insert.
+        linkedTradeId: await resolveLinkedTradeId(tx, source, row.externalId),
       })
       .onConflictDoNothing()
       .returning()
@@ -976,6 +1014,11 @@ async function insertImportPortfolioCashTx(
       transferFxRate: rate !== 1 ? String(rate) : null,
       targetAmount: scale8(targetAmount),
       externalId: row.externalId,
+      // §87.2 — NULL in practice: the debit leg carries the sheet's unsuffixed id
+      // (it shares it with the sale it simulates), and the suffix rule is the one
+      // the 0014 backfill uses. The `#t` credit leg below is what links to the
+      // trade, so deleting an Equate+ sale still takes the derived cash with it.
+      linkedTradeId: await resolveLinkedTradeId(tx, source, row.externalId),
     })
     .onConflictDoNothing()
     .returning()
@@ -997,6 +1040,9 @@ async function insertImportPortfolioCashTx(
       reference: c.reference ? `${c.reference} (→ ${toName})` : `→ ${toName}`,
       externalId: `${row.externalId}#t`,
       linkedTxId: debit.id,
+      // §87.2 — `#t` is the server-created counterpart of the SALE, so it links to
+      // that trade (which lives in the source portfolio, one row over).
+      linkedTradeId: await resolveLinkedTradeId(tx, source, `${row.externalId}#t`),
     })
     .onConflictDoNothing()
     .returning()
@@ -1201,7 +1247,40 @@ async function insertImportPortfolioTx(
       .values(transactionLabelIds.map((labelId) => ({ transactionId: inserted.id, labelId })))
   }
 
+  // §87.2 — the mirror of the link set at cash-insert time. A trade and its cash
+  // leg are two separate rows of the batch (each in its own transaction), so the
+  // leg can land first — a partially-failed import is enough. Catching up here
+  // means the link exists whichever order they arrived in, and the UPDATE is a
+  // no-op in the normal case.
+  await linkCashLegsToTrade(tx, source, inserted)
+
   return inserted
+}
+
+/**
+ * §87.2 — attach every already-imported cash leg whose external_id is this
+ * trade's id plus a `#d`/`#w`/`#t` suffix. Same suffix rule as
+ * `resolveLinkedTradeId` and as the `0014_cash_leg_link` backfill.
+ */
+async function linkCashLegsToTrade(
+  tx: DB,
+  source: { externalSource: string },
+  trade: { id: string; externalId: string | null },
+) {
+  if (!trade.externalId) return
+  await tx
+    .update(portfolioCashTransactions)
+    .set({ linkedTradeId: trade.id })
+    .where(
+      and(
+        eq(portfolioCashTransactions.externalSource, source.externalSource),
+        inArray(portfolioCashTransactions.externalId, [
+          `${trade.externalId}#d`,
+          `${trade.externalId}#w`,
+          `${trade.externalId}#t`,
+        ]),
+      ),
+    )
 }
 
 /** §55.1: label names → ids for this user; unknown name → row error. */

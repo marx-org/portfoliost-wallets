@@ -1445,3 +1445,134 @@ describe("§72.8 — a resolved listing currency beats the payment currency", ()
     expect(pos.instrumentCurrency).toBe("GBP")
   })
 })
+
+/**
+ * §87.2 — the import sets the trade ↔ cash-leg link.
+ *
+ * A trade and its cash leg are TWO rows of the batch (the mapper emits a trade
+ * leg and, for a funded row, a `#d`/`#w` leg), and each is inserted in its own
+ * database transaction. So the link cannot be "passed in" — it has to be derived,
+ * and it has to survive either arrival order: a batch where the cash row's
+ * transaction failed leaves the leg in place with its trade yet to come.
+ */
+describe("§87.2: the import links a cash leg to its trade", () => {
+  const BUY = (pfId: string) => ({
+    portfolioId: pfId,
+    type: "BUY",
+    instrumentSymbol: "XXX",
+    quantity: 10,
+    price: 100,
+    currency: "PLN",
+  })
+
+  async function cashRows(h: Harness) {
+    return h.db.select().from(portfolioCashTransactions)
+  }
+
+  it("trade first, then its #d deposit: the leg carries linked_trade_id", async () => {
+    const h = await boot()
+    const { portfolioId } = await seedPortfolio(h)
+    const res = await postTransactions(h, [
+      { externalId: "r120", portfolioName: "Transakcje", executedAt: "2024-01-01T00:00:00.000Z", portfolioTx: BUY(portfolioId) },
+      { externalId: "r120#d", portfolioName: "Transakcje", executedAt: "2024-01-01T00:00:00.000Z",
+        cashTx: { type: "DEPOSIT", amount: 1000, currency: "PLN" } },
+    ])
+    expect((await res.json()).errors).toEqual([])
+
+    const [trade] = await h.db.select().from(portfolioTransactions).where(eq(portfolioTransactions.externalId, "r120"))
+    const [leg] = await cashRows(h)
+    expect(leg.externalId).toBe("r120#d")
+    expect(leg.linkedTradeId).toBe(trade.id)
+  })
+
+  it("a #w withdrawal leg links to its sell just the same", async () => {
+    const h = await boot()
+    const { portfolioId } = await seedPortfolio(h)
+    await postTransactions(h, [
+      // the SELL needs a lot to sell first
+      { externalId: "r120b", portfolioName: "Transakcje", executedAt: "2024-01-01T00:00:00.000Z", portfolioTx: BUY(portfolioId) },
+      { externalId: "r121", portfolioName: "Transakcje", executedAt: "2024-02-01T00:00:00.000Z",
+        portfolioTx: { ...BUY(portfolioId), type: "SELL", quantity: 10, price: 120 } },
+      { externalId: "r121#w", portfolioName: "Transakcje", executedAt: "2024-02-01T00:00:00.000Z",
+        cashTx: { type: "WITHDRAWAL", amount: 1200, currency: "PLN", description: "Withdrawal: XXX" } },
+    ])
+    const [trade] = await h.db.select().from(portfolioTransactions).where(eq(portfolioTransactions.externalId, "r121"))
+    const [leg] = await cashRows(h)
+    // the sign is the server's clamp, not the sheet's
+    expect(Number(leg.amount)).toBe(-1200)
+    expect(leg.linkedTradeId).toBe(trade.id)
+  })
+
+  it("cash leg FIRST (the partially-failed order): the trade insert catches the link up", async () => {
+    const h = await boot()
+    const { portfolioId } = await seedPortfolio(h)
+    await postTransactions(h, [
+      { externalId: "r130#d", portfolioName: "Transakcje", executedAt: "2024-01-01T00:00:00.000Z",
+        cashTx: { type: "DEPOSIT", amount: 1000, currency: "PLN" } },
+    ])
+    const [orphan] = await cashRows(h)
+    // nothing to point at yet — and that is not an error state, just an early one
+    expect(orphan.linkedTradeId).toBeNull()
+
+    await postTransactions(h, [
+      { externalId: "r130", portfolioName: "Transakcje", executedAt: "2024-01-01T00:00:00.000Z", portfolioTx: BUY(portfolioId) },
+    ])
+    const [trade] = await h.db.select().from(portfolioTransactions).where(eq(portfolioTransactions.externalId, "r130"))
+    const [after] = await h.db.select().from(portfolioCashTransactions)
+    expect(after.linkedTradeId).toBe(trade.id)
+  })
+
+  it("a hand-written Wpłata (unsuffixed id) stays unlinked — no trade, no key", async () => {
+    const h = await boot()
+    await seedPortfolio(h)
+    await postTransactions(h, [
+      { externalId: "r999", portfolioName: "Transakcje", executedAt: "2024-01-01T00:00:00.000Z",
+        cashTx: { type: "DEPOSIT", amount: 500, currency: "PLN" } },
+    ])
+    const [leg] = await cashRows(h)
+    expect(leg.externalId).toBe("r999")
+    expect(leg.linkedTradeId).toBeNull()
+  })
+
+  it("an AU=0 trade (no cash leg at all) has nothing to link", async () => {
+    const h = await boot()
+    const { portfolioId } = await seedPortfolio(h)
+    await postTransactions(h, [
+      { externalId: "r140", portfolioName: "Transakcje", executedAt: "2024-01-01T00:00:00.000Z", portfolioTx: BUY(portfolioId) },
+    ])
+    expect(await cashRows(h)).toHaveLength(0)
+    expect(
+      await h.db.select().from(portfolioTransactions).where(eq(portfolioTransactions.externalId, "r140")),
+    ).toHaveLength(1)
+  })
+
+  it("a sale-proceeds transfer: the #t credit leg links to the sale, the debit leg stays unlinked", async () => {
+    // Equate+ (SALE_PROCEEDS_TO in the mapper) posts the TRANSFER under the SALE's
+    // own externalId, so the debit leg is indistinguishable from a hand-written
+    // row by id alone — deliberately out of the suffix rule, in the migration and
+    // here alike. The `#t` credit leg is what carries the link.
+    const h = await boot()
+    const { portfolioId } = await seedPortfolio(h)
+    const ibkrId = crypto.randomUUID()
+    await h.db.insert(portfolios).values({ userId: "user-1", id: ibkrId, name: "IBKR", baseCurrency: "EUR" })
+
+    await postTransactions(h, [
+      { externalId: "eq-0", portfolioName: "Transakcje", executedAt: "2024-01-01T00:00:00.000Z", portfolioTx: BUY(portfolioId) },
+      { externalId: "eq-1", portfolioName: "Transakcje", executedAt: "2024-03-01T00:00:00.000Z",
+        portfolioTx: { ...BUY(portfolioId), type: "SELL", currency: "EUR" } },
+      { externalId: "eq-1", portfolioName: "Transakcje", executedAt: "2024-03-01T00:00:00.000Z",
+        cashTx: { type: "TRANSFER", amount: -100, currency: "EUR", toPortfolioName: "IBKR" } },
+    ])
+
+    const [sale] = await h.db.select().from(portfolioTransactions).where(eq(portfolioTransactions.externalId, "eq-1"))
+    const legs = await cashRows(h)
+    const debit = legs.find((l) => l.portfolioId === portfolioId)!
+    const credit = legs.find((l) => l.portfolioId === ibkrId)!
+    expect(credit.externalId).toBe("eq-1#t")
+    expect(credit.linkedTradeId).toBe(sale.id)
+    expect(debit.linkedTradeId).toBeNull()
+    // the cash↔cash pair link is untouched by all of this
+    expect(debit.linkedTxId).toBe(credit.id)
+    expect(credit.linkedTxId).toBe(debit.id)
+  })
+})
