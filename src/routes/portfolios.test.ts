@@ -447,7 +447,19 @@ describe("GET /api/portfolios/merged (§46, §41 follow-up 1)", () => {
       // and explicitly NOT the answer a hardcoded "USD" target would have produced
       const intoUsd = 1100 + 4400 * crossRate("PLN", "USD", { EUR: 1, USD: 1.08, PLN: 4.3 })! + 2200 * crossRate("PLN", "USD", { EUR: 1, USD: 1.08, PLN: 4.3 })!
       expect(last.value).not.toBeCloseTo(intoUsd, 2)
-      expect(body.performance.monthlyReturns).toEqual([])
+      // §83.2 — the Returns Chart's month series exists on the aggregate now,
+      // derived from the same buildMonthlyReturns `/:id/analytics` uses. One
+      // month here, so a single bar: Sept's aggregate return.
+      expect(body.performance.monthlyReturns).toHaveLength(1)
+      expect(body.performance.monthlyReturns[0].month).toBe("2026-09")
+      // Not 10% — the aggregate is ONE account, so the day is worth
+      // (ΣV₂ / ΣV₁) − 1 = 10979.6/10431.5 − 1, in which the 10%-gaining USD
+      // portfolio is the minority of the money. A per-portfolio average would
+      // say 10% and would be a claim about no portfolio at all.
+      expect(body.performance.monthlyReturns[0].returnPercent).toBeCloseTo(5.25, 2)
+      // §82.1's withholding predicate, shared with the per-portfolio tab.
+      expect(body.performance.annualizedReturn).toBeNull()
+      expect(body.performance.annualizedReturnWithheldReason).toBe("insufficient_history")
       expect(body.benchmarks).toEqual([])
     } finally {
       unmockInstrumentsFx()
@@ -472,7 +484,7 @@ describe("GET /api/portfolios/merged (§46, §41 follow-up 1)", () => {
     expect(body.benchmarks).toEqual([])
   })
 
-  it("returns pending + fires backfill when any portfolio has < 2 snapshots and backfillable history", async () => {
+  it("returns pending AND the other portfolios' series when one has < 2 snapshots and backfillable history", async () => {
     const h = await makeHarness("merged-pending")
     const a = app(h.db)
     // Two snapshots — has series.
@@ -499,7 +511,12 @@ describe("GET /api/portfolios/merged (§46, §41 follow-up 1)", () => {
     expect(res.status).toBe(200)
     const body = await res.json()
     expect(body.backfillStatus).toBe("pending")
-    expect(body.performance.timeSeries).toEqual([])
+    // §83.2 — the flag and the partial sum together. This used to be an EMPTY
+    // series: one brand-new portfolio erased every other portfolio's history
+    // from a view whose entire purpose is the cumulative total.
+    expect(body.performance.timeSeries).toHaveLength(2)
+    expect(body.performance.totalValue).toBe(600)
+    expect(body.performance.timeWeightedReturn).toBe(20)
     expect(body.benchmarks).toEqual([])
 
     // Clean up: nothing should have been enqueued, but keep the runner state

@@ -8,6 +8,7 @@ import {
   buildMergedPerformance,
   sumSnapshotsByDate,
   sumSnapshotsByDateForwardFilled,
+  type MergedPoint,
   type SnapshotRow,
 } from "./mergedAnalytics.js"
 
@@ -17,6 +18,22 @@ const TABLE = { USD: 1.08, PLN: 4.3, EUR: 1 }
 const RATES = (from: string): number | null => crossRate(from, "USD", TABLE) ?? null
 const NULL_RATES = (_from: string): number | null => null
 
+/**
+ * §83.2 — the shape both sum functions return. The three added columns are
+ * spelled out rather than defaulted at the call site so every existing
+ * expectation below states what it now claims: no flow, and the withheld amounts
+ * UNMEASURED (a fixture that does not supply them is a fixture from before the
+ * columns existed, which is the case `null` is for).
+ */
+function merged(
+  date: string,
+  value: number,
+  invested: number,
+  over: Partial<MergedPoint> = {},
+): MergedPoint {
+  return { date, value, invested, netFlow: 0, unpricedValue: null, carriedValue: null, ...over }
+}
+
 describe("sumSnapshotsByDate (§46.1)", () => {
   it("single portfolio in its own currency == its own series, no FX", () => {
     const rows: SnapshotRow[] = [
@@ -24,8 +41,8 @@ describe("sumSnapshotsByDate (§46.1)", () => {
       { baseCurrency: "USD", snapshotDate: "2026-01-02", value: 1100, invested: 900 },
     ]
     expect(sumSnapshotsByDate(rows, RATES, "USD")).toEqual([
-      { date: "2026-01-01", value: 1000, invested: 900 },
-      { date: "2026-01-02", value: 1100, invested: 900 },
+      merged("2026-01-01", 1000, 900),
+      merged("2026-01-02", 1100, 900),
     ])
   })
 
@@ -52,7 +69,7 @@ describe("sumSnapshotsByDate (§46.1)", () => {
       { baseCurrency: "ZZZ", snapshotDate: "2026-01-01", value: 5000, invested: 4000 },
     ]
     const result = sumSnapshotsByDate(rows, RATES, "USD")
-    expect(result).toEqual([{ date: "2026-01-01", value: 1000, invested: 900 }])
+    expect(result).toEqual([merged("2026-01-01", 1000, 900)])
   })
 
   it("with no rates table at all, only same-currency rows survive", () => {
@@ -61,7 +78,7 @@ describe("sumSnapshotsByDate (§46.1)", () => {
       { baseCurrency: "PLN", snapshotDate: "2026-01-01", value: 4300, invested: 4000 },
     ]
     expect(sumSnapshotsByDate(rows, NULL_RATES, "USD")).toEqual([
-      { date: "2026-01-01", value: 1000, invested: 900 },
+      merged("2026-01-01", 1000, 900),
     ])
   })
 
@@ -91,12 +108,14 @@ describe("sumSnapshotsByDateForwardFilled (§63 follow-up)", () => {
       { portfolioId: "A", baseCurrency: "USD", snapshotDate: "2026-01-02", value: 1200, invested: 800 },
     ]
     expect(sumSnapshotsByDate(rows, RATES, "USD")).toEqual([
-      { date: "2026-01-01", value: 1500, invested: 1200 },
-      { date: "2026-01-02", value: 1200, invested: 800 }, // B dropped out
+      merged("2026-01-01", 1500, 1200),
+      merged("2026-01-02", 1200, 800), // B dropped out
     ])
     expect(sumSnapshotsByDateForwardFilled(rows, RATES, "USD")).toEqual([
-      { date: "2026-01-01", value: 1500, invested: 1200 },
-      { date: "2026-01-02", value: 1700, invested: 1200 }, // B carried forward
+      merged("2026-01-01", 1500, 1200),
+      // B carried forward — and §83.2: 0 flow, because nobody moved money into
+      // B on the 2nd. Its slice of that day's return is 0, not a guess.
+      merged("2026-01-02", 1700, 1200),
     ])
   })
 
@@ -106,8 +125,8 @@ describe("sumSnapshotsByDateForwardFilled (§63 follow-up)", () => {
       { portfolioId: "B", baseCurrency: "USD", snapshotDate: "2026-01-02", value: 300, invested: 300 },
     ]
     expect(sumSnapshotsByDateForwardFilled(rows, RATES, "USD")).toEqual([
-      { date: "2026-01-01", value: 1000, invested: 800 },
-      { date: "2026-01-02", value: 1300, invested: 1100 },
+      merged("2026-01-01", 1000, 800),
+      merged("2026-01-02", 1300, 1100),
     ])
   })
 
@@ -129,8 +148,8 @@ describe("sumSnapshotsByDateForwardFilled (§63 follow-up)", () => {
       { portfolioId: "B", baseCurrency: "ZZZ", snapshotDate: "2026-01-02", value: 500, invested: 500 },
     ]
     expect(sumSnapshotsByDateForwardFilled(rows, RATES, "USD")).toEqual([
-      { date: "2026-01-01", value: 1000, invested: 800 },
-      { date: "2026-01-02", value: 1000, invested: 800 },
+      merged("2026-01-01", 1000, 800),
+      merged("2026-01-02", 1000, 800),
     ])
     expect(sumSnapshotsByDateForwardFilled([], RATES, "USD")).toEqual([])
   })
@@ -146,11 +165,11 @@ describe("sumSnapshotsByDateForwardFilled (§63 follow-up)", () => {
   })
 })
 
-describe("buildMergedPerformance (§46.1)", () => {
+describe("buildMergedPerformance (§46.1 money totals, §83.2 return columns)", () => {
   it("derives totalValue/totalInvested/totalReturn from the last point", () => {
     const perf = buildMergedPerformance([
-      { date: "2026-01-01", value: 1000, invested: 800 },
-      { date: "2026-01-02", value: 1200, invested: 800 },
+      merged("2026-01-01", 1000, 800),
+      merged("2026-01-02", 1200, 800),
     ])
     expect(perf.totalValue).toBe(1200)
     expect(perf.totalInvested).toBe(800)
@@ -158,10 +177,30 @@ describe("buildMergedPerformance (§46.1)", () => {
     expect(perf.totalReturnPercent).toBeCloseTo(50, 6)
     // the "invested" line (cumulative net money-in) rides along per point
     expect(perf.timeSeries).toEqual([
-      { date: "2026-01-01", value: 1000, invested: 800 },
-      { date: "2026-01-02", value: 1200, invested: 800 },
+      { date: "2026-01-01", value: 1000, invested: 800, cumulativeTwr: 100, unpricedValue: undefined, carriedValue: undefined },
+      { date: "2026-01-02", value: 1200, invested: 800, cumulativeTwr: 120, unpricedValue: undefined, carriedValue: undefined },
     ])
-    expect(perf.monthlyReturns).toEqual([])
+  })
+
+  it("chains the aggregate TWR off the summed value and the summed flow", () => {
+    // 1200 / 1000 − 1 = +20%, 100-based index 100 → 120.
+    const perf = buildMergedPerformance([
+      merged("2026-01-01", 1000, 800),
+      merged("2026-01-02", 1200, 800),
+    ])
+    expect(perf.timeWeightedReturn).toBe(20)
+    expect(perf.simpleReturnPercent).toBe(20)
+    // Two points and one day: §82.1's shared predicate withholds, so the
+    // aggregate tile shows "—" exactly when the per-portfolio tile would.
+    expect(perf.annualizedReturn).toBeNull()
+    expect(perf.annualizedReturnWithheldReason).toBe("insufficient_history")
+    expect(perf.monthlyReturns).toEqual([{ month: "2026-01", returnPercent: 20 }])
+  })
+
+  it("claims no return from a single point", () => {
+    // One point is a LEVEL. There is no prior day to difference, so there is no
+    // return to report — the old hard-null was right about this one case.
+    const perf = buildMergedPerformance([merged("2026-01-01", 1000, 800)])
     expect(perf.timeWeightedReturn).toBeNull()
     expect(perf.moneyWeightedReturn).toBeNull()
     expect(perf.simpleReturnPercent).toBeUndefined()
@@ -174,6 +213,7 @@ describe("buildMergedPerformance (§46.1)", () => {
     expect(perf.totalReturn).toBe(0)
     expect(perf.totalReturnPercent).toBe(0)
     expect(perf.timeSeries).toEqual([])
+    expect(perf.monthlyReturns).toEqual([])
   })
 })
 /**
@@ -339,5 +379,99 @@ describe("§63.3: the consolidated series is Σ positions + cash", () => {
     // a merge that read only the LAST row per portfolio would still pass a
     // one-deposit test.
     expect(merged.totalValue).toBe(3 * 1000 + 3 * 2500)
+  })
+})
+
+/** §83.2 — the INPUT shape. `merged()` above is the sum's OUTPUT shape. */
+function row(
+  portfolioId: string,
+  snapshotDate: string,
+  value: number,
+  invested: number,
+  over: Partial<SnapshotRow> = {},
+): SnapshotRow {
+  return { portfolioId, baseCurrency: "USD", snapshotDate, value, invested, ...over }
+}
+
+/**
+ * §83.2 — the aggregate's return columns are only usable if money moving does not
+ * read as performance. These pin that, on the aggregate path, with the same
+ * invariant §81.1 established per portfolio.
+ */
+describe("§83.2: the aggregate TWR ignores money moving in or between portfolios", () => {
+  /** day1: A=1000, B=500 (both fully funded by their opening flow). */
+  const DAY1 = [row("A", "2026-01-01", 1000, 1000, { netFlow: 1000 }), row("B", "2026-01-01", 500, 500, { netFlow: 500 })]
+  const perf = (day2: SnapshotRow[]) =>
+    buildMergedPerformance(sumSnapshotsByDateForwardFilled([...DAY1, ...day2], RATES, "USD"))
+
+  const STILL = [row("A", "2026-01-02", 1000, 1000), row("B", "2026-01-02", 500, 500)]
+  const DEPOSIT = [row("A", "2026-01-02", 1300, 1300, { netFlow: 300 }), row("B", "2026-01-02", 500, 500)]
+  const TRANSFER = [row("A", "2026-01-02", 700, 700), row("B", "2026-01-02", 800, 800)]
+
+  it("a deposit into one of two portfolios leaves the aggregate return unchanged", () => {
+    // The test §83.2 exists for: without `net_flow` in the /merged SELECT, the
+    // 1800/1500 step reads as a +20% day and the user's own deposit is reported
+    // as a gain. This is the assertion that would have caught it.
+    expect(perf(DEPOSIT).timeWeightedReturn).toBe(perf(STILL).timeWeightedReturn)
+    expect(perf(DEPOSIT).timeWeightedReturn).toBe(0)
+    // …while the money is still visibly there. "Unchanged return" must not mean
+    // "deposit ignored".
+    expect(perf(DEPOSIT).totalValue).toBe(1800)
+    expect(perf(DEPOSIT).totalInvested).toBe(1800)
+  })
+
+  it("an internal transfer between two of the user's own portfolios leaves it unchanged", () => {
+    // Both legs are external-only-excluded per portfolio (§62.4/D50), so neither
+    // reaches the aggregate flow map and the aggregate value is the same number
+    // either way. A transfer that moved the return would mean a portfolio's own
+    // money was priced as if it were a market move.
+    expect(perf(TRANSFER).timeWeightedReturn).toBe(perf(STILL).timeWeightedReturn)
+    expect(perf(TRANSFER).totalValue).toBe(1500)
+  })
+
+  it("Π(1 + monthlyReturns) reconciles to the last cumulativeTwr", () => {
+    const rows: SnapshotRow[] = []
+    let value = 1000
+    for (const [i, day] of ["2026-01-31", "2026-02-28", "2026-03-31", "2026-04-30"].entries()) {
+      if (i > 0) value *= 1.1
+      rows.push(row("A", day, value, 1000))
+    }
+    const p = buildMergedPerformance(sumSnapshotsByDateForwardFilled(rows, RATES, "USD"))
+    const compounded = p.monthlyReturns.reduce((acc, m) => acc * (1 + m.returnPercent / 100), 1)
+    const last = p.timeSeries[p.timeSeries.length - 1].cumulativeTwr!
+    expect(compounded).toBeCloseTo(last / 100, 4)
+    // …and the series really does span the months, or that reconciliation is
+    // over one bucket and proves nothing.
+    expect(p.monthlyReturns.map((m) => m.month)).toEqual(["2026-01", "2026-02", "2026-03", "2026-04"])
+  })
+
+  it("sums the withheld amounts only while every portfolio measured them", () => {
+    // §78.5's rule, restated for the aggregate: `null` means "not measured", and
+    // the column default is 0, so summing it as 0 would report "nothing withheld"
+    // on exactly the series that most need the warning.
+    const measured = sumSnapshotsByDateForwardFilled(
+      [
+        row("A", "2026-01-01", 1000, 1000, { unpricedValue: 40, carriedValue: 10 }),
+        row("B", "2026-01-01", 500, 500, { unpricedValue: 5, carriedValue: 1 }),
+      ],
+      RATES,
+      "USD",
+    )
+    expect(measured[0].unpricedValue).toBe(45)
+    expect(measured[0].carriedValue).toBe(11)
+
+    const oneUnknown = sumSnapshotsByDateForwardFilled(
+      [
+        row("A", "2026-01-01", 1000, 1000, { unpricedValue: 40 }),
+        row("B", "2026-01-01", 500, 500, { unpricedValue: null }),
+      ],
+      RATES,
+      "USD",
+    )
+    expect(oneUnknown[0].unpricedValue).toBeNull()
+    expect(oneUnknown[0].carriedValue).toBeNull()
+    // …and the chart sees an absent field, so it can say "unknown" rather than
+    // "complete".
+    expect(buildMergedPerformance(oneUnknown).timeSeries[0].unpricedValue).toBeUndefined()
   })
 })

@@ -24,7 +24,7 @@ import {
   annualizedReturnWithheldReason,
   computeRiskMetrics,
 } from "../services/riskMetrics.js"
-import { buildDailyReturns } from "../services/returnColumns.js"
+import { buildDailyReturns, buildMonthlyReturns } from "../services/returnColumns.js"
 import { resolveRates, fxTo } from "../services/instruments-fx.js"
 import { sumSnapshotsByDateForwardFilled, buildMergedPerformance } from "../services/mergedAnalytics.js"
 import { createTransactionRoutes } from "./portfolio-transactions.js"
@@ -157,29 +157,44 @@ export function timeframeCutoff(timeframe: string, now = new Date()): string | n
   return null
 }
 
-/** Group daily values by YYYY-MM; return monthly return % per month. */
-function buildMonthlyReturns(
-  series: Array<{ date: string; cumulativeTwr: number | null }>,
-): Array<{ month: string; returnPercent: number }> {
-  // Month-over-month growth of the already flow-adjusted TWR index, so a
-  // deposit inflating the raw value does not inflate the monthly return.
-  const byMonth = new Map<string, number>()
-  for (const { date, cumulativeTwr } of series) {
-    const month = date.slice(0, 7)
-    if (cumulativeTwr == null) continue
-    byMonth.set(month, cumulativeTwr)
-  }
-  let prevTwr = 100
-  return [...byMonth.entries()]
-    .sort(([a], [b]) => a.localeCompare(b))
-    .map(([month, lastTwr]) => {
-      const returnPercent = prevTwr > 0 ? Math.round(((lastTwr / prevTwr - 1) * 100) * 100) / 100 : 0
-      prevTwr = lastTwr
-      return { month, returnPercent }
-    })
-}
+// ---------------------------------------------------------------------------
+// §83.2 — buildMonthlyReturns moved to services/returnColumns.ts, so `/merged`
+// derives months from the SAME month-boundary rule as this route.
+// ---------------------------------------------------------------------------
 
 // ── Routes ─────────────────────────────────────────────────────────────
+
+/**
+ * §83.2 — the per-portfolio gap-symbol claims, unioned for `/merged`.
+ *
+ * A union, deliberately, not a re-derivation: each portfolio's list is written
+ * by its own last backfill pass (§72.30's `gapSymbols` = the stored history is a
+ * partial sum, `heldGapSymbols` = today's value is short), and re-deriving the
+ * union would be a fourth definition of the same claim. Null — not `[]` — when
+ * no portfolio reports one, which is §72.30's "no confirmed gap" rather than an
+ * assertion that none exists.
+ */
+async function aggregateGapSymbols(
+  db: DB,
+  portfolioIds: string[],
+): Promise<{ gapSymbols: string[] | null; heldGapSymbols: string[] | null }> {
+  const perPortfolio = await Promise.all(portfolioIds.map((id) => getGapSymbols(db, id)))
+  const union = (pick: (g: Awaited<ReturnType<typeof getGapSymbols>>) => string[] | null) => {
+    const all = new Set<string>()
+    let sawClaim = false
+    for (const g of perPortfolio) {
+      const list = pick(g)
+      if (!list) continue
+      sawClaim = true
+      for (const s of list) all.add(s)
+    }
+    return sawClaim && all.size > 0 ? [...all].sort() : null
+  }
+  return {
+    gapSymbols: union((g) => g.gapSymbols),
+    heldGapSymbols: union((g) => g.heldGapSymbols),
+  }
+}
 
 export function createPortfolioRoutes(db?: DB) {
   const routes = new Hono()
@@ -750,40 +765,18 @@ async function resolveAggregateBase(
         .where(eq(valueSnapshots.portfolioId, p.id))
       if (n < 2 && (await hasBackfillableHistory(database, p.id))) pendingIds.push(p.id)
     }
-    if (pendingIds.length > 0) {
-      // §72.7 — this used to fire a backfill from a GET. Removed deliberately:
-      // browsing a page should not mutate state, and it was actively harmful.
-      //
-      // `enqueueBackfill` keys its queue by portfolioId and REPLACES a queued
-      // pass's run function. So loading the dashboard mid-rebuild silently
-      // downgraded the import's `recalcPortfolioHistory` (which ends with a
-      // pricing pass, §72.6) to a plain `runBackfill` (which does not). During
-      // the 2026-09-28 wipe that is why 8 of 10 portfolios came back with a full
-      // snapshot history and 51 positions still unpriced: the two whose recalc
-      // was already RUNNING survived, and every one still QUEUED was replaced.
-      //
-      // Nothing needs this to seed a new portfolio: POST /:id/positions calls
-      // notifyTransactionsChanged, which enqueues the full recalc. What is lost
-      // is read-side self-healing for a portfolio whose history is empty for
-      // some other reason — that now takes an explicit POST /:id/recompute,
-      // which is the right place for a rebuild to be asked for.
-      //
-      // The pending check stays: reporting that a portfolio is mid-rebuild is a
-      // read, and the UI needs it to say so.
-      return c.json({
-        timeframe,
-        backfillStatus: "pending",
-        performance: {
-          timeSeries: [],
-          totalValue: 0,
-          totalInvested: 0,
-          totalReturn: 0,
-          totalReturnPercent: 0,
-          monthlyReturns: [],
-        },
-        benchmarks: [],
-      } satisfies components["schemas"]["PortfolioAnalytics"])
-    }
+    // §72.7 — this used to fire a backfill from a GET, and it also used to
+    // RETURN AN EMPTY SERIES when anything was pending: one brand-new portfolio
+    // erased every other portfolio's history from a view whose entire purpose is
+    // the cumulative total. §83.2 reports the flag and the partial sum together —
+    // reporting that a portfolio is mid-rebuild is a read, mutating from a GET is
+    // not, and neither requires hiding what the other nine portfolios have.
+    //
+    // Nothing needs this to seed a new portfolio: POST /:id/positions calls
+    // notifyTransactionsChanged, which enqueues the full recalc. What is lost by
+    // not firing here is read-side self-healing for a portfolio whose history is
+    // empty for some other reason — that now takes an explicit POST /:id/recompute,
+    // which is the right place for a rebuild to be asked for.
 
     const cutoff = timeframeCutoff(timeframe)
     const rows = await database
@@ -793,6 +786,16 @@ async function resolveAggregateBase(
         snapshotDate: valueSnapshots.snapshotDate,
         value: valueSnapshots.value,
         invested: valueSnapshots.invested,
+        // §83.2 — the aggregate's return columns are only as honest as the flow
+        // they are computed from. Without `net_flow` there is no TWR on
+        // `/merged` at all (see mergedAnalytics.ts).
+        netFlow: valueSnapshots.netFlow,
+        // §83.2 — the §78.5 / §72.31 honesty amounts. They are what arm
+        // PortfolioPerformanceChart's "this curve is a partial sum" chip, which
+        // would otherwise be silently disarmed on the one screen where a wrong
+        // total is most expensive.
+        unpricedValue: valueSnapshots.unpricedValue,
+        carriedValue: valueSnapshots.carriedValue,
       })
       .from(valueSnapshots)
       .innerJoin(portfolios, eq(valueSnapshots.portfolioId, portfolios.id))
@@ -826,14 +829,27 @@ async function resolveAggregateBase(
         snapshotDate: r.snapshotDate,
         value: Number(r.value),
         invested: Number(r.invested),
+        netFlow: Number(r.netFlow ?? 0),
+        // `null` propagates as "not measured" — see mergedAnalytics.ts addWithheld.
+        unpricedValue: r.unpricedValue === null ? null : Number(r.unpricedValue),
+        carriedValue: r.carriedValue === null ? null : Number(r.carriedValue),
       })),
       (from) => rateMap.get(from.toUpperCase()) ?? null,
       mergedBase,
     )
 
+    const gap = await aggregateGapSymbols(database, portfolioRows.map((p) => p.id))
     return c.json({
       timeframe,
-      backfillStatus: "complete",
+      backfillStatus: pendingIds.length > 0 ? "pending" : "complete",
+      // §83.2 — the union of the per-portfolio claims, NOT a re-derivation: the
+      // chart's message needs a count to sit beside the withheld amount, and the
+      // honest aggregate of "which of my positions have no price" is "all of
+      // them, across every portfolio". `getGapSymbols` is a one-row read per
+      // portfolio, so this is cheap. Null (not []) when no portfolio reports a
+      // gap, which is §72.30's "no confirmed gap" rather than "none exist".
+      gapSymbols: gap.gapSymbols,
+      heldGapSymbols: gap.heldGapSymbols,
       performance: buildMergedPerformance(series),
       benchmarks: [],
     } satisfies components["schemas"]["PortfolioAnalytics"])
