@@ -17,9 +17,13 @@
 import { and, eq, inArray, sql } from "drizzle-orm"
 import type { DB } from "../db/index.js"
 import { portfolioCashTransactions, portfolioTransactions } from "../db/schema.js"
+import { TRADE_CASH_TYPES as CASH_EFFECTING_TX_TYPES } from "../transaction-types.js"
 import { FxRateUnavailableError, fxToOnDay, resolvedFxRate } from "./instruments-fx.js"
 import { debugEnabled, debugLog, fmtCcyMap, fmtCcyRateMap } from "./debug.js"
-const TRADE_CASH_TYPES = ["BUY", "SELL", "DIVIDEND"] as const
+
+// BUY/SELL/DIVIDEND only. An in-kind transfer moves an instrument, not money, and
+// must never reach tradeCashEffects — which credits anything that is not a BUY.
+const TRADE_CASH_TYPES = CASH_EFFECTING_TX_TYPES
 
 /**
  * Normalise a value that may be a Date, ISO string, or timestamptz string to

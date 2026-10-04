@@ -2,6 +2,7 @@ import { Hono, type Context } from "hono"
 import { and, eq, sql, asc, desc, inArray, type SQL } from "drizzle-orm"
 import { z } from "zod"
 import { userIdentityMiddleware } from "../auth.js"
+import { POSITION_TX_TYPES } from "../transaction-types.js"
 import { getDb as resolveDb, type DB } from "../db/index.js"
 import {
   portfolios,
@@ -30,8 +31,8 @@ type Label = components["schemas"]["Label"]
 const scale8 = (n: number) => n.toFixed(8)
 const round2 = (n: number) => Math.round(n * 100) / 100
 
-const TransactionCreateSchema = z.object({
-  type: z.enum(["BUY", "SELL", "DIVIDEND"]),
+export const TransactionCreateSchema = z.object({
+  type: z.enum(POSITION_TX_TYPES),
   symbol: z.string().min(1).max(20),
   instrumentName: z.string().optional(),
   quantity: z.number().positive(),

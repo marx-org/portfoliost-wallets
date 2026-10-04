@@ -7,6 +7,11 @@ import {
   portfolioCashTransactions, portfolioCashTransactionLabels, shares, valueSnapshots,
   labels,
 } from "./schema.js"
+import {
+  POSITION_TX_TYPES, TRADE_CASH_TYPES, TRANSFER_TX_TYPES, isTradeCashType,
+} from "../transaction-types.js"
+import { TransactionCreateSchema } from "../routes/portfolio-transactions.js"
+import { ImportPortfolioTxSchema } from "../routes/import.js"
 
 describe("wallets schema (sync_runs only, §62)", () => {
   it("keeps the dedicated pg schema via migrations (sync_runs home)", async () => {
@@ -209,5 +214,74 @@ describe("portfolios schema (§15, D54)", () => {
     expect(rows.length).toBe(1)
     const empty = await db.select().from(positions).where(sql`${positions.userId} = 'user-b'`)
     expect(empty.length).toBe(0)
+  })
+})
+
+describe("the transaction type set cannot drift from the SQL check", () => {
+  // The set was once declared in five places and the declarations disagreed:
+  // EXPIRATION reached the import route and the database but never the
+  // interactive create route, which then rejected a type the importer accepted.
+  // That was found by reading code, not by a failing test. Reading the live
+  // constraint out of Postgres and comparing it to the exported array is what
+  // turns the next omission into a build failure.
+
+  async function constraintValues(name: string): Promise<string[]> {
+    const { db } = await createTestDb()
+    const rows = await db.execute(sql`
+      select pg_get_constraintdef(oid) as def
+      from pg_constraint
+      where conname = ${name}
+    `)
+    expect(rows.rows.length).toBe(1)
+    const def = String((rows.rows[0] as any).def)
+    // Postgres rewrites the definition on read: it may render
+    // `type in ('BUY'::text, ...)` or `type = ANY (ARRAY['BUY'::text, ...])`
+    // depending on how the predicate was written. Pulling the quoted literals
+    // is stable across both, and these checks quote nothing else.
+    const values = [...def.matchAll(/'([^']+)'/g)].map((m) => m[1])
+    expect(values.length, `could not read the value list out of ${def}`).toBeGreaterThan(0)
+    return values
+  }
+
+  it("ck_ptx_type declares exactly POSITION_TX_TYPES, in order", async () => {
+    expect(await constraintValues("ck_ptx_type")).toEqual([...POSITION_TX_TYPES])
+  })
+
+  it("every Zod route enum is the full set, so no route rejects a valid type", async () => {
+    // The specific regression: portfolio-transactions.ts offered
+    // BUY/SELL/DIVIDEND while the import offered those plus EXPIRATION.
+    const base = {
+      symbol: "AAPL", quantity: 1, price: 1, currency: "USD",
+    }
+    for (const value of POSITION_TX_TYPES) {
+      expect(
+        TransactionCreateSchema.safeParse({ ...base, type: value }).success,
+        `the interactive create route rejects ${value}`,
+      ).toBe(true)
+    }
+    expect(TransactionCreateSchema.safeParse({ ...base, type: "NONSENSE" }).success).toBe(false)
+
+    const importBase = {
+      portfolioId: "8d1f1a3e-0000-4000-8000-000000000000",
+      instrumentSymbol: "AAPL", quantity: 1, price: 1, currency: "USD",
+    }
+    for (const value of POSITION_TX_TYPES) {
+      const parsed = ImportPortfolioTxSchema.safeParse({ ...importBase, type: value })
+      // TRANSFER_OUT additionally requires toPortfolioName; asserted separately
+      // in import.test.ts against the resolved portfolio name.
+      expect(parsed.success || value === "TRANSFER_OUT", `the import route rejects ${value}`).toBe(true)
+    }
+    expect(ImportPortfolioTxSchema.safeParse({ ...importBase, type: "NONSENSE" }).success).toBe(false)
+  })
+
+  it("a transfer is not in TRADE_CASH_TYPES — stock changing custody is not a payment", () => {
+    for (const value of TRANSFER_TX_TYPES) {
+      expect(isTradeCashType(value)).toBe(false)
+    }
+    // EXPIRATION closes a position for nothing, so it is absent too. It was
+    // added to the check constraint and the import enum while the ledger's
+    // cash-effect list stayed a separate hand-written literal.
+    expect(isTradeCashType("EXPIRATION")).toBe(false)
+    expect([...TRADE_CASH_TYPES]).toEqual(["BUY", "SELL", "DIVIDEND"])
   })
 })

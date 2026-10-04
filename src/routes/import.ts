@@ -2,6 +2,7 @@ import { Hono, type Context } from "hono"
 import { and, desc, eq, inArray, notInArray, sql } from "drizzle-orm"
 import { z } from "zod"
 import { userIdentityMiddleware } from "../auth.js"
+import { POSITION_TX_TYPES } from "../transaction-types.js"
 import { getDb, type DB } from "../db/index.js"
 import { externalCashInvested } from "../services/cashLedger.js"
 import {
@@ -93,10 +94,10 @@ const ImportPortfolioCashTxSchema = z
   })
   .strict()
 
-const ImportPortfolioTxSchema = z
+export const ImportPortfolioTxSchema = z
   .object({
     portfolioId: z.string().uuid(),
-    type: z.enum(["BUY", "SELL", "DIVIDEND", "EXPIRATION"]),
+    type: z.enum(POSITION_TX_TYPES),
     instrumentSymbol: z.string().min(1),
     instrumentName: z.string().nullable().optional(),
     assetType: z.string().default("STOCK"),

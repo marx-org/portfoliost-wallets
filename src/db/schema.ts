@@ -15,9 +15,16 @@ import {
   uuid,
 } from "drizzle-orm/pg-core"
 import { sql } from "drizzle-orm"
+import { POSITION_TX_TYPES } from "../transaction-types.js"
 import { check } from "drizzle-orm/pg-core"
 
 const TX_TYPES = ["DEPOSIT", "WITHDRAWAL", "TRANSFER"] as const
+
+// Inlined, not parameterised: a CHECK constraint cannot contain bind
+// parameters, so `sql.join` would emit `$1, $2, ...` and Postgres rejects it
+// with "there is no parameter $1". These are compile-time constants from a
+// `as const` array, never user input, so raw interpolation is safe here.
+const positionTxTypeIn = sql.raw(POSITION_TX_TYPES.map((v) => `'${v}'`).join(","))
 
 // D16/D24 — schema-per-module
 // §62 — the wallets schema is kept for sync_runs only; cash moved to
@@ -245,6 +252,16 @@ export const portfolioTransactions = portfoliosSchema.table(
       .references(() => portfolios.id, { onDelete: "cascade" }),
     positionId: uuid("position_id").references(() => positions.id),
     type: text("type").notNull(),
+    // In-kind transfer bookkeeping. A transfer is several rows — one per source
+    // lot drawn FIFO — so `linked_transfer_id` pairs a TRANSFER_OUT with its
+    // derived TRANSFER_IN while `transfer_group_id` ties the whole transfer
+    // together and makes it one atomic unit.
+    linkedTransferId: uuid("linked_transfer_id"),
+    transferGroupId: uuid("transfer_group_id"),
+    // The BUY a TRANSFER_OUT drew its quantity and price from. No FK and no
+    // cascade on purpose: deleting a source BUY must not silently delete a
+    // transfer that already moved real stock between brokers.
+    sourceTransactionId: uuid("source_transaction_id"),
     instrumentSymbol: text("instrument_symbol"),
     instrumentName: text("instrument_name"),
     sector: text("sector"),
@@ -286,8 +303,17 @@ export const portfolioTransactions = portfoliosSchema.table(
     index("idx_ptx_portfolio").on(t.portfolioId, t.executedAt.desc()),
     index("idx_ptx_user").on(t.userId, t.executedAt.desc()),
     index("idx_ptx_position").on(t.positionId),
+    index("idx_ptx_transfer_group").on(t.transferGroupId),
     uniqueIndex("uq_ptx_external").on(t.externalSource, t.externalId).where(sql`${t.externalId} is not null`),
-    check("ck_ptx_type", sql`${t.type} in ('BUY','SELL','DIVIDEND','EXPIRATION')`),
+    check("ck_ptx_type", sql`${t.type} in (${positionTxTypeIn})`),
+    check(
+      "ck_ptx_transfer_out_source",
+      sql`${t.type} <> 'TRANSFER_OUT' or ${t.sourceTransactionId} is not null`,
+    ),
+    check(
+      "ck_ptx_transfer_in_linked",
+      sql`${t.type} <> 'TRANSFER_IN' or ${t.linkedTransferId} is not null`,
+    ),
     check("ck_ptx_rate_source", sql`${t.rateSource} in ('automatic','manual')`),
     check("ck_ptx_fee_rate_source", sql`${t.feeRateSource} in ('automatic','manual')`),
     check("ck_ptx_fees_type", sql`${t.feesType} in ('fixed','pct')`),

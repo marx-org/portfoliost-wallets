@@ -11,6 +11,7 @@ import { Hono, type Context } from "hono"
 import { and, asc, desc, eq, inArray, sql, type SQL } from "drizzle-orm"
 import { z } from "zod"
 import { userIdentityMiddleware } from "../auth.js"
+import { POSITION_TX_TYPES, TRADE_CASH_TYPES } from "../transaction-types.js"
 import { getDb as resolveDb, type DB } from "../db/index.js"
 import {
   portfolios,
@@ -166,7 +167,7 @@ async function balanceAfterByRow(
       createdAt: portfolioTransactions.createdAt,
     })
     .from(portfolioTransactions)
-    .where(and(eq(portfolioTransactions.portfolioId, portfolioId), inArray(portfolioTransactions.type, ["BUY", "SELL", "DIVIDEND"])))
+    .where(and(eq(portfolioTransactions.portfolioId, portfolioId), inArray(portfolioTransactions.type, TRADE_CASH_TYPES)))
 
   for (const t of trades) {
     events.push({
