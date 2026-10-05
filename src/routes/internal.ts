@@ -1,6 +1,7 @@
 import { Hono } from "hono"
 import { and, eq, or, sql } from "drizzle-orm"
 import { z } from "zod"
+import { effectiveDateToUtc } from "../services/splitFactors.js"
 import { getDb, type DB } from "../db/index.js"
 import { positions, portfolios, portfolioTransactions, splitEvents } from "../db/schema.js"
 import type { components } from "../generated/api-types"
@@ -17,10 +18,6 @@ const ApplySplitSchema = z.object({
   factor: z.number().finite().positive(),
   effectiveDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
 })
-
-function effectiveDateToUtc(dateStr: string): Date {
-  return new Date(`${dateStr}T00:00:00.000Z`)
-}
 
 export function createInternalRoutes(db?: DB) {
   const routes = new Hono()

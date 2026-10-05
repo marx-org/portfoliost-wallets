@@ -1,10 +1,13 @@
 import { Hono, type Context } from "hono"
 import { and, desc, eq, inArray, notInArray, sql } from "drizzle-orm"
 import { z } from "zod"
+import { randomUUID } from "node:crypto"
 import { userIdentityMiddleware } from "../auth.js"
 import { POSITION_TX_TYPES } from "../transaction-types.js"
 import { getDb, type DB } from "../db/index.js"
 import { externalCashInvested } from "../services/cashLedger.js"
+import { drawLots, openLots, openQuantity, type LotTx } from "../services/openLots.js"
+import { loadCumFactor } from "../services/splitFactors.js"
 import {
   portfolios,
   portfolioCashTransactions,
@@ -17,6 +20,7 @@ import {
   portfolioBackfillMetadata,
   labels,
   positionLabels,
+  splitEvents,
   transactionLabels,
 } from "../db/schema.js"
 import { preferredBaseCurrency } from "../services/preferences.js"
@@ -98,11 +102,16 @@ export const ImportPortfolioTxSchema = z
   .object({
     portfolioId: z.string().uuid(),
     type: z.enum(POSITION_TX_TYPES),
+    toPortfolioName: z.string().min(1).nullable().optional(),
     instrumentSymbol: z.string().min(1),
     instrumentName: z.string().nullable().optional(),
     assetType: z.string().default("STOCK"),
     quantity: z.number().positive(),
-    price: z.number().nonnegative(),
+    // Required for every type EXCEPT TRANSFER_OUT, where the server derives it
+    // from the FIFO draw and any caller-supplied figure would corrupt the
+    // receiving basis. The contract states the same rule; OpenAPI 3.0 cannot
+    // express a conditionally-required property, so it is enforced here instead.
+    price: z.number().nonnegative().optional(),
     originalQuantity: z.number().positive().nullable().optional(),
     originalPrice: z.number().positive().nullable().optional(),
     currency: z.string().regex(ISO_CURRENCY, "currency must be an ISO 4217 code"),
@@ -144,6 +153,17 @@ export const ImportPortfolioTxSchema = z
     transactionLabels: z.array(z.string().min(1).max(40)).max(20).optional(),
   })
   .strict()
+  .superRefine((v, ctx) => {
+    // TRANSFER_OUT takes its price from the FIFO draw; every other type must
+    // carry one, or a trade would book a zero cost.
+    if (v.type !== "TRANSFER_OUT" && v.price == null) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["price"],
+        message: `price is required for type ${v.type}`,
+      })
+    }
+  })
 
 const ImportTransactionSchema = z
   .object({
@@ -1063,6 +1083,261 @@ async function insertImportPortfolioCashTx(
   return { inserted: Boolean(debit && credit) }
 }
 
+/** The types that move quantity, and so participate in the FIFO queue. */
+const LOT_TYPES = ["BUY", "SELL", "EXPIRATION", "TRANSFER_OUT", "TRANSFER_IN"] as const
+
+/**
+ * An in-kind transfer: the instrument, unchanged, moves from one portfolio to
+ * another. It is NOT a sale — nothing is disposed of, so no realised P/L is
+ * booked and no cash moves.
+ *
+ * The quantity is drawn FIFO from the sending portfolio's open lots, producing
+ * one `TRANSFER_OUT` row per lot drawn at **that lot's own price**, each with a
+ * derived `TRANSFER_IN` carrying the same price and quantity. A weighted average
+ * would land on the same `averageCostBasis`; the difference is that these rows
+ * name the lot they came from, so the receiving portfolio's FIFO queue is correct
+ * without re-deriving anything.
+ *
+ * The whole group is one atomic unit. A failure on draw 3 of 5 must leave nothing
+ * behind — stock that has left without its counterpart having arrived is the worst
+ * state this table can hold.
+ */
+async function insertImportTransfer(
+  tx: DB,
+  userId: string,
+  input: {
+    source: { externalSource: string }
+    row: z.infer<typeof ImportTransactionSchema>
+    ptx: z.infer<typeof ImportPortfolioTxSchema>
+    executedAt: Date
+    symbol: string
+    listingCcy: string
+    txCcy: string
+    rate: number
+    positionLabelIds: string[]
+  },
+) {
+  const { source, row, ptx, executedAt, symbol, listingCcy, txCcy, rate, positionLabelIds } = input
+  const toName = ptx.toPortfolioName?.trim()
+  if (!toName) {
+    throw new ImportRowError(
+      "transfer_missing_counterparty",
+      row.externalId,
+      "TRANSFER_OUT requires toPortfolioName",
+    )
+  }
+
+  const target = await resolvePortfolioByName(tx, userId, toName)
+  if (!target) {
+    throw new ImportRowError("transfer_target_not_found", row.externalId, `Unknown portfolio "${toName}"`)
+  }
+  if (target.id === ptx.portfolioId) {
+    throw new ImportRowError(
+      "transfer_target_is_source",
+      row.externalId,
+      `TRANSFER_OUT target "${toName}" is the source portfolio`,
+    )
+  }
+
+  const cumFor = await loadCumFactor(tx, symbol)
+  const rows = await tx
+    .select({
+      id: portfolioTransactions.id,
+      type: portfolioTransactions.type,
+      executedAt: portfolioTransactions.executedAt,
+      quantity: portfolioTransactions.quantity,
+      price: portfolioTransactions.price,
+      originalQuantity: portfolioTransactions.originalQuantity,
+      originalPrice: portfolioTransactions.originalPrice,
+    })
+    .from(portfolioTransactions)
+    .where(
+      and(
+        eq(portfolioTransactions.userId, userId),
+        eq(portfolioTransactions.portfolioId, ptx.portfolioId),
+        eq(portfolioTransactions.instrumentSymbol, symbol),
+        inArray(portfolioTransactions.type, [...LOT_TYPES]),
+      ),
+    )
+
+  const lots = openLots(rows as unknown as LotTx[], cumFor)
+  const { draws, shortfall } = drawLots(lots, ptx.quantity)
+  if (shortfall > 1e-8) {
+    // Refuse the whole row rather than move less than was asked. A shortfall is
+    // not a partial transfer — it means the queue disagrees with the holding.
+    throw new ImportRowError(
+      "transfer_exceeds_open_lots",
+      row.externalId,
+      `TRANSFER_OUT of ${ptx.quantity} exceeds ${openQuantity(lots)} open in ${symbol}`,
+    )
+  }
+
+  const transferGroupId = randomUUID()
+  let firstOut: typeof portfolioTransactions.$inferInsert | null = null
+  let sourcePositionId: string | null = null
+
+  for (const [i, draw] of draws.entries()) {
+    const total = round2(draw.quantity * draw.price)
+    const [out] = await tx
+      .insert(portfolioTransactions)
+      .values({
+        userId,
+        portfolioId: ptx.portfolioId,
+        type: "TRANSFER_OUT",
+        instrumentSymbol: symbol,
+        instrumentName: ptx.instrumentName ?? null,
+        sector: ptx.sector ?? null,
+        industry: ptx.industry ?? null,
+        country: ptx.country ?? null,
+        quantity: scale8(draw.quantity),
+        price: scale8(draw.price),
+        originalQuantity: scale8(draw.quantity),
+        originalPrice: scale8(draw.price),
+        currency: txCcy,
+        instrumentCurrency: listingCcy,
+        assetType: ptx.assetType,
+        totalAmount: String(total),
+        // Nothing was disposed of, so there is no realised P/L to book.
+        realizedGainLoss: null,
+        exchangeRate: String(rate),
+        convertedTotalAmount: String(round2(total * rate)),
+        convertedPrice: String(round2(draw.price * rate)),
+        displayCurrency: "USD",
+        isGift: false,
+        synthesizedOpeningLot: false,
+        transferGroupId,
+        sourceTransactionId: draw.txId,
+        externalSource: source.externalSource,
+        // Indexed so a re-import produces byte-identical suffixes and the
+        // insert-only sync does not orphan the previous group.
+        externalId: `${row.externalId}#x${i}`,
+        executedAt,
+      })
+      .returning()
+
+    const [inRow] = await tx
+      .insert(portfolioTransactions)
+      .values({
+        userId,
+        portfolioId: target.id,
+        type: "TRANSFER_IN",
+        instrumentSymbol: symbol,
+        instrumentName: ptx.instrumentName ?? null,
+        sector: ptx.sector ?? null,
+        industry: ptx.industry ?? null,
+        country: ptx.country ?? null,
+        quantity: scale8(draw.quantity),
+        price: scale8(draw.price),
+        originalQuantity: scale8(draw.quantity),
+        originalPrice: scale8(draw.price),
+        currency: txCcy,
+        instrumentCurrency: listingCcy,
+        assetType: ptx.assetType,
+        totalAmount: String(total),
+        realizedGainLoss: null,
+        exchangeRate: String(rate),
+        convertedTotalAmount: String(round2(total * rate)),
+        convertedPrice: String(round2(draw.price * rate)),
+        displayCurrency: "USD",
+        isGift: false,
+        synthesizedOpeningLot: false,
+        transferGroupId,
+        linkedTransferId: out.id,
+        sourceTransactionId: draw.txId,
+        externalSource: source.externalSource,
+        externalId: `${row.externalId}#xi${i}`,
+        executedAt,
+      })
+      .returning()
+
+    await tx
+      .update(portfolioTransactions)
+      .set({ linkedTransferId: inRow.id })
+      .where(eq(portfolioTransactions.id, out.id))
+
+    if (i === 0) {
+      firstOut = out
+      // Labels belong to the position the stock left, as a BUY's would.
+      const pos = await decrementTransferPosition(tx, userId, ptx.portfolioId, symbol, draw.quantity)
+      sourcePositionId = pos?.id ?? null
+      await tx
+        .update(portfolioTransactions)
+        .set({ positionId: sourcePositionId })
+        .where(eq(portfolioTransactions.id, out.id))
+    } else {
+      await decrementTransferPosition(tx, userId, ptx.portfolioId, symbol, draw.quantity)
+    }
+
+    // The receiving side takes the lot at its source cost, so the weighted
+    // formula lands on exactly the FIFO composition.
+    await upsertImportPositionOnBuy(tx, userId, target.id, {
+      symbol,
+      instrumentName: ptx.instrumentName ?? null,
+      quantity: draw.quantity,
+      price: draw.price,
+      currency: txCcy,
+      assetType: ptx.assetType,
+      feesSettled: 0,
+      listingCurrency: ptx.listingCurrency,
+      executedAt,
+      sector: ptx.sector ?? null,
+      industry: ptx.industry ?? null,
+      country: ptx.country ?? null,
+    })
+  }
+
+  if (positionLabelIds.length > 0 && sourcePositionId) {
+    await tx.delete(positionLabels).where(eq(positionLabels.positionId, sourcePositionId))
+    await tx
+      .insert(positionLabels)
+      .values(positionLabelIds.map((labelId) => ({ positionId: sourcePositionId, labelId })))
+  }
+
+  return { ...firstOut!, positionId: sourcePositionId }
+}
+
+/**
+ * Decrement the sending portfolio's holding by `quantity`, leaving
+ * `averageCostBasis` untouched — the cost basis travels with the shares, so it
+ * is not recomputed against a partial sale. A transfer is not a disposal.
+ */
+async function decrementTransferPosition(
+  tx: DB,
+  userId: string,
+  portfolioId: string,
+  symbol: string,
+  quantity: number,
+) {
+  const [pos] = await tx
+    .select()
+    .from(positions)
+    .where(
+      and(
+        eq(positions.userId, userId),
+        eq(positions.portfolioId, portfolioId),
+        eq(positions.symbol, symbol),
+        eq(positions.isOpen, true),
+        sql`${positions.direction} is null or ${positions.direction} = 'LONG'`,
+      ),
+    )
+  if (!pos) return null
+
+  const newQty = round8(Number(pos.quantity) - quantity)
+  if (newQty <= 1e-8) {
+    await tx
+      .update(positions)
+      .set({ quantity: "0", isOpen: false, updatedAt: new Date() })
+      .where(eq(positions.id, pos.id))
+    return pos
+  }
+  // averageCostBasis deliberately not in the SET: unchanged by a transfer.
+  await tx
+    .update(positions)
+    .set({ quantity: String(newQty), updatedAt: new Date() })
+    .where(eq(positions.id, pos.id))
+  return pos
+}
+
 async function insertImportPortfolioTx(
   tx: DB,
   userId: string,
@@ -1080,7 +1355,8 @@ async function insertImportPortfolioTx(
   // to the payment currency as before. Never guess a listing currency: an
   // unknown one is a visible gap, a wrong one silently misprices the position.
   const listingCcy = ptx.listingCurrency ? ptx.listingCurrency.toUpperCase() : txCcy
-  const notional = ptx.quantity * ptx.price
+
+  const notional = ptx.quantity * (ptx.price ?? 0)
   const feesSettled = settleImportFees(ptx.fees, ptx.feesType, notional)
   const rate = ptx.exchangeRate ?? 1
 
@@ -1118,6 +1394,30 @@ async function insertImportPortfolioTx(
   let positionId: string | null = null
   let realizedGainLoss: number | null = ptx.realizedGainLoss ?? null
 
+  // A transfer is not a trade: no cash, no realised P/L, and its quantity is
+  // drawn FIFO rather than taken from the caller. It expands into a group of
+  // rows, so it returns before the single-row path below.
+  if (ptx.type === "TRANSFER_OUT") {
+    return insertImportTransfer(tx, userId, {
+      source,
+      row,
+      ptx,
+      executedAt,
+      symbol,
+      listingCcy,
+      txCcy,
+      rate,
+      positionLabelIds,
+    })
+  }
+
+  // The schema's superRefine guarantees price for every non-transfer type;
+  // TypeScript cannot see that, so narrow it once here rather than at each use.
+  const price = ptx.price
+  if (price == null) {
+    throw new ImportRowError("missing_price", row.externalId, `price is required for type ${ptx.type}`)
+  }
+
   // A SHORT row opens (or adds to) a short option position — position-
   // creating, no realized P/L — whether it arrives as type BUY or SELL
   // (written covered calls come in as SELL + direction SHORT, plan §24.7).
@@ -1129,7 +1429,7 @@ async function insertImportPortfolioTx(
       symbol,
       instrumentName: ptx.instrumentName ?? null,
       quantity: ptx.quantity,
-      price: ptx.price,
+      price,
       currency: txCcy,
       assetType: ptx.assetType,
       feesSettled,
@@ -1147,7 +1447,7 @@ async function insertImportPortfolioTx(
     const res = await processImportSell(tx, userId, ptx.portfolioId, {
       symbol,
       quantity: ptx.quantity,
-      price: ptx.type === "EXPIRATION" ? 0 : ptx.price,
+      price: ptx.type === "EXPIRATION" ? 0 : price,
       feesSettled: ptx.type === "EXPIRATION" ? 0 : feesSettled,
       executedAt,
       // SELL rows that reach this branch are always default-lot closes (a
@@ -1193,11 +1493,11 @@ async function insertImportPortfolioTx(
       instrumentSymbol: symbol,
       instrumentName: ptx.instrumentName ?? null,
       quantity: scale8(ptx.quantity),
-      price: scale8(ptx.price),
+      price: scale8(price),
       // Default originals to the restated values (mirrors the interactive route
       // invariant), so §23.6 apply-split can restate rows from frozen originals.
       originalQuantity: scale8(ptx.originalQuantity ?? ptx.quantity),
-      originalPrice: scale8(ptx.originalPrice ?? ptx.price),
+      originalPrice: scale8(ptx.originalPrice ?? price),
       currency: txCcy,
       // §72.8 — a resolved listing currency beats the payment currency. Both
       // may legitimately differ, and when they do it is the listing currency that
@@ -1216,7 +1516,7 @@ async function insertImportPortfolioTx(
       feeRateSource: ptx.feeRateSource ?? "automatic",
       feeExchangeRate: ptx.feeExchangeRate != null ? String(ptx.feeExchangeRate) : null,
       convertedTotalAmount: String(round2(totalAmount * rate)),
-      convertedPrice: String(round2(ptx.price * rate)),
+      convertedPrice: String(round2(price * rate)),
       convertedFees: String(round2(feesSettled * rate)),
       convertedRealizedGainLoss:
         realizedGainLoss != null ? String(round2(realizedGainLoss * rate)) : null,
