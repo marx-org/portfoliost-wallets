@@ -3,7 +3,7 @@ import { and, desc, eq, inArray, notInArray, sql } from "drizzle-orm"
 import { z } from "zod"
 import { randomUUID } from "node:crypto"
 import { userIdentityMiddleware } from "../auth.js"
-import { POSITION_TX_TYPES } from "../transaction-types.js"
+import { LOT_QUANTITY_TYPES, POSITION_TX_TYPES } from "../transaction-types.js"
 import { getDb, type DB } from "../db/index.js"
 import { externalCashInvested } from "../services/cashLedger.js"
 import { drawLots, openLots, openQuantity, type LotTx } from "../services/openLots.js"
@@ -1084,7 +1084,7 @@ async function insertImportPortfolioCashTx(
 }
 
 /** The types that move quantity, and so participate in the FIFO queue. */
-const LOT_TYPES = ["BUY", "SELL", "EXPIRATION", "TRANSFER_OUT", "TRANSFER_IN"] as const
+const LOT_TYPES = LOT_QUANTITY_TYPES
 
 /**
  * An in-kind transfer: the instrument, unchanged, moves from one portfolio to
