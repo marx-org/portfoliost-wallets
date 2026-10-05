@@ -671,3 +671,47 @@ describe("snapshotPortfolioValue (H5)", () => {
     delete process.env.INSTRUMENTS_URL
   })
 })
+
+/**
+ * #37 — `portfolios.total_invested` must be reachable by the nightly job, not
+ * only by an actual insert. The import is insert-only, so a re-import skips
+ * every row as a duplicate and the column keeps its old value; a fix to the basis
+ * therefore could not reach existing rows without a destructive wipe. This is
+ * the assertion that makes the column self-healing.
+ */
+describe("#37: the nightly refresh persists the capital basis", () => {
+  beforeEach(() => {
+    process.env.INSTRUMENTS_URL = "http://instruments:3000"
+    _clearQuoteCache()
+  })
+  afterEach(() => {
+    vi.unstubAllGlobals()
+    delete process.env.INSTRUMENTS_URL
+  })
+
+  it("writes total_invested, including the transfer term, on a plain refresh", async () => {
+    const { db, user } = await makeHarness("q-user-37")
+    const { pf } = await seedPortfolioAndPosition(db, user.id, { qty: 10, avg: 150 })
+    mockFetch(180, 3, 1.7)
+
+    // An in-kind transfer OUT of 2 shares, cost 150 each → basis must fall by 300.
+    await db.insert(portfolioCashTransactions).values({
+      userId: user.id, portfolioId: pf.id, type: "DEPOSIT", amount: "2100",
+      currency: "USD", transactionDate: "2026-09-03",
+    })
+    await db.insert(portfolioTransactions).values({
+      userId: user.id, portfolioId: pf.id, type: "TRANSFER_OUT", instrumentSymbol: "X",
+      quantity: "2", price: "150", currency: "USD", instrumentCurrency: "USD",
+      totalAmount: "300", executedAt: new Date("2026-09-03T09:00:00Z"),
+      // ck_ptx_transfer_out_source requires it; no FK, so any id will do here.
+      sourceTransactionId: crypto.randomUUID(),
+    })
+
+    await refreshQuotes(db, user.id, pf.id, "Bearer test-token")
+
+    const [after] = await db.select().from(portfolios).where(eq(portfolios.id, pf.id))
+    // 2100 deposit − 300 transferred out. Before this was persisted at all the
+    // column stayed 0 until an import or an interactive edit happened to run.
+    expect(Number(after.totalInvested)).toBeCloseTo(1800, 2)
+  })
+})

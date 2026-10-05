@@ -454,7 +454,24 @@ export async function refreshQuotesUnlocked(
   // series stays authoritative.
   if (quotedCount === 0) return
 
-  await snapshotPortfolioValue(db, authToken, portfolioId, liveValues, now).catch(() => undefined)
+  // #37 — `portfolios.total_invested` was written ONLY on an actual insert or an
+  // interactive edit. The import is insert-only, so a re-import skips every row
+  // as a duplicate and the column keeps whatever it last had — meaning a fix to
+  // the basis could not reach existing rows without a destructive wipe.
+  //
+  // `snapshotPortfolioValue` already computes the right figure (it is the same
+  // `capitalBasisInvested` call the live card reads), so persisting its result
+  // here adds no second derivation path — it reuses the existing writer's own
+  // number, which is the principle this file already states for prices. This
+  // runs nightly via `snapshots-sync`, so the column is now self-healing rather
+  // than correct-only-after-a-wipe.
+  const snap = await snapshotPortfolioValue(db, authToken, portfolioId, liveValues, now).catch(() => undefined)
+  if (snap) {
+    await db
+      .update(portfolios)
+      .set({ totalInvested: snap.invested, updatedAt: new Date() })
+      .where(eq(portfolios.id, portfolioId))
+  }
 }
 
 /**
