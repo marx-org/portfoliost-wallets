@@ -3090,7 +3090,7 @@ export interface components {
             strategy: string;
             type: string;
             baseCurrency?: string;
-            totalInvested: number;
+            capitalBasis: number;
             currentValue: number;
             isPublic: boolean;
             cashLegOnTrade?: boolean;
@@ -3125,11 +3125,19 @@ export interface components {
          *       instrumentsValue  positions only
          *       cashValue         the cash BALANCE (not a flow)
          *       totalValue        instrumentsValue + cashValue
-         *       totalInvested     net external cash flow (see below)
+         *       capitalBasis      capital at risk (external contributions + in-kind cost)
          *
          *     `totalValue` previously excluded cash, which made the headline disagree
          *     with the portfolio cards by exactly the cash balance (§63.3). It now
          *     means the whole account.
+         *
+         *     §41/S3 — `totalInvested` was RENAMED to `capitalBasis`, and the
+         *     genuinely-external figure is now its own field, `externalContributions`.
+         *     The two are different questions and the old names pointed the wrong way:
+         *     the field named `externalCapitalBasis` reported the SAME number as
+         *     `totalInvested` (which includes in-kind transfers) while the function
+         *     named `externalCashInvested` excluded them. That mislabelling already
+         *     caused two wrong conclusions during the transfer work.
          */
         PortfolioTotalMetrics: {
             /** @description Open-position market value only, cash excluded, converted into baseCurrency. Σ of each position's own instrument currency at its own rate — never a raw cross-currency sum. */
@@ -3139,19 +3147,34 @@ export interface components {
             /** @description The whole account: instrumentsValue + cashValue. CHANGED in §68 — this used to be positions-only, which is what made the headline miss cash. */
             totalValue: number;
             /**
-             * @description Net external cash flow in baseCurrency: DEPOSIT − WITHDRAWAL ± TRANSFER legs, each at its own historical rate
-             *     (the §62 `externalCashInvested` basis, reported by `externalCapitalBasisSource`).
+             * @description Capital BASIS in baseCurrency: net external contributions (DEPOSIT − WITHDRAWAL,
+             *     each at its own historical rate) PLUS the cost of anything transferred in or out,
+             *     signed.
              *
-             *     Transfers are part of this definition, not excluded. The honest
-             *     consequence: a transfer between two of the user's own portfolios
-             *     RAISES one portfolio's invested figure and LOWERS the other's. The
-             *     aggregate is unaffected because the legs net to zero, but a
-             *     per-portfolio number on this basis is not "capital you put in".
+             *     At COST, not market: a basis travels with the shares, so the accrued unrealised
+             *     gain is just `totalValue − capitalBasis` and follows whichever account holds the
+             *     stock. Rebasing at the transfer-date market would delete real profit.
+             *
+             *     In-kind transfers are part of this definition, not excluded — this was always the
+             *     stated contract and the implementation did not honour it until §41/#37. The honest
+             *     consequence: a transfer between two of the user's own portfolios RAISES one
+             *     portfolio's basis and LOWERS the other's. The aggregate is unaffected because the
+             *     legs net to zero, but a per-portfolio number on this basis is NOT "capital you put
+             *     in" — that is `externalContributions`.
              */
-            totalInvested: number;
-            /** @description totalValue − totalInvested. Moves with §68's change to totalValue. */
+            capitalBasis: number;
+            /**
+             * @description Money actually put in and taken out: DEPOSIT − WITHDRAWAL only, each at its own
+             *     historical rate. EXCLUDES in-kind stock transfers, which move no money.
+             *
+             *     The counterpart to `capitalBasis`, not a variant of it. Keep them apart —
+             *     conflating "money put in" with "capital at risk" is what got `ADJUSTMENT` into
+             *     trouble (§89.5).
+             */
+            externalContributions?: number | null;
+            /** @description totalValue − capitalBasis. Moves with §68's change to totalValue. */
             totalGainLoss?: number;
-            /** @description totalGainLoss / totalInvested. Moves with §68's change to totalValue. */
+            /** @description totalGainLoss / capitalBasis. Moves with §68's change to totalValue. */
             returnPercentage?: number;
             baseCurrency: string;
             /** @description Per-portfolio rows. §68 — each carries the same cash/instruments split, so Σ breakdown == the headline and a card can render its own split without a second request. */
@@ -3164,7 +3187,7 @@ export interface components {
                 cashValue: number;
                 /** @description instrumentsValue + cashValue for this portfolio. */
                 totalValue: number;
-                totalInvested: number;
+                capitalBasis: number;
                 returnPercentage?: number;
                 weight?: number;
                 /** @description Open positions with no market value */
@@ -3177,9 +3200,8 @@ export interface components {
                 /** @description 'quote' or 'fallback' — whether the value is a live price or a remembered one. */
                 priceSource?: string | null;
             }[];
-            externalCapitalReturnPercent?: number | null;
-            externalCapitalReturnAmount?: number | null;
-            externalCapitalBasis?: number | null;
+            capitalBasisReturnPercent?: number | null;
+            capitalBasisReturnAmount?: number | null;
             /**
              * @description Open positions excluded from `instrumentsValue` because no market value is known (§70).
              *     They are NOT valued at their cost basis — a cost is not a price, and a plausible
@@ -3201,9 +3223,9 @@ export interface components {
              *     the figure is a remembered price, not a current one.
              */
             priceSource?: string | null;
-            externalCapitalBasisSource?: string | null;
-            externalCapitalSuppressedReason?: string | null;
-            externalCapitalReturnBasisKind?: string | null;
+            capitalBasisSource?: string | null;
+            capitalBasisSuppressedReason?: string | null;
+            capitalBasisReturnBasisKind?: string | null;
             /** @description Per-currency cash summary (dashboard cash card) */
             cashBreakdown?: {
                 currency: string;
@@ -3368,7 +3390,7 @@ export interface components {
             timeframe?: string;
             performance?: {
                 totalValue?: number;
-                totalInvested?: number;
+                capitalBasis?: number;
                 totalReturn?: number;
                 totalReturnPercent?: number;
                 simpleReturnPercent?: number;
@@ -3496,15 +3518,14 @@ export interface components {
                 closedPositions: number;
                 realizedGainLoss: number;
                 unrealizedGainLoss: number;
-                totalInvested: number;
+                capitalBasis: number;
                 income: number;
                 returnBasis: number;
-                externalCapitalReturnPercent?: number | null;
-                externalCapitalReturnAmount?: number | null;
-                externalCapitalBasis?: number | null;
-                externalCapitalBasisSource?: string | null;
-                externalCapitalSuppressedReason?: string | null;
-                externalCapitalReturnBasisKind?: string | null;
+                capitalBasisReturnPercent?: number | null;
+                capitalBasisReturnAmount?: number | null;
+                capitalBasisSource?: string | null;
+                capitalBasisSuppressedReason?: string | null;
+                capitalBasisReturnBasisKind?: string | null;
             };
             positions?: components["schemas"]["PositionSummary"][];
             cash?: components["schemas"]["PortfolioCash"];
@@ -3546,7 +3567,11 @@ export interface components {
             totalValue: number;
             /** @description This portfolio's cash balance in `currency`. May be negative on a margin account. */
             cashValue: number;
-            totalInvested: number;
+            /** @description Capital BASIS: external contributions plus the cost of anything transferred in or out, signed. At COST — see PortfolioTotalMetrics.capitalBasis. */
+            capitalBasis: number;
+            /** @description Money actually put in and taken out: DEPOSIT − WITHDRAWAL only. EXCLUDES in-kind stock transfers, which move no money. The counterpart to `capitalBasis`, not a variant — conflating the two is what got ADJUSTMENT into trouble (§89.5). */
+            externalContributions?: number | null;
+            /** @description (totalValue − capitalBasis) / capitalBasis, and 0 when capitalBasis ≤ 0 — a non-positive basis would otherwise report a signed nonsense figure. */
             simpleReturnPercent: number;
             investmentReturnPercent: number;
             currencyImpactPercent: number;
@@ -3573,12 +3598,11 @@ export interface components {
             priceAsOf?: string | null;
             /** @description 'quote' or 'fallback' — whether the value is a live price or a remembered one. */
             priceSource?: string | null;
-            externalCapitalReturnPercent?: number | null;
-            externalCapitalReturnAmount?: number | null;
-            externalCapitalBasis?: number | null;
-            externalCapitalBasisSource?: string | null;
-            externalCapitalSuppressedReason?: string | null;
-            externalCapitalReturnBasisKind?: string | null;
+            capitalBasisReturnPercent?: number | null;
+            capitalBasisReturnAmount?: number | null;
+            capitalBasisSource?: string | null;
+            capitalBasisSuppressedReason?: string | null;
+            capitalBasisReturnBasisKind?: string | null;
             historyCoherence?: {
                 status?: string;
                 reason?: string | null;

@@ -34,7 +34,7 @@ describe("Portfolio CRUD (§15 Phase B)", () => {
     expect(body.name).toBe("Growth")
     expect(body.baseCurrency).toBe("USD")
     expect(body.strategy).toBe("GROWTH")
-    expect(body.totalInvested).toBe(0)
+    expect(body.capitalBasis).toBe(0)
     expect(body.id).toBeDefined()
   })
 

@@ -1307,7 +1307,7 @@ describe("Aggregates & metrics (§15 Phase G)", () => {
     expect(res.status).toBe(200)
     const body = await res.json()
     expect(body.totalValue).toBeGreaterThan(0)
-    expect(body.totalInvested).toBeGreaterThan(0)
+    expect(body.capitalBasis).toBeGreaterThan(0)
     expect(body.portfolioBreakdown.length).toBe(1)
     expect(body.portfolioBreakdown[0].name).toBe("P1")
   })
@@ -1539,12 +1539,12 @@ describe("Aggregates & metrics (§15 Phase G)", () => {
       // 10×150 PLN × 0.5 = 750 USD — never 1,500 raw PLN as USD.
       expect(body.totalValue).toBeCloseTo(750 + 1500, 2)
       // invested = net external flow (the deposits): 1500 PLN→750 + 1504.99 USD.
-      expect(body.totalInvested).toBeCloseTo(750 + 1504.99, 2)
+      expect(body.capitalBasis).toBeCloseTo(750 + 1504.99, 2)
       const byName = (n: string) => body.portfolioBreakdown.find((r: { name: string }) => r.name === n)
       expect(byName("PLN P").totalValue).toBeCloseTo(750, 2)
-      expect(byName("PLN P").totalInvested).toBeCloseTo(750, 2)
+      expect(byName("PLN P").capitalBasis).toBeCloseTo(750, 2)
       expect(byName("P1").totalValue).toBeCloseTo(1500, 2)
-      expect(byName("P1").totalInvested).toBeCloseTo(1504.99, 2)
+      expect(byName("P1").capitalBasis).toBeCloseTo(1504.99, 2)
     } finally {
       unmockInstrumentsFx()
     }

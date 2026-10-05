@@ -16,7 +16,7 @@ import { getPortfolioNews } from "../services/portfolioNews.js"
 import { getPortfolioCalendar } from "../services/portfolioCalendar.js"
 import { getGapSymbols, buildBenchmarkSeries, forcePortfolioRecalc, hasBackfillableHistory, recalcPortfolioSeries } from "../services/backfill.js"
 import { enqueueBackfill } from "../services/backfill-runner.js"
-import { cashBalances, dailyExternalFlows } from "../services/cashLedger.js"
+import { cashBalances, dailyExternalFlows, externalCashInvested } from "../services/cashLedger.js"
 import { debugEnabled, debugLog } from "../services/debug.js"
 import { buildPortfolioCash } from "./portfolio-cash.js"
 import {
@@ -109,7 +109,9 @@ function serializePortfolio(p: typeof portfolios.$inferSelect) {
     strategy: p.strategy,
     type: p.type,
     baseCurrency: p.baseCurrency,
-    totalInvested: Number(p.totalInvested),
+    // §41/S3 — the wire field is `capitalBasis`; the DB column keeps its
+    // name. Read from the column, reported under the question it answers.
+    capitalBasis: Number(p.totalInvested),
     currentValue: Number(p.currentValue),
     isPublic: p.isPublic,
     // §87.5 — the SPA reads this to pre-tick the form's cash checkbox.
@@ -152,7 +154,7 @@ async function computeMetrics(db: DB, portfolioId: string) {
     closedPositions: positionCount - openPositions,
     realizedGainLoss: realized,
     unrealizedGainLoss: 0, // will be enriched by quote adapter in Phase E
-    totalInvested: 0, // pulled from portfolio row
+    capitalBasis: 0, // pulled from portfolio row
     income,
     returnBasis: 0,
     totalReturn: 0,
@@ -161,12 +163,11 @@ async function computeMetrics(db: DB, portfolioId: string) {
     dayChangeAmount: 0,
     dayChangeDate: null as string | null,
     asOf: new Date().toISOString(),
-    externalCapitalReturnPercent: 0,
-    externalCapitalReturnAmount: 0,
-    externalCapitalBasis: 0,
-    externalCapitalBasisSource: "externalFlows",
-    externalCapitalSuppressedReason: null,
-    externalCapitalReturnBasisKind: "inception",
+    capitalBasisReturnPercent: 0,
+    capitalBasisReturnAmount: 0,
+    capitalBasisSource: "externalFlows",
+    capitalBasisSuppressedReason: null,
+    capitalBasisReturnBasisKind: "inception",
   }
 }
 
@@ -336,6 +337,9 @@ export function createPortfolioRoutes(db?: DB) {
     // §68 — the per-portfolio cash balances, collected here so the cash card below
     // reuses the SAME ledger replay the split used instead of replaying it again.
     const cashByPortfolio = new Map<string, Map<string, number>>()
+    // §41/S3 — one entry per portfolio, summed after the map so no shared counter
+    // is written across an await.
+    const externalByPortfolio: number[] = []
     // Compute actual totals from positions + transactions rather than
     // stale denormalized columns.
     const portfolioBreakdown = await Promise.all(
@@ -364,6 +368,14 @@ export function createPortfolioRoutes(db?: DB) {
         // and it did so while /summary-metrics already included cash.
         const cashBal = await cashBalances(database, c.req.header("Authorization") ?? "", p.id)
         cashByPortfolio.set(p.id, cashBal)
+        // §41/S3 — collected per portfolio rather than accumulated in place: the
+        // rows are built by Promise.all, so `+=` across an await is a race. Summed
+        // once below, which also saves a second round of FX lookups over every row.
+        externalByPortfolio.push(
+          await externalCashInvested(
+            database, c.req.header("Authorization") ?? "", p.id, p.baseCurrency ?? aggregateBase,
+          ),
+        )
         const split = await splitPortfolioValue(toBase, posRows, cashBal)
         // RECALC_DEBUG — the LIVE path's composition. Reads against
         // `cash-balances` and `cash-balance-series` for the same portfolio: this
@@ -404,7 +416,7 @@ export function createPortfolioRoutes(db?: DB) {
           instrumentsValue: Math.round(split.instrumentsValue * 100) / 100,
           cashValue: Math.round(split.cashValue * 100) / 100,
           totalValue: 0,
-          totalInvested: Math.round(totalInvested * 100) / 100,
+          capitalBasis: Math.round(totalInvested * 100) / 100,
           returnPercentage: Math.round(returnPct * 100) / 100,
           weight: 0, // filled in after totals computed
           unpricedPositions: split.unpricedPositions,
@@ -427,7 +439,8 @@ export function createPortfolioRoutes(db?: DB) {
     const totalInstruments = portfolioBreakdown.reduce((s, p) => s + p.instrumentsValue, 0)
     const totalCashValue = portfolioBreakdown.reduce((s, p) => s + p.cashValue, 0)
     const totalValue = Math.round((totalInstruments + totalCashValue) * 100) / 100
-    const totalInvested = portfolioBreakdown.reduce((s, p) => s + p.totalInvested, 0)
+    const externalContributions = externalByPortfolio.reduce((s, v) => s + v, 0)
+    const totalInvested = portfolioBreakdown.reduce((s, p) => s + p.capitalBasis, 0)
     const totalGainLoss = totalValue - totalInvested
     const returnPercentage = totalInvested > 0 ? (totalGainLoss / totalInvested) * 100 : 0
     // back-fill weights now that totalValue is known
@@ -490,7 +503,8 @@ export function createPortfolioRoutes(db?: DB) {
         : portfolioBreakdown.some((p) => p.priceSource === "quote")
           ? "quote"
           : null,
-      totalInvested,
+      capitalBasis: totalInvested,
+      externalContributions: Math.round(externalContributions * 100) / 100,
       totalGainLoss,
       returnPercentage,
       // §66.4 left this hardcoded as "USD" while line ~274 computed a real
@@ -502,12 +516,15 @@ export function createPortfolioRoutes(db?: DB) {
       // converted into.
       baseCurrency: aggregateBase,
       portfolioBreakdown,
-      externalCapitalReturnPercent: returnPercentage,
-      externalCapitalReturnAmount: totalGainLoss,
-      externalCapitalBasis: totalInvested,
-      externalCapitalBasisSource: "none",
-      externalCapitalSuppressedReason: null,
-      externalCapitalReturnBasisKind: "inception",
+      // §41/S3 — all six were named `externalCapital*` while reporting the CAPITAL
+      // BASIS, which includes in-kind transfers. Renamed to say so. Note these are
+      // the basis's return, not externalContributions' — the aggregate's basis is
+      // the sum across portfolios, so the two are not interchangeable.
+      capitalBasisReturnPercent: returnPercentage,
+      capitalBasisReturnAmount: totalGainLoss,
+      capitalBasisSource: "none",
+      capitalBasisSuppressedReason: null,
+      capitalBasisReturnBasisKind: "inception",
       cashBreakdown,
     } satisfies PortfolioTotalMetrics)
   })
@@ -1302,6 +1319,12 @@ async function resolveAggregateBase(
     const cumulativeDividends = Number(divRow?.income ?? 0)
 
     const totalInvested = Number(portfolio.totalInvested ?? 0)
+    // §41/S3 — the card reports BOTH quantities. `capitalBasis` (below) includes
+    // in-kind transfers at cost; this does not, and the two answer different
+    // questions. It was never reported before, which is how the pair got confused.
+    const externalContributions = await externalCashInvested(
+      database, c.req.header("Authorization") ?? "", portfolioId, portfolio.baseCurrency,
+    )
     const simpleReturnPercent = totalInvested > 0
       ? Math.round(((totalValue - totalInvested) / totalInvested * 100) * 100) / 100
       : 0
@@ -1319,7 +1342,11 @@ async function resolveAggregateBase(
       unpricedPositions,
       priceAsOf: oldestPriceAsOf(pricedRows),
       priceSource: dominantPriceSource(pricedRows),
-      totalInvested: Math.round(totalInvested * 100) / 100,
+      capitalBasis: Math.round(totalInvested * 100) / 100,
+      // §41/S3 — the genuinely-external figure, reported separately for the first
+      // time. It is a different question from capitalBasis and no field answered it
+      // before; conflating the two is what got ADJUSTMENT into trouble (§89.5).
+      externalContributions: Math.round(externalContributions * 100) / 100,
       costBasis: Math.round(totalCostBasis * 100) / 100,
       positionValue: Math.round(positionValue * 100) / 100,
       simpleReturnPercent,
