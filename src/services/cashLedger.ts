@@ -328,18 +328,30 @@ export async function rateToBase(
 
 /**
  * Cumulative net EXTERNAL cash flow of a portfolio in base currency (plan
- * follow-up 2026-09-27): Σ DEPOSIT − Σ WITHDRAWAL ± TRANSFER legs, each at
- * its own historical rate (instruments' date carry-forward). This is the
- * "money actually put in (and taken out)" number — the correct basis for
- * `Total Invested`. A portfolio that is 100% invested has ~0 cash *balance*
- * but a large positive net external flow (it deposited its money), which is
- * exactly what `invested` should report.
+ * follow-up 2026-09-27): Σ DEPOSIT − Σ WITHDRAWAL, each at its own historical
+ * rate (instruments' date carry-forward). This is the "money actually put in
+ * (and taken out)" number. A portfolio that is 100% invested has ~0 cash
+ * *balance* but a large positive net external flow (it deposited its money).
  *
  * Trade rows (BUY/SELL/DIVIDEND) are internal cash↔position moves and are
- * excluded — only the cash-ledger external rows (DEPOSIT/WITHDRAWAL/TRANSFER)
- * count, mirroring {@link dailyExternalFlows}. The sign convention is the
- * cash ledger's: DEPOSIT >0, WITHDRAWAL <0, a transfer out of this portfolio
- * <0 / into it >0, so the net is deposits − withdrawals ± transfer legs.
+ * excluded — only the cash-ledger external rows count, mirroring
+ * {@link dailyExternalFlows}. The sign convention is the cash ledger's:
+ * DEPOSIT >0, WITHDRAWAL <0.
+ *
+ * **An in-kind transfer contributes nothing here, and that is not a filter.**
+ * This function sums every cash-ledger row whatever its type, so a `TRANSFER`
+ * row WOULD count (§68.2's tests rely on that). But the in-kind transfer write
+ * path deliberately writes **no** cash-ledger row — stock changing custody is
+ * not a payment — so in production there is no term to sum and the basis never
+ * moved. This docstring used to promise "± TRANSFER legs" and three call sites
+ * repeated the claim; the promise was unfulfillable as written.
+ *
+ * **`total_invested` is not this number.** The capital basis that
+ * `totalInvested`/`simpleReturnPercent` report adds the transferred cost, and
+ * is `capitalBasisInvested()` in `transferFlows.ts` — a different module
+ * because this one is imported by that one. Keep the two apart: conflating
+ * "money put in" with "capital at risk" is what got `ADJUSTMENT` into trouble
+ * (§89.5).
  */
 export async function externalCashInvested(
   db: DB,

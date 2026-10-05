@@ -13,7 +13,7 @@ import {
   transactionLabels,
 } from "../db/schema.js"
 import { resolveFeeFx } from "../services/fee-fx.js"
-import { externalCashInvested } from "../services/cashLedger.js"
+import { capitalBasisInvested } from "../services/transferFlows.js"
 import { fxTo, resolveRates } from "../services/instruments-fx.js"
 import {
   labelsForPositions,
@@ -104,15 +104,17 @@ async function recomputePortfolioTotals(
   userId: string,
   portfolioId: string,
 ) {
-  // 2026-09-27 — invested = cumulative net EXTERNAL cash flow (deposits −
-  // withdrawals ± transfer legs), not BUY-row cost basis.
+  // 2026-09-27 — invested = cumulative net external cash PLUS the transferred
+  // cost, signed; not BUY-row cost basis. See capitalBasisInvested: the cash
+  // ledger has no transfer rows, so the transfer term comes from the
+  // transactions table (#37).
   const [pf] = await tx
     .select({ baseCurrency: portfolios.baseCurrency })
     .from(portfolios)
     .where(and(eq(portfolios.id, portfolioId), eq(portfolios.userId, userId)))
   // §66.4 — a missing portfolio must not silently value as USD.
   if (!pf) throw new Error(`portfolio ${portfolioId} not found while recomputing invested`)
-  const totalInvested = await externalCashInvested(tx, authToken, portfolioId, pf.baseCurrency)
+  const totalInvested = await capitalBasisInvested(tx, authToken, portfolioId, pf.baseCurrency)
 
   await tx
     .update(portfolios)

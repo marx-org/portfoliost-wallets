@@ -5,7 +5,7 @@ import { randomUUID } from "node:crypto"
 import { userIdentityMiddleware } from "../auth.js"
 import { LOT_QUANTITY_TYPES, POSITION_TX_TYPES } from "../transaction-types.js"
 import { getDb, type DB } from "../db/index.js"
-import { externalCashInvested } from "../services/cashLedger.js"
+import { capitalBasisInvested } from "../services/transferFlows.js"
 import { drawLots, openLots, openQuantity, type LotTx } from "../services/openLots.js"
 import { loadCumFactor, optionPremiumLegIds } from "../services/splitFactors.js"
 import {
@@ -382,17 +382,21 @@ async function processImportSell(
   return { position: updated, realizedGainLoss }
 }
 
-/** Recompute a portfolio's invested total from its external cash flows
- * (§23.4 final pass; 2026-09-27 — net external flow = deposits − withdrawals
- * ± transfer legs, NOT BUY-row cost basis: a fully-invested portfolio has ~0
- * cash balance but a large invested total). */
+/** Recompute a portfolio's invested total from its capital basis
+ * (§23.4 final pass; 2026-09-27 — net external flow, NOT BUY-row cost basis: a
+ * fully-invested portfolio has ~0 cash balance but a large invested total).
+ *
+ * `capitalBasisInvested` = external cash **plus** the cost of whatever was
+ * transferred in or out, signed. The transfer term used to be documented here
+ * as "± transfer legs" of the cash ledger, but a transfer writes no cash row,
+ * so the basis silently never moved — PROD, #37. */
 async function recomputeImportPortfolioTotals(tx: DB, authToken: string | null, userId: string, portfolioId: string) {
   const [pf] = await tx
     .select({ baseCurrency: portfolios.baseCurrency })
     .from(portfolios)
     .where(and(eq(portfolios.id, portfolioId), eq(portfolios.userId, userId)))
   if (!pf) throw new Error(`import: portfolio ${portfolioId} not found`)
-  const totalInvested = await externalCashInvested(tx, authToken, portfolioId, pf.baseCurrency)
+  const totalInvested = await capitalBasisInvested(tx, authToken, portfolioId, pf.baseCurrency)
 
   await tx
     .update(portfolios)
@@ -604,12 +608,23 @@ export function createImportRoutes(db?: DB) {
           }
 
           if (ptx) {
-            await insertImportPortfolioTx(tx, identity.id, {
+            const txResult = await insertImportPortfolioTx(tx, identity.id, {
               source,
               row,
               ptx,
             })
             insertedPtx++
+            // A transfer also moves the RECEIVER's capital basis, and the
+            // receiver never gets an insert of its own — so it would otherwise
+            // never be recomputed at all. #37.
+            const counterparty = (txResult as { counterpartyPortfolio?: { id: string; name: string } })
+              .counterpartyPortfolio
+            if (counterparty && !insertedByPortfolio.has(counterparty.id)) {
+              insertedByPortfolio.set(counterparty.id, {
+                name: counterparty.name,
+                rowCount: 0,
+              })
+            }
           }
           return { inserted: true, portfolioId: portfolio.id, portfolioName: portfolio.name }
         })
@@ -1307,7 +1322,16 @@ async function insertImportTransfer(
       .values(positionLabelIds.map((labelId) => ({ positionId: sourcePositionId, labelId })))
   }
 
-  return { ...firstOut!, positionId: sourcePositionId }
+  return {
+    ...firstOut!,
+    positionId: sourcePositionId,
+    // The receiving side's own `total_invested` changes too — its capital basis
+    // rises by the cost of what arrived. The importer recomputes a portfolio's
+    // totals only for portfolios it recorded an insert INTO, and a transfer
+    // inserts into the sender, so without this the receiver kept whatever basis
+    // it had before and read 0 when it had no other rows. PROD, #37.
+    counterpartyPortfolio: { id: target.id, name: target.name },
+  }
 }
 
 /**

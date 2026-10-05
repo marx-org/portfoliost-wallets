@@ -3,9 +3,12 @@ import { Hono } from "hono"
 import { vi } from "vitest"
 import { makeHarness } from "./test-utils.js"
 import { createImportRoutes } from "./import.js"
+import { eq } from "drizzle-orm"
 import { portfolioCashTransactions, portfolioTransactions, positions, portfolios } from "../db/schema.js"
 import { computeSnapshotBatch, hasBackfillableHistory } from "../services/backfill.js"
 import { __resetBackfillRunnerForTests } from "../services/backfill-runner.js"
+import { externalCashInvested } from "../services/cashLedger.js"
+import { capitalBasisInvested } from "../services/transferFlows.js"
 
 /**
  * Local copy of the price-bar stub from `backfill.test.ts`, which is a file-local
@@ -231,5 +234,70 @@ describe("the gain is counted exactly once, however many custody boundaries it c
     // The sender has a BUY, so it was never the broken case — assert both so the
     // difference is attributable to the transfer rather than to the fixture.
     expect(await hasBackfillableHistory(h.db, from, new Date("2026-02-03T00:00:00Z"))).toBe(true)
+  })
+})
+/**
+ * #37 — the DENORMALISED `portfolios.total_invested` column, which is what
+ * `/summary-metrics` and therefore the SPA card actually read. The block above
+ * covers the daily grid, which already added the transfer term to its own
+ * accumulator; this one covers the column, which did not, so the chart and the
+ * card disagreed with each other.
+ *
+ * PROD: the card showed IBKR `Return 203.76%` directly above
+ * `Unrealized P/L +11 925.88` — the first from a transfer-exclusive basis, the
+ * second from a transfer-inclusive one. Equate+ read −94.56% against a correct
+ * +131.75%. The pair sums identically either way, which is why `/merged` and
+ * every aggregate hid it.
+ */
+describe("#37: the stored total_invested column moves with a transfer, at cost", () => {
+  beforeEach(() => { process.env.INSTRUMENTS_URL = "http://instruments:3000" })
+  afterEach(() => {
+    vi.unstubAllGlobals()
+    delete process.env.INSTRUMENTS_URL
+    __resetBackfillRunnerForTests()
+  })
+
+  /** DEPOSIT 50, BUY 5 @ 10, then TRANSFER_OUT 2 → basis out 30, in 20. */
+  async function importPair() {
+    const { h, post, from, to } = await setup()
+    await post([DEPOSIT("Equate+"), BUY(from, "Equate+")])
+    await post([TRANSFER(from, 2, "x-1")])
+    const invested = async (id: string) => {
+      const [p] = await h.db.select({ v: portfolios.totalInvested }).from(portfolios).where(eq(portfolios.id, id))
+      return Number(p!.v)
+    }
+    return { h, from, to, out: await invested(from), in: await invested(to) }
+  }
+
+  it("the sender's stored basis falls by the cost of what left", async () => {
+    const { out } = await importPair()
+    // 50 deposited − cost of 2 shares (20) = 30.
+    expect(out).toBeCloseTo(30, 6)
+  })
+
+  it("the receiver's stored basis rises by the cost", async () => {
+    const { in: got } = await importPair()
+    expect(got).toBeCloseTo(20, 6)
+  })
+
+  it("the pair's basis is unchanged by the transfer — which is why nothing aggregate flagged it", async () => {
+    const { out, in: got } = await importPair()
+    expect(out + got).toBeCloseTo(50, 6)
+  })
+
+  /**
+   * The separation that must survive the fix. "Money actually put in" and
+   * "capital at risk" are different numbers, and conflating them is what got
+   * ADJUSTMENT into trouble (§89.5). A transfer moves one and not the other, so
+   * this is the assertion that would fail if someone "simplified" the fix into
+   * adding the transfer to `externalCashInvested` itself.
+   */
+  it("external cash is NOT moved by the transfer — only the capital basis is", async () => {
+    const { h, from, to } = await importPair()
+    expect(await externalCashInvested(h.db, null, from, "USD")).toBeCloseTo(50, 6)
+    expect(await externalCashInvested(h.db, null, to, "USD")).toBeCloseTo(0, 6)
+    // Same inputs, two different questions, two different answers.
+    expect(await capitalBasisInvested(h.db, null, from, "USD")).toBeCloseTo(30, 6)
+    expect(await capitalBasisInvested(h.db, null, to, "USD")).toBeCloseTo(20, 6)
   })
 })

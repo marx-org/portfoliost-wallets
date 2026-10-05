@@ -16,7 +16,8 @@ import { and, eq, sql } from "drizzle-orm"
 import type { DB } from "../db/index.js"
 import { positions, portfolios, valueSnapshots } from "../db/schema.js"
 import { fxTo, instrumentsAuthHeaders } from "./instruments-fx.js"
-import { cashBalances, dailyExternalFlows, externalCashInvested } from "./cashLedger.js"
+import { cashBalances, dailyExternalFlows } from "./cashLedger.js"
+import { capitalBasisInvested } from "./transferFlows.js"
 import { recomputeReturnColumns } from "./returnColumns.js"
 import { enqueueBackfill } from "./backfill-runner.js"
 import { splitPortfolioValue } from "./valuation.js"
@@ -546,7 +547,7 @@ export async function snapshotPortfolioValue(
   const snapshotDate = now.toISOString().slice(0, 10)
   // §62.4 — value includes the current cash total (base currency); netFlow is
   // EXTERNAL flows only (a same-day deposit/withdrawal shows up here).
-  totalInvested = await externalCashInvested(db, authToken, portfolioId, base)
+  totalInvested = await capitalBasisInvested(db, authToken, portfolioId, base)
   if (debug) {
     console.log(
       `[recalc-debug-quote] pf=${portfolioId} CASH=${totalCash.toFixed(2)} INSTRUMENTS=${instrumentsValue.toFixed(2)} value=${splitTotal.toFixed(2)} invested=${totalInvested.toFixed(2)} base=${base}`,

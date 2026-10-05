@@ -288,13 +288,13 @@ async function restatePositions(
 
 async function recomputeTotals(tx: DB, userId: string, portfolioId: string) {
   const { portfolios } = await import("../db/schema.js")
-  const { externalCashInvested } = await import("../services/cashLedger.js")
+  const { capitalBasisInvested } = await import("../services/transferFlows.js")
   const [pf] = await tx
     .select({ baseCurrency: portfolios.baseCurrency })
     .from(portfolios)
     .where(and(eq(portfolios.id, portfolioId), eq(portfolios.userId, userId)))
   if (!pf) throw new Error(`internal recompute: portfolio ${portfolioId} not found`)
-  const totalInvested = await externalCashInvested(tx, null, portfolioId, pf.baseCurrency)
+  const totalInvested = await capitalBasisInvested(tx, null, portfolioId, pf.baseCurrency)
 
   await tx
     .update(portfolios)
