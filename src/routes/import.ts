@@ -7,7 +7,7 @@ import { LOT_QUANTITY_TYPES, POSITION_TX_TYPES } from "../transaction-types.js"
 import { getDb, type DB } from "../db/index.js"
 import { externalCashInvested } from "../services/cashLedger.js"
 import { drawLots, openLots, openQuantity, type LotTx } from "../services/openLots.js"
-import { loadCumFactor } from "../services/splitFactors.js"
+import { loadCumFactor, optionPremiumLegIds } from "../services/splitFactors.js"
 import {
   portfolios,
   portfolioCashTransactions,
@@ -1139,6 +1139,7 @@ async function insertImportTransfer(
     )
   }
 
+  const optionLegs = await optionPremiumLegIds(tx, ptx.portfolioId)
   const cumFor = await loadCumFactor(tx, symbol)
   const rows = await tx
     .select({
@@ -1149,6 +1150,7 @@ async function insertImportTransfer(
       price: portfolioTransactions.price,
       originalQuantity: portfolioTransactions.originalQuantity,
       originalPrice: portfolioTransactions.originalPrice,
+      externalId: portfolioTransactions.externalId,
     })
     .from(portfolioTransactions)
     .where(
@@ -1160,7 +1162,7 @@ async function insertImportTransfer(
       ),
     )
 
-  const lots = openLots(rows as unknown as LotTx[], cumFor)
+  const lots = openLots(rows as unknown as LotTx[], cumFor, optionLegs)
   const { draws, shortfall } = drawLots(lots, ptx.quantity)
   if (shortfall > 1e-8) {
     // Refuse the whole row rather than move less than was asked. A shortfall is

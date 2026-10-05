@@ -53,7 +53,11 @@ const SELL_BODY = {
 }
 
 describe("Portfolio transactions (§15 Phase C)", () => {
-  it("POST /:id/transactions — a type the interactive route cannot build is a 422, not a wrong row", async () => {
+  // 30s, following import.test.ts:91. Three sequential POSTs each in their own DB
+  // transaction, plus two table reads — under vitest's 5s default with
+  // `singleFork` and 33 files this intermittently timed out, which reads as a
+  // logic failure and is not one. It failed ~1 run in 4 before the explicit budget.
+  it("POST /:id/transactions — a type the interactive route cannot build is a 422, not a wrong row", { timeout: 30_000 }, async () => {
     // This route's cash leg maps anything that is not BUY to a WITHDRAWAL, so
     // accepting TRANSFER_OUT would have booked a cash payment for an event that
     // moved no cash — the exact thing the transfer type exists to stop.

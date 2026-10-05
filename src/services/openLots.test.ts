@@ -195,3 +195,55 @@ describe("drawLots — the owner's partial cases", () => {
     expect(draws[0].quantity).toBe(3)
   })
 })
+describe("option premium legs are not share disposals (PROD 2026-10-05)", () => {
+  // PROD: six Equate+ transfer rows on SAP.DE failed with
+  // `transfer_exceeds_open_lots` — 25 shares with 5.63 open, 100 with 5.69, 11 with
+  // 0.02. The daily grid excluded option premium legs from its quantity ledger and
+  // this queue did not, so premium SELLs drained it. §72.14 measured the shape on
+  // this very symbol: 481.77 shares bought against 976 "sold".
+  const buy = tx({ id: "b1", type: "BUY", executedAt: day("2026-01-01"), quantity: "481.77", price: "100" })
+  const premium = tx({
+    id: "p1", type: "SELL", executedAt: day("2026-02-01"), quantity: "100", price: "1.25",
+    externalId: "opt-1",
+  })
+  const marker = tx({
+    id: "e1", type: "EXPIRATION", executedAt: day("2026-02-01"), quantity: "100", price: "0",
+    externalId: "opt-1#e",
+  })
+
+  it("without the exclusion the queue loses 200 shares to premium and marker", () => {
+    const lots = openLots([buy, premium, marker], noSplit)
+    // Both legs consume 100 in CONTRACT units of the underlying. That is the §72.14
+    // shape — and it compounds: every premium takes another 200 real shares off a
+    // holding that never sold them.
+    expect(openQuantity(lots)).toBeCloseTo(281.77, 6)
+  })
+
+  it("with it, the whole holding is still open and a transfer can draw on it", () => {
+    const ignore = new Set(["opt-1"])
+    const lots = openLots([buy, premium, marker], noSplit, ignore)
+    expect(openQuantity(lots)).toBeCloseTo(481.77, 6)
+    const { draws, shortfall } = drawLots(lots, 100)
+    expect(shortfall).toBe(0)
+    expect(draws).toHaveLength(1)
+    expect(draws[0].price).toBe(100)
+  })
+
+  it("either leg identifies the pair — the #e marker alone is enough", () => {
+    // The set is built from EXPIRATION rows, so the base form must match a SELL
+    // whose id is already stored suffixed.
+    const ignore = new Set(["opt-1"])
+    const lots = openLots(
+      [buy, tx({ id: "p2", type: "SELL", executedAt: day("2026-03-01"), quantity: "100", externalId: "opt-1" }), marker],
+      noSplit,
+      ignore,
+    )
+    expect(openQuantity(lots)).toBeCloseTo(481.77, 6)
+  })
+
+  it("a genuine SELL is still excluded only when it matches — no over-filtering", () => {
+    const realSale = tx({ id: "r1", type: "SELL", executedAt: day("2026-02-01"), quantity: "100", externalId: "real-1" })
+    const lots = openLots([buy, realSale], noSplit, new Set(["opt-1"]))
+    expect(openQuantity(lots)).toBeCloseTo(381.77, 6)
+  })
+})

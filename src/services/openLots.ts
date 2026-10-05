@@ -44,6 +44,7 @@ export type LotTx = {
   price: string | number
   originalQuantity: string | number | null
   originalPrice: string | number | null
+  externalId?: string | null
 }
 
 export type OpenLot = {
@@ -81,11 +82,23 @@ function restated(tx: LotTx, cumFor: CumFactor): { quantity: number; price: numb
  * the caller as a smaller total. The transfer path needs that — it must reject
  * the whole row rather than silently move less than was asked for.
  */
-export function openLots(rows: LotTx[], cumFor: CumFactor): OpenLot[] {
-  const ordered = [...rows].sort((a, b) => {
-    const d = new Date(a.executedAt).getTime() - new Date(b.executedAt).getTime()
-    return d !== 0 ? d : a.id.localeCompare(b.id)
-  })
+export function openLots(
+  rows: LotTx[],
+  cumFor: CumFactor,
+  /**
+   * Base external ids of option-premium pairs to ignore. Neither leg is a share
+   * disposal — the premium SELL's quantity is in CONTRACT units of the underlying.
+   * Without this the queue drains on premium sells and a real transfer finds
+   * nothing open. See {@link optionPremiumLegIds}.
+   */
+  ignoreExternalIds?: ReadonlySet<string>,
+): OpenLot[] {
+  const ordered = [...rows]
+    .filter((r) => !r.externalId || !ignoreExternalIds?.has(r.externalId.replace(/#e$/, "")))
+    .sort((a, b) => {
+      const d = new Date(a.executedAt).getTime() - new Date(b.executedAt).getTime()
+      return d !== 0 ? d : a.id.localeCompare(b.id)
+    })
 
   const lots: OpenLot[] = []
   for (const row of ordered) {
