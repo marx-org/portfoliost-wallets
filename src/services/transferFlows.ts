@@ -114,6 +114,56 @@ export function neutralisingFlows(
 }
 
 /**
+ * The market-valued neutralising flow, computed from the daily grid.
+ *
+ * `dailyTransferFlows` reads the row, and a row's `totalAmount` is `quantity × the
+ * source lot's cost` — so on its own it can only produce the **cost**. The owner's
+ * decision is that the *flow* is the market value, because its job is to offset how
+ * far `value` actually moved: Equate+ goes `V = 55 → V = 0`, and only a −55 flow
+ * makes that day read 0% instead of −100%.
+ *
+ * The market figure exists only where the price bars do, which is the grid — hence
+ * this function taking the price maps rather than querying anything itself. The
+ * bars are already fetched converted to base, so `qty × close` is already base and
+ * needs no FX step here.
+ *
+ * **Cost is the fallback, and it is a flagged one.** A transfer on a day with no
+ * price for its symbol cannot be valued at market; the grid's convention is to
+ * continue and report rather than abort, so this falls back to the row's cost and
+ * reports the day as `unvalued`. Anywhere `unvalued` is non-empty, that day's return
+ * carries a residual — the same shape as `unpricedValue`/`carriedValue`, for the
+ * same reason: a visible gap beats a silent substitution.
+ */
+export function marketValuedTransferFlows(
+  transfersByDay: Map<string, { symbol: string; quantity: number }[]>,
+  priceMaps: Map<string, Map<string, number>>,
+  costByDay: Map<string, number>,
+): { flows: Map<string, number>; unvalued: Set<string> } {
+  const flows = new Map<string, number>()
+  const unvalued = new Set<string>()
+
+  for (const [day, moves] of transfersByDay) {
+    let total = 0
+    let complete = true
+    for (const move of moves) {
+      const close = priceMaps.get(move.symbol)?.get(day)
+      if (close == null) {
+        complete = false
+        continue
+      }
+      total += move.quantity * close
+    }
+    if (complete) {
+      flows.set(day, total)
+    } else {
+      unvalued.add(day)
+      flows.set(day, costByDay.get(day) ?? 0)
+    }
+  }
+  return { flows, unvalued }
+}
+
+/**
  * The **cost**-valued sibling of {@link dailyTransferFlows}, for the capital basis.
  *
  * Same rows, same signs, different amount: this one uses `quantity × price` — the

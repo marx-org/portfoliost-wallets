@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest"
-import { neutralisingFlows } from "./transferFlows.js"
+import { neutralisingFlows, marketValuedTransferFlows } from "./transferFlows.js"
 
 /**
  * The pure part of the transfer-flow treatment. The database read is exercised in
@@ -76,5 +76,67 @@ describe("why the two amounts differ — the case that catches a flattened rule"
     // than a number: a zero denominator is the degenerate case the guards handle.
     expect(denominator).toBe(0)
     expect(MARKET_AT_TRANSFER).not.toBe(COST_BASIS)
+  })
+})
+describe("marketValuedTransferFlows — the flow is MARKET, the basis is COST", () => {
+  const priceMaps = (closes: Record<string, number>) =>
+    new Map([["AAPL", new Map([["2026-02-01", closes.AAPL]])]])
+
+  it("values the move at the day's close, not the lot's cost", () => {
+    const moves = new Map([["2026-02-01", [{ symbol: "AAPL", quantity: -2 }]]])
+    // Close 11, so 2 shares left worth 22. The cost fallback map says 20.
+    const { flows, unvalued } = marketValuedTransferFlows(
+      moves,
+      priceMaps({ AAPL: 11 }),
+      new Map([["2026-02-01", -20]]),
+    )
+    expect(flows.get("2026-02-01")).toBeCloseTo(-22, 6)
+    expect(flows.get("2026-02-01")).not.toBeCloseTo(-20, 6)
+    expect(unvalued.size).toBe(0)
+  })
+
+  it("a receiving portfolio's flow is the same magnitude, positive", () => {
+    const { flows } = marketValuedTransferFlows(
+      new Map([["2026-02-01", [{ symbol: "AAPL", quantity: 2 }]]]),
+      priceMaps({ AAPL: 11 }),
+      new Map([["2026-02-01", 20]]),
+    )
+    expect(flows.get("2026-02-01")).toBeCloseTo(22, 6)
+  })
+
+  it("the two sides net to zero, which is what leaves merged untouched", () => {
+    const out = marketValuedTransferFlows(
+      new Map([["2026-02-01", [{ symbol: "AAPL", quantity: -2 }]]]),
+      priceMaps({ AAPL: 11 }), new Map())
+    const into = marketValuedTransferFlows(
+      new Map([["2026-02-01", [{ symbol: "AAPL", quantity: 2 }]]]),
+      priceMaps({ AAPL: 11 }), new Map())
+    expect((out.flows.get("2026-02-01") ?? 0) + (into.flows.get("2026-02-01") ?? 0)).toBe(0)
+  })
+
+  it("falls back to the cost and REPORTS the day when there is no close", () => {
+    // Cost is a guess, so it is flagged rather than passed off as a market value —
+    // the same shape as unpricedValue/carriedValue for the same reason.
+    const { flows, unvalued } = marketValuedTransferFlows(
+      new Map([["2026-02-01", [{ symbol: "AAPL", quantity: -2 }]]]),
+      new Map(), // no bars at all
+      new Map([["2026-02-01", -20]]),
+    )
+    expect(flows.get("2026-02-01")).toBeCloseTo(-20, 6)
+    expect([...unvalued]).toEqual(["2026-02-01"])
+  })
+
+  it("sums several lots moved on one day", () => {
+    const maps = new Map([
+      ["AAPL", new Map([["2026-02-01", 11]])],
+      ["MSFT", new Map([["2026-02-01", 30]])],
+    ])
+    const { flows } = marketValuedTransferFlows(
+      new Map([["2026-02-01", [{ symbol: "AAPL", quantity: -2 }, { symbol: "MSFT", quantity: -1 }]]]),
+      maps,
+      new Map(),
+    )
+    // −(2 × 11) − (1 × 30) = −52
+    expect(flows.get("2026-02-01")).toBeCloseTo(-52, 6)
   })
 })

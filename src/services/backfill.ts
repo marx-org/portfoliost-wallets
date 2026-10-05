@@ -31,8 +31,8 @@ import {
   resolvedFxRate,
 } from "./instruments-fx.js"
 import { cashBalanceSeries, dailyExternalFlows } from "./cashLedger.js"
-import { LOT_QUANTITY_TYPES, quantitySign } from "../transaction-types.js"
-import { dailyTransferBasis, dailyTransferFlows } from "./transferFlows.js"
+import { LOT_QUANTITY_TYPES, isTransferType, quantitySign } from "../transaction-types.js"
+import { dailyTransferBasis, dailyTransferFlows, marketValuedTransferFlows } from "./transferFlows.js"
 // §63.2 — `composePortfolioValue` only. `splitPortfolioValue` is deliberately NOT
 // imported: the live path converts each position out of its own instrument
 // currency, and the closes reaching this file are already in the portfolio's base
@@ -1194,6 +1194,25 @@ export async function computeSnapshotBatch(
     }
   }
 
+  // The market-valued half of a transfer's neutralising flow, computed here
+  // because this is where the closes are. `priceMaps` is already converted to
+  // base, so `quantity × close` needs no FX step. The sign convention is the
+  // transfer's own: out is negative, in is positive.
+  const transferMovesByDay = new Map<string, { symbol: string; quantity: number }[]>()
+  for (const tx of txRows) {
+    if (!tx.symbol || !isTransferType(tx.type)) continue
+    const day = toDateStr(tx.executedAt)
+    if (!day || day < from || day > to) continue
+    const arr = transferMovesByDay.get(day) ?? []
+    const sign = quantitySign(tx.type)
+    arr.push({ symbol: tx.symbol, quantity: sign * Number(tx.quantity) })
+    transferMovesByDay.set(day, arr)
+  }
+  // Resolved below, where `transferFlows` (the cost fallback) is available. Declared
+// here so the day loop can read it; assigned once both are in hand.
+let transferMarketFlows = new Map<string, number>()
+const transferUnvaluedDays = new Set<string>()
+
   // §62 follow-up (2026-09-27): invested(day) = cumulative net EXTERNAL cash
   // flow up to that day (deposits − withdrawals ± transfer legs, base ccy) —
   // "money put in". Position cost basis is NOT the invested basis (a fully
@@ -1247,6 +1266,11 @@ export async function computeSnapshotBatch(
   const transferFlows = await dailyTransferFlows(
     db, authToken, portfolioId, from, to, base, { strict: true },
   )
+  {
+    const market = marketValuedTransferFlows(transferMovesByDay, priceMaps, transferFlows)
+    transferMarketFlows = market.flows
+    for (const d of market.unvalued) transferUnvaluedDays.add(d)
+  }
   const preWindowBasis = dayBeforeWindow
     ? await dailyTransferBasis(db, authToken, portfolioId, "0000-01-01", dayBeforeWindow, base, { strict: true })
     : new Map<string, number>()
@@ -1406,7 +1430,8 @@ export async function computeSnapshotBatch(
         snapshotDate: day,
         value: totalValue.toFixed(8),
         invested: totalInvested.toFixed(8),
-        netFlow: ((dailyFlows.get(day) ?? 0) + (transferFlows.get(day) ?? 0)).toFixed(8),
+        netFlow:
+          ((dailyFlows.get(day) ?? 0) + (transferMarketFlows.get(day) ?? 0)).toFixed(8),
         unpricedValue: unpricedCost.toFixed(8),
         carriedValue: carriedCost.toFixed(8),
       })

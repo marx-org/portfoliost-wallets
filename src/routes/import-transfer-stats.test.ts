@@ -133,12 +133,28 @@ describe("a transfer moves the capital basis at COST; the flow neutralises at MA
   })
 
   it("the day reads ~0% rather than a full loss", async () => {
-    const { onTransfer } = await series("from")
-    // The return formula's denominator is (value - 1) + netFlow. Whatever the
-    // transfer moved is carried by the flow, so the day is not reported as a loss.
-    const before = onTransfer!.value + 20
-    expect(before + onTransfer!.netFlow).toBeCloseTo(before - 20, 6)
-    expect(before).toBeCloseTo(53, 6)
+    const { rows, onTransfer } = await series("from")
+    const idx = rows.findIndex((r) => r.day === "2026-02-01")
+    expect(idx).toBeGreaterThan(0)
+    const prev = rows[idx - 1]
+    // The property, not a hardcoded figure. The return denominator is
+    // `V(t-1) + netFlow`, so a neutral day is exactly `V(t) === V(t-1) + netFlow`
+    // — i.e. the flow must EQUAL the value move, not oppose it.
+    const move = onTransfer!.value - prev.value
+    expect({
+      prev: prev.value,
+      cur: onTransfer!.value,
+      move,
+      netFlow: onTransfer!.netFlow,
+      // 55 - 22 = 33 with a -22 flow: neutral.
+      neutral: onTransfer!.value - (prev.value + onTransfer!.netFlow),
+    }).toMatchObject({ neutral: expect.closeTo(0, 6) })
+
+    // And the flow is the MARKET value (2 shares x the 11 close = 22), not the
+    // cost of those shares (20). A cost-based flow would leave the day reading
+    // about -6% instead of 0%.
+    expect(onTransfer!.netFlow).toBeCloseTo(-22, 6)
+    expect(onTransfer!.netFlow).not.toBeCloseTo(-20, 6)
   })
 
   it("rebasing at market would delete real profit", async () => {
