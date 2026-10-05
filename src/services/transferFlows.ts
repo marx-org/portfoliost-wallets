@@ -112,3 +112,65 @@ export function neutralisingFlows(
   for (const [day, v] of transfers) out.set(day, (out.get(day) ?? 0) + v)
   return out
 }
+
+/**
+ * The **cost**-valued sibling of {@link dailyTransferFlows}, for the capital basis.
+ *
+ * Same rows, same signs, different amount: this one uses `quantity × price` — the
+ * lot's own cost — rather than the market value. It is what moves `invested`, and
+ * moving `invested` at market instead would reset the basis upward and delete the
+ * gain that had already accrued.
+ *
+ * A transfer row's `price` is the source lot's cost because the import derives it
+ * FIFO, so `totalAmount` on the row already *is* the cost. No market lookup and no
+ * extra price dependency.
+ */
+export async function dailyTransferBasis(
+  db: DB,
+  authToken: string | null,
+  portfolioId: string | string[],
+  from: string,
+  to: string,
+  baseCurrency: string,
+  opts: { strict?: boolean } = {},
+): Promise<Map<string, number>> {
+  const base = baseCurrency.toUpperCase()
+  const ids = Array.isArray(portfolioId) ? portfolioId : [portfolioId]
+  if (ids.length === 0) return new Map()
+
+  const rows = await db
+    .select({
+      type: portfolioTransactions.type,
+      totalAmount: portfolioTransactions.totalAmount,
+      convertedTotalAmount: portfolioTransactions.convertedTotalAmount,
+      displayCurrency: portfolioTransactions.displayCurrency,
+      currency: portfolioTransactions.currency,
+      executedAt: portfolioTransactions.executedAt,
+    })
+    .from(portfolioTransactions)
+    .where(
+      and(
+        inArray(portfolioTransactions.portfolioId, ids),
+        inArray(portfolioTransactions.type, [...TRANSFER_TX_TYPES]),
+      ),
+    )
+    .orderBy(portfolioTransactions.executedAt)
+
+  if (rows.length === 0) return new Map()
+
+  const flows = new Map<string, number>()
+  for (const r of rows) {
+    const day = toDateStr(r.executedAt)
+    if (!day || day < from || day > to) continue
+    let amount: number
+    if (r.convertedTotalAmount != null && r.displayCurrency?.toUpperCase() === base) {
+      amount = Number(r.convertedTotalAmount)
+    } else {
+      const toBase = await rateToBase(authToken, (r.currency ?? base).toUpperCase(), base, day, opts)
+      amount = Number(r.totalAmount ?? 0) * toBase
+    }
+    const signed = r.type === "TRANSFER_OUT" ? -Math.abs(amount) : Math.abs(amount)
+    flows.set(day, (flows.get(day) ?? 0) + signed)
+  }
+  return flows
+}

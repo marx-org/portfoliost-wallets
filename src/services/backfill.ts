@@ -32,6 +32,7 @@ import {
 } from "./instruments-fx.js"
 import { cashBalanceSeries, dailyExternalFlows } from "./cashLedger.js"
 import { LOT_QUANTITY_TYPES, quantitySign } from "../transaction-types.js"
+import { dailyTransferBasis, dailyTransferFlows } from "./transferFlows.js"
 // §63.2 — `composePortfolioValue` only. `splitPortfolioValue` is deliberately NOT
 // imported: the live path converts each position out of its own instrument
 // currency, and the closes reaching this file are already in the portfolio's base
@@ -1220,10 +1221,43 @@ export async function computeSnapshotBatch(
     )
     for (const v of preWindowFlows.values()) cumulativeFlow += v
   }
+
+  // The capital basis is cumulative net external cash PLUS the cost of whatever
+  // has been transferred in or out, signed. Without the second term a portfolio
+  // that sent an instrument away kept its basis while losing the value, so
+  // `totalReturn = value - invested` reported a full negative of the transferred
+  // value — a −100% day for a holding that was merely moved.
+  //
+  // Cost, not market: `invested` is a basis, so it travels with the shares, and
+  // the accrued unrealised gain is just `value - invested` and follows the
+  // holding. Rebasing at the transfer-date market would delete real profit — five
+  // shares bought at 10 and sold at 12 gained 10, rebased at 11 they gain 5.
+  //
+  // The RETURN series is neutralised by the market-valued flow instead
+  // (`dailyTransferFlows`), because that is how far `value` actually moved. The
+  // two coincide unless the price moved since purchase.
+  const transferBasisFlows = await dailyTransferBasis(
+    db, authToken, portfolioId, from, to, base, { strict: true },
+  )
+  // Market-valued, and this is the one that reaches `netFlow`: it is what offsets
+  // how far `value` actually moved, so a day on which the instrument changed
+  // custody reads ~0% instead of −100%. `netFlow` is the return series' neutral
+  // denominator and nothing else — `externalCashInvested` stays external-only, so
+  // "money actually put in" is unaffected by a transfer.
+  const transferFlows = await dailyTransferFlows(
+    db, authToken, portfolioId, from, to, base, { strict: true },
+  )
+  const preWindowBasis = dayBeforeWindow
+    ? await dailyTransferBasis(db, authToken, portfolioId, "0000-01-01", dayBeforeWindow, base, { strict: true })
+    : new Map<string, number>()
+  let cumulativeTransferBasis = 0
+  for (const v of preWindowBasis.values()) cumulativeTransferBasis += v
+
   const cumulativeFlows = new Map<string, number>()
   for (const day of days) {
     cumulativeFlow += dailyFlows.get(day) ?? 0
-    cumulativeFlows.set(day, cumulativeFlow)
+    cumulativeTransferBasis += transferBasisFlows.get(day) ?? 0
+    cumulativeFlows.set(day, cumulativeFlow + cumulativeTransferBasis)
   }
 
   // 7. Build the snapshot batch (RECALC_DEBUG=1 → per-symbol day-0 debug logs)
@@ -1372,7 +1406,7 @@ export async function computeSnapshotBatch(
         snapshotDate: day,
         value: totalValue.toFixed(8),
         invested: totalInvested.toFixed(8),
-        netFlow: (dailyFlows.get(day) ?? 0).toFixed(8),
+        netFlow: ((dailyFlows.get(day) ?? 0) + (transferFlows.get(day) ?? 0)).toFixed(8),
         unpricedValue: unpricedCost.toFixed(8),
         carriedValue: carriedCost.toFixed(8),
       })
