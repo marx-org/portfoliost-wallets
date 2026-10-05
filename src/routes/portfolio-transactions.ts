@@ -31,6 +31,14 @@ type Label = components["schemas"]["Label"]
 const scale8 = (n: number) => n.toFixed(8)
 const round2 = (n: number) => Math.round(n * 100) / 100
 
+/**
+ * The types this route can actually build. Deliberately narrower than
+ * `POSITION_TX_TYPES`, and the divergence is the point: the schema validates the
+ * full set so a valid type is never a *validation* failure, and this list turns the
+ * unsupported ones into an explicit 422 instead of a silently wrong row.
+ */
+const INTERACTIVE_TX_TYPES = ["BUY", "SELL", "DIVIDEND"] as const
+
 export const TransactionCreateSchema = z.object({
   type: z.enum(POSITION_TX_TYPES),
   symbol: z.string().min(1).max(20),
@@ -490,6 +498,21 @@ export function createTransactionRoutes(db?: DB) {
       return c.json({ error: "ValidationError", message: parsed.error.issues[0]?.message }, 422)
     }
     const body = parsed.data
+    // The interactive route can only express a trade. `TRANSFER_OUT` expands into a
+    // FIFO group with a derived receiving leg, and `EXPIRATION` needs the option
+    // direction — neither is expressible here, and this route's cash leg treats
+    // anything that is not BUY as a WITHDRAWAL, so accepting them would book a cash
+    // payment for an event that moved no cash. Rejected loudly rather than
+    // half-handled; the importer is what produces both.
+    if (!(INTERACTIVE_TX_TYPES as readonly string[]).includes(body.type)) {
+      return c.json(
+        {
+          error: "UnsupportedTransactionType",
+          message: `${body.type} cannot be created here — it needs the import path, which derives the receiving leg`,
+        },
+        422,
+      )
+    }
     const symbol = body.symbol.toUpperCase()
     const txCcy = body.currency.toUpperCase()
     const instCcy = (body.instrumentCurrency ?? body.currency).toUpperCase()

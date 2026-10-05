@@ -53,6 +53,37 @@ const SELL_BODY = {
 }
 
 describe("Portfolio transactions (§15 Phase C)", () => {
+  it("POST /:id/transactions — a type the interactive route cannot build is a 422, not a wrong row", async () => {
+    // This route's cash leg maps anything that is not BUY to a WITHDRAWAL, so
+    // accepting TRANSFER_OUT would have booked a cash payment for an event that
+    // moved no cash — the exact thing the transfer type exists to stop.
+    const h = await makeHarness()
+    const a = app(h.db)
+    const portfolio = await (
+      await a.request("/api/portfolios", {
+        method: "POST",
+        headers: h.headers,
+        body: JSON.stringify({ name: "P", currency: "USD" }),
+      })
+    ).json()
+
+    for (const type of ["TRANSFER_OUT", "TRANSFER_IN", "EXPIRATION"]) {
+      const res = await a.request(`/api/portfolios/${portfolio.id}/transactions`, {
+        method: "POST",
+        headers: h.headers,
+        body: JSON.stringify({ ...BUY_BODY, type, cashLeg: true }),
+      })
+      expect(res.status, `${type} must be rejected here`).toBe(422)
+      expect((await res.json()).error).toBe("UnsupportedTransactionType")
+    }
+
+    // Nothing was written — not a transaction, and critically not a cash row.
+    const txs = await h.db.select().from(portfolioTransactions)
+    expect(txs).toHaveLength(0)
+    const cash = await h.db.select().from(portfolioCashTransactions)
+    expect(cash).toHaveLength(0)
+  })
+
   it("POST /:id/transactions — BUY creates position + transaction", async () => {
     const h = await makeHarness()
     const a = app(h.db)
