@@ -196,7 +196,11 @@ describe("an in-kind transfer draws FIFO and keeps each lot's price", () => {
     expect(Number((await positionFor(h, to)).averageCostBasis)).toBeCloseTo(20, 6)
   })
 
-  it("re-importing the same row inserts nothing", async () => {
+  // Re-importing the same row inserts nothing. It asserts NO ERRORS, not just
+  // `inserted === 0` — the previous version of this test asserted only that, and a
+  // unique-index violation on a re-insert also produces `inserted: 0`, so it passed
+  // while the row was in fact erroring. PROD: sheet row 558.
+  it("re-importing the same row inserts nothing and reports no error", async () => {
     const h = await boot()
     const from = await seedPortfolio(h, "Equate+")
     const to = await seedPortfolio(h, "IBKR")
@@ -205,10 +209,13 @@ describe("an in-kind transfer draws FIFO and keeps each lot's price", () => {
     const first = (await txsFor(h, from)).filter((t) => t.type === "TRANSFER_OUT").map((t) => t.externalId)
 
     const b = await body(await post(h, [transferRow(from, "Equate+", "IBKR", 5)]))
+    expect(b.errors ?? []).toEqual([])
     expect(b.inserted ?? 0).toBe(0)
-    const second = (await txsFor(h, from)).filter((t) => t.type === "TRANSFER_OUT").map((t) => t.externalId)
     // Byte-identical suffixes, so the insert-only sync cannot orphan the group.
-    expect(second).toEqual(first)
+    expect((await txsFor(h, from)).filter((t) => t.type === "TRANSFER_OUT").map((t) => t.externalId)).toEqual(first)
+    // And the receiving side is untouched too — a re-processed transfer would
+    // consume the queue again and draw a different split.
+    expect((await txsFor(h, to)).filter((t) => t.type === "TRANSFER_IN")).toHaveLength(2)
   })
 })
 

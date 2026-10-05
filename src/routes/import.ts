@@ -1,5 +1,5 @@
 import { Hono, type Context } from "hono"
-import { and, desc, eq, inArray, notInArray, sql } from "drizzle-orm"
+import { and, desc, eq, inArray, like, notInArray, or, sql } from "drizzle-orm"
 import { z } from "zod"
 import { randomUUID } from "node:crypto"
 import { userIdentityMiddleware } from "../auth.js"
@@ -566,6 +566,15 @@ export function createImportRoutes(db?: DB) {
           // Idempotency: a re-submitted row's ptx externalId already present
           // → skip (the old design deduped on the wallet leg's unique externalId;
           // pure-trade rows have no cash leg, so dedup on the ptx instead).
+          //
+          // A TRANSFER_OUT stores only SUFFIXED ids — `#x0`, `#xi0`, one pair per
+          // lot drawn — and never the base id. Matching the base id alone therefore
+          // never fires for a transfer: the row is re-processed, the FIFO draw is
+          // recomputed against a queue the previous attempt already consumed, and
+          // the insert then dies on `uq_ptx_external`. That is a PROD failure —
+          // sheet row 558 re-inserted 3 minutes into the run and reported
+          // `internal: Failed query: insert ...`. So the prefix is matched too.
+          // externalId is a sha256 hex digest, so it contains no LIKE metacharacter.
           if (ptx) {
             const [dupPtx] = await tx
               .select({ id: portfolioTransactions.id })
@@ -573,7 +582,10 @@ export function createImportRoutes(db?: DB) {
               .where(
                 and(
                   eq(portfolioTransactions.externalSource, source.externalSource),
-                  eq(portfolioTransactions.externalId, row.externalId),
+                  or(
+                    eq(portfolioTransactions.externalId, row.externalId),
+                    like(portfolioTransactions.externalId, `${row.externalId}#x%`),
+                  ),
                 ),
               )
               .limit(1)
