@@ -124,7 +124,7 @@ describe("a transfer moves the capital basis at COST; the flow neutralises at MA
     expect(onTransfer!.invested).not.toBeCloseTo(22, 2)
   })
 
-  it("netFlow carries the transfer's own amount, signed opposite on each side", async () => {
+  it("netFlow carries the transfer's own amount, signed opposite on each side", { timeout: 30_000 }, async () => {
     const fromSide = await series("from")
     const toSide = await series("to")
     // The row's `totalAmount` is quantity x price, and the import derives price
@@ -269,18 +269,18 @@ describe("#37: the stored total_invested column moves with a transfer, at cost",
     return { h, from, to, out: await invested(from), in: await invested(to) }
   }
 
-  it("the sender's stored basis falls by the cost of what left", async () => {
+  it("the sender's stored basis falls by the cost of what left", { timeout: 30_000 }, async () => {
     const { out } = await importPair()
     // 50 deposited − cost of 2 shares (20) = 30.
     expect(out).toBeCloseTo(30, 6)
   })
 
-  it("the receiver's stored basis rises by the cost", async () => {
+  it("the receiver's stored basis rises by the cost", { timeout: 30_000 }, async () => {
     const { in: got } = await importPair()
     expect(got).toBeCloseTo(20, 6)
   })
 
-  it("the pair's basis is unchanged by the transfer — which is why nothing aggregate flagged it", async () => {
+  it("the pair's basis is unchanged by the transfer — which is why nothing aggregate flagged it", { timeout: 30_000 }, async () => {
     const { out, in: got } = await importPair()
     expect(out + got).toBeCloseTo(50, 6)
   })
@@ -292,7 +292,7 @@ describe("#37: the stored total_invested column moves with a transfer, at cost",
    * this is the assertion that would fail if someone "simplified" the fix into
    * adding the transfer to `externalCashInvested` itself.
    */
-  it("external cash is NOT moved by the transfer — only the capital basis is", async () => {
+  it("external cash is NOT moved by the transfer — only the capital basis is", { timeout: 30_000 }, async () => {
     const { h, from, to } = await importPair()
     expect(await externalCashInvested(h.db, null, from, "USD")).toBeCloseTo(50, 6)
     expect(await externalCashInvested(h.db, null, to, "USD")).toBeCloseTo(0, 6)

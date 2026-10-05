@@ -18,6 +18,7 @@ afterEach(() => unmockInstrumentsFx())
 let h: Harness
 let userId = "user-1"
 let portfolioId: string
+let other = ""
 
 async function seedPortfolio() {
   portfolioId = crypto.randomUUID()
@@ -347,3 +348,93 @@ describe("RECALC_DEBUG cash replay logging", () => {
   })
 })
 
+
+/**
+ * #43 — a **cash** transfer, as opposed to an in-kind stock transfer.
+ *
+ * Owner model, event 3: a cash transfer behaves like a deposit/withdrawal. It moves
+ * **both** quantities — the cash BALANCE and the deposit/withdrawal flows — in **both**
+ * accounts, with opposite signs.
+ *
+ * This was marked UNVERIFIED rather than correct in the #41 audit, and the reason is
+ * visible in this file: the §68.2 block already exercised `TRANSFER` cash rows, but only
+ * against `externalCashInvested` (the flows). Nothing covered `cashBalances` for a
+ * `TRANSFER` row at all, so half the claim rested on reading the code.
+ *
+ * That asymmetry is not an accident of coverage. `cashBalances` is the quantity that
+ * `totalValue` depends on, so a regression here silently moves the headline valuation.
+ */
+describe("#43: a cash transfer moves the balance AND the flows, in both accounts", () => {
+  beforeEach(async () => {
+    h = await makeHarness()
+    await seedPortfolio()
+    other = crypto.randomUUID()
+    await h.db.insert(portfolios).values({ userId, id: other, name: "To", baseCurrency: "PLN" })
+    // A matched pair: 400 out of `portfolioId`, 400 into `other`.
+    await h.db.insert(portfolioCashTransactions).values({
+      userId, portfolioId, type: "TRANSFER", amount: "-400", currency: "PLN", transactionDate: "2024-06-01",
+    })
+    await h.db.insert(portfolioCashTransactions).values({
+      userId, portfolioId: other, type: "TRANSFER", amount: "400", currency: "PLN", transactionDate: "2024-06-01",
+    })
+  })
+
+  it("moves the sender's cash BALANCE", async () => {
+    expect((await cashBalances(h.db, null, portfolioId)).get("PLN")).toBeCloseTo(-400)
+  })
+
+  it("moves the receiver's cash BALANCE the other way", async () => {
+    expect((await cashBalances(h.db, null, other)).get("PLN")).toBeCloseTo(400)
+  })
+
+  it("moves the sender's flows", async () => {
+    expect(await externalCashInvested(h.db, null, portfolioId, "PLN")).toBeCloseTo(-400)
+  })
+
+  it("moves the receiver's flows", async () => {
+    expect(await externalCashInvested(h.db, null, other, "PLN")).toBeCloseTo(400)
+  })
+
+  /**
+   * The consequence that makes this worth asserting at all: the pair nets to zero in
+   * BOTH quantities. A regression that hits one leg, or hits the balance but not the
+   * flows, leaves each quantity individually plausible while the aggregate still
+   * balances — so asserting only the legs would pass. `/merged` is built on that
+   * cancellation, and #37's bug lived precisely in the gap between the two quantities.
+   */
+  it("both legs cancel in the balance AND in the flows", async () => {
+    const bal = async (id: string) => (await cashBalances(h.db, null, id)).get("PLN") ?? 0
+    expect((await bal(portfolioId)) + (await bal(other))).toBeCloseTo(0)
+    expect(
+      (await externalCashInvested(h.db, null, portfolioId, "PLN")) +
+        (await externalCashInvested(h.db, null, other, "PLN")),
+    ).toBeCloseTo(0)
+  })
+
+  /**
+   * The distinction from an in-kind transfer, which is the whole reason there are two
+   * quantities. A stock transfer moves the FLOWS and not the BALANCE; a cash transfer
+   * moves both. Each can be wrong in the opposite direction, and `/merged` balances in
+   * either case, so nothing aggregate would reveal the confusion — which is how #38's
+   * double count survived a 307k PLN reconciliation delta.
+   */
+  it("an in-kind stock transfer moves the basis but NOT the balance", async () => {
+    const { capitalBasisInvested } = await import("./transferFlows.js")
+    const stock = crypto.randomUUID()
+    await h.db.insert(portfolios).values({ userId, id: stock, name: "Stock", baseCurrency: "PLN" })
+    // A TRANSFER_OUT with its mandatory source id, and deliberately NO cash row.
+    await h.db.insert(portfolioTransactions).values({
+      userId, portfolioId: stock, type: "TRANSFER_OUT", instrumentSymbol: "X",
+      quantity: "2", price: "150", currency: "PLN", instrumentCurrency: "PLN",
+      totalAmount: "300", executedAt: new Date("2024-06-01T10:00:00Z"),
+      sourceTransactionId: crypto.randomUUID(),
+    })
+
+    // Balance: untouched — stock changing custody moves no money.
+    expect((await cashBalances(h.db, null, stock)).get("PLN")).toBeUndefined()
+    // Flows: moved, at COST (300), which is what capitalBasisInvested reports.
+    expect(await capitalBasisInvested(h.db, null, stock, "PLN")).toBeCloseTo(-300)
+    // And the genuinely-external figure still does not see it — the three-way split.
+    expect(await externalCashInvested(h.db, null, stock, "PLN")).toBeCloseTo(0)
+  })
+})
