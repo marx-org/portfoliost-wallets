@@ -252,13 +252,13 @@ export function createPortfolioRoutes(db?: DB) {
     const result = await Promise.all(
       rows.map(async (p) => {
         const metrics = await computeMetrics(database, p.id)
-        metrics.totalInvested = Number(p.totalInvested)
+        metrics.capitalBasis = Number(p.totalInvested)
         metrics.totalReturn =
-          Number(p.currentValue) > 0 && metrics.totalInvested > 0
-            ? ((Number(p.currentValue) - metrics.totalInvested) / metrics.totalInvested) * 100
+          Number(p.currentValue) > 0 && metrics.capitalBasis > 0
+            ? ((Number(p.currentValue) - metrics.capitalBasis) / metrics.capitalBasis) * 100
             : 0
-        metrics.totalReturnAmount = Number(p.currentValue) - metrics.totalInvested
-        metrics.returnBasis = metrics.totalInvested
+        metrics.totalReturnAmount = Number(p.currentValue) - metrics.capitalBasis
+        metrics.returnBasis = metrics.capitalBasis
 
         return {
           ...serializePortfolio(p),
@@ -1060,13 +1060,13 @@ async function resolveAggregateBase(
     }
 
     const metrics = await computeMetrics(database, p.id)
-    metrics.totalInvested = Number(p.totalInvested)
+    metrics.capitalBasis = Number(p.totalInvested)
     metrics.totalReturn =
-      Number(p.currentValue) > 0 && metrics.totalInvested > 0
-        ? ((Number(p.currentValue) - metrics.totalInvested) / metrics.totalInvested) * 100
+      Number(p.currentValue) > 0 && metrics.capitalBasis > 0
+        ? ((Number(p.currentValue) - metrics.capitalBasis) / metrics.capitalBasis) * 100
         : 0
-    metrics.totalReturnAmount = Number(p.currentValue) - metrics.totalInvested
-    metrics.returnBasis = metrics.totalInvested
+    metrics.totalReturnAmount = Number(p.currentValue) - metrics.capitalBasis
+    metrics.returnBasis = metrics.capitalBasis
 
     // D58 used to `await refreshQuotes(...)` here, so every portfolio open paid
     // two instruments calls per open position (quote + profile) inside the
