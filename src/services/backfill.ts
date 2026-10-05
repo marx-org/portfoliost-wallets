@@ -31,6 +31,7 @@ import {
   resolvedFxRate,
 } from "./instruments-fx.js"
 import { cashBalanceSeries, dailyExternalFlows } from "./cashLedger.js"
+import { LOT_QUANTITY_TYPES, quantitySign } from "../transaction-types.js"
 // §63.2 — `composePortfolioValue` only. `splitPortfolioValue` is deliberately NOT
 // imported: the live path converts each position out of its own instrument
 // currency, and the closes reaching this file are already in the portfolio's base
@@ -663,6 +664,26 @@ export function forcePortfolioRecalc(
  * guards exactly (plan §48.4 — merged/analytics must not stay "pending" for
  * same-day-only portfolios).
  */
+/**
+ * The `in (...)` list for "types that move a position", shared by all three
+ * filters below so they cannot drift apart.
+ *
+ * It includes the transfer pair because a transfer moves a position. With these
+ * reading `('BUY','SELL')` only, a portfolio whose *entire* history is one
+ * `TRANSFER_IN` — which is exactly what IBKR holds for a symbol received from
+ * Equate+ — produced no window at all: no `'BUY','SELL'` row and no cash row, so
+ * `computeSnapshotBatch` returned an empty batch and the portfolio had no history.
+ * A missing filter value shows up as silently absent data, never as an error.
+ *
+ * `sql.raw`, not a bare string: interpolating a plain string into a `sql` template
+ * makes it a bind parameter, so `in ($1)` — which Postgres rejects with "there is
+ * no parameter $1". The values are compile-time constants from an `as const`
+ * array, never user input.
+ */
+const positionMovementTypes = sql.raw(
+  LOT_QUANTITY_TYPES.map((v) => `'${v}'`).join(","),
+)
+
 export async function hasBackfillableHistory(
   db: DB,
   portfolioId: string,
@@ -674,7 +695,7 @@ export async function hasBackfillableHistory(
     .where(
       and(
         eq(portfolioTransactions.portfolioId, portfolioId),
-        sql`${portfolioTransactions.type} in ('BUY','SELL')`,
+        sql`${portfolioTransactions.type} in (${positionMovementTypes})`,
       ),
     )
   const from = row?.minDate ? toDateStr(row.minDate) : null
@@ -947,7 +968,7 @@ export async function computeSnapshotBatch(
     .where(
       and(
         eq(portfolioTransactions.portfolioId, portfolioId),
-        sql`${portfolioTransactions.type} in ('BUY','SELL')`,
+        sql`${portfolioTransactions.type} in (${positionMovementTypes})`,
       ),
     )
   const [pfRow] = await db
@@ -984,7 +1005,7 @@ export async function computeSnapshotBatch(
     .where(
       and(
         eq(portfolioTransactions.portfolioId, portfolioId),
-        sql`${portfolioTransactions.type} in ('BUY','SELL')`,
+        sql`${portfolioTransactions.type} in (${positionMovementTypes})`,
         lt(portfolioTransactions.executedAt, now),
       ),
     )
@@ -1055,11 +1076,21 @@ export async function computeSnapshotBatch(
   const symbolEvents = new Map<string, QtyEvent[]>()
   for (const tx of txRows) {
     if (!tx.symbol) continue
-      if (tx.type === "SELL" && tx.externalId && optionLegIds.has(tx.externalId)) continue
-      const delta =
-        tx.type === "BUY" ? Number(tx.quantity) : -Number(tx.quantity)
-      const date = toDateStr(tx.executedAt) ?? ""
-      if (!date) continue
+    // BOTH legs of an option premium are cash, not share disposals: the SELL
+    // carries the premium and the "#e" EXPIRATION is its marker. Skipping only
+    // the SELL double-counted the close once the EXPIRATION entered this query —
+    // which it did when `positionMovementTypes` began including the transfer pair
+    // and EXPIRATION, driving the running quantity to 0 and collapsing the whole
+    // series to the premium. Both are excluded by base id.
+    if (tx.externalId && optionLegIds.has(tx.externalId.replace(/#e$/, ""))) continue
+    // `quantitySign`, not "not a BUY means a decrement". A TRANSFER_IN that has
+    // just arrived INCREASES this portfolio's quantity; the old shape decremented
+    // it, driving a receiving portfolio's daily quantity negative.
+    const sign = quantitySign(tx.type)
+    if (sign === 0) continue
+    const delta = sign * Number(tx.quantity)
+    const date = toDateStr(tx.executedAt) ?? ""
+    if (!date) continue
     // `exchange_rate` is the rate the import applied to reach the portfolio's
     // base, and these bonds are PLN-denominated at rate 1, so `qty x price x
     // rate` is base currency. A null rate is treated as 1: the same choice the
@@ -1067,7 +1098,7 @@ export async function computeSnapshotBatch(
     // that is explicitly labelled "this much could not be priced".
     const price = Number(tx.price ?? 0)
     const rate = Number(tx.exchangeRate ?? 1) || 1
-    const costDelta = (tx.type === "BUY" ? 1 : -1) * Math.abs(delta) * price * rate
+    const costDelta = sign * Math.abs(delta) * price * rate
     const arr = symbolEvents.get(tx.symbol) ?? []
     arr.push({ date, delta, costDelta })
     symbolEvents.set(tx.symbol, arr)

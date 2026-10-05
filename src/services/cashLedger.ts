@@ -311,7 +311,7 @@ export async function dailyExternalFlows(
  * both be wrong by an FX factor with nothing logged and nothing thrown, even on
  * the paths that explicitly asked for strict (the historical backfill).
  */
-async function rateToBase(
+export async function rateToBase(
   authToken: string | null,
   from: string,
   base: string,

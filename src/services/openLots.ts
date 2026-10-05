@@ -1,4 +1,4 @@
-/**
+ /**
  * The FIFO open-lot queue for one (portfolio, symbol), as a pure function.
  *
  * `positions` carries a single moving `averageCostBasis` per holding, so the
@@ -56,6 +56,8 @@ export type OpenLot = {
   openedAt: Date
 }
 
+import { quantitySign } from "../transaction-types.js"
+
 export type LotDraw = OpenLot & { quantity: number }
 
 const QTY_EPS = 1e-8
@@ -88,13 +90,14 @@ export function openLots(rows: LotTx[], cumFor: CumFactor): OpenLot[] {
   const lots: OpenLot[] = []
   for (const row of ordered) {
     const { quantity, price } = restated(row, cumFor)
-    if (row.type === "BUY" || row.type === "TRANSFER_IN") {
+    const sign = quantitySign(row.type)
+    if (sign > 0) {
       if (quantity > QTY_EPS) {
         lots.push({ txId: row.id, price, remaining: round8(quantity), openedAt: new Date(row.executedAt) })
       }
       continue
     }
-    if (row.type !== "SELL" && row.type !== "EXPIRATION" && row.type !== "TRANSFER_OUT") continue
+    if (sign === 0) continue
 
     let left = quantity
     for (const lot of lots) {

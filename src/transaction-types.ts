@@ -58,3 +58,22 @@ export function isTransferType(type: string): type is (typeof TRANSFER_TX_TYPES)
 export function isTradeCashType(type: string): type is TradeCashType {
   return (TRADE_CASH_TYPES as readonly string[]).includes(type)
 }
+
+/**
+ * Which types move a position's quantity, and in which direction.
+ *
+ * One rule, three consumers: the FIFO queue (`openLots`), the daily valuation grid
+ * (`backfill`) and the snapshot window. They disagreed once already — the grid
+ * read "not a BUY means a decrement", which would have decremented a TRANSFER_IN
+ * that had just arrived and driven a receiving portfolio's quantity negative.
+ */
+export const LOT_OPENING_TYPES = ["BUY", "TRANSFER_IN"] as const
+export const LOT_CLOSING_TYPES = ["SELL", "EXPIRATION", "TRANSFER_OUT"] as const
+export const LOT_QUANTITY_TYPES = [...LOT_OPENING_TYPES, ...LOT_CLOSING_TYPES] as const
+
+/** +1 opens a lot, −1 closes one, 0 does not move quantity. */
+export function quantitySign(type: string): 1 | -1 | 0 {
+  if ((LOT_OPENING_TYPES as readonly string[]).includes(type)) return 1
+  if ((LOT_CLOSING_TYPES as readonly string[]).includes(type)) return -1
+  return 0
+}
