@@ -31,7 +31,7 @@
 import { sql } from "drizzle-orm"
 import { getDb, closeDb } from "../db/index.js"
 import type { DB } from "../db/index.js"
-import { instrumentsAuthHeaders, resolveRates } from "../services/instruments-fx.js"
+import { instrumentsAuthHeaders, resolvedFxRate } from "../services/instruments-fx.js"
 
 /** Trades deviating from their bar by more than this are flagged. */
 const DEFAULT_TOLERANCE = 0.1
@@ -526,24 +526,36 @@ async function main() {
       bySymbol.set(t.symbol, list)
     }
 
-    // Rates only among the currencies the trades themselves used, so an FX hint
-    // can only ever name a pair that appears in the data being checked.
+    // §72.10 — resolve the FX rate at EACH TRADE's DATE, from the currency the
+    // trade was paid in to the currency the bar is denominated in. They are
+    // usually different (a .L listing paid in PLN), and keying on a single
+    // latest rate made historical trades look wrong by the pair's long-term
+    // move (USD>GBP at 0.76 instead of 2020's ~0.80, EUR>USD at 4.29 instead of
+    // ~1.09). The rate is resolved per trade date so the comparison uses the
+    // rate that was actually in force.
     const rates = new Map<string, number>()
-    // §72.10 — the rate table must reach BOTH ends of every comparison: the
-    // currency the trade was paid in, and the currency the bar is denominated
-    // in. They are usually different (a .L listing paid in PLN), and keying only
-    // on the trade currencies meant the conversion rate was simply absent, so
-    // those trades could not be compared at all.
-    const tradeCcy = [...new Set(trades.map((t) => (t.currency ?? "").toUpperCase()).filter(Boolean))]
-    const barCcy = [...new Set([...barCache.values()].map((v) => (v.claimedCurrency ?? "").toUpperCase()).filter(Boolean))]
-    const wanted = [...new Set([...tradeCcy, ...barCcy])]
-    for (const from of wanted) {
-      try {
-        const r = await resolveRates(token, from, wanted.filter((o) => o !== from))
-        for (const [k, v] of r) if (v != null) rates.set(`${k}>${from}`, v)
-      } catch {
-        // a missing pair just means that conversion is unavailable, and the
-        // trade is then reported unchecked rather than compared wrongly
+    const rateKeys = new Set<string>()
+    for (const [, list] of bySymbol) {
+      for (const t of list) {
+        const from = t.tradeCurrency
+        const to = t.claimedCurrency ?? ""
+        if (!from || !to || from === to) continue
+        // a trade the IMPORT itself converted already carries its rate as
+        // `storedRate`, and that is the authority; only the un-converted rows
+        // need the hint resolved here.
+        if (t.importConverted) continue
+        rateKeys.add(`${from}>${to}>${t.date}`)
+      }
+    }
+    logAuditProgress(asJson, `resolving ${rateKeys.size} historical FX rates`)
+    let resolvedCount = 0
+    for (const key of rateKeys) {
+      const [from, to, date] = key.split(">")
+      const r = await resolvedFxRate(token, from, to, date)
+      if (r) rates.set(key, r.rate)
+      resolvedCount++
+      if (resolvedCount % 50 === 0 || resolvedCount === rateKeys.size) {
+        logAuditProgress(asJson, `resolved ${resolvedCount}/${rateKeys.size} historical FX rates`)
       }
     }
 
