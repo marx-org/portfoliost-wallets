@@ -16,6 +16,7 @@ import {
   labels,
   positionLabels,
   transactionLabels,
+  splitEvents,
 } from "../db/schema.js"
 
 async function boot() {
@@ -642,6 +643,45 @@ describe("POST /api/import/transactions (§23.4)", () => {
     const [pos] = await h.db.select().from(positions).where(eq(positions.portfolioId, portfolioId))
     expect(Number(pos.quantity)).toBe(10)
     expect(Number(pos.averageCostBasis)).toBe(100)
+  })
+
+  it("replays all applicable split events for initial and incremental imports", async () => {
+    const h = await boot()
+    const { portfolioId } = await seedPortfolio(h)
+    await h.db.insert(splitEvents).values([
+      { symbol: "AAPL", factor: "2", effectiveDate: "2024-02-01" },
+      { symbol: "AAPL", factor: "3", effectiveDate: "2024-03-01" },
+    ])
+
+    const res = await postTransactions(h, [
+      { ...buyRow(portfolioId), executedAt: "2024-01-15T10:00:00.000Z" },
+      {
+        ...buyRow(portfolioId, { quantity: 5, price: 55 }),
+        executedAt: "2024-02-15T10:00:00.000Z",
+      },
+      {
+        ...buyRow(portfolioId, { quantity: 7, price: 10 }),
+        executedAt: "2024-04-01T10:00:00.000Z",
+      },
+    ])
+    expect(res.status).toBe(200)
+
+    const rows = (await h.db
+      .select()
+      .from(portfolioTransactions)
+      .where(eq(portfolioTransactions.portfolioId, portfolioId)))
+      .sort((a, b) => a.executedAt.getTime() - b.executedAt.getTime())
+
+    expect(rows.map((row) => [Number(row.quantity), Number(row.price)])).toEqual([
+      [60, 16.66666667],
+      [15, 18.33333333],
+      [7, 10],
+    ])
+    expect(rows.map((row) => [Number(row.originalQuantity), Number(row.originalPrice)])).toEqual([
+      [10, 100],
+      [5, 55],
+      [7, 10],
+    ])
   })
 
   it("manual BUY via the interactive route auto-sets original_quantity/original_price", async () => {

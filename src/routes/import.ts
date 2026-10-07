@@ -1420,9 +1420,11 @@ async function insertImportPortfolioTx(
   // unknown one is a visible gap, a wrong one silently misprices the position.
   const listingCcy = ptx.listingCurrency ? ptx.listingCurrency.toUpperCase() : txCcy
 
-  const notional = ptx.quantity * (ptx.price ?? 0)
-  const feesSettled = settleImportFees(ptx.fees, ptx.feesType, notional)
   const rate = ptx.exchangeRate ?? 1
+  const cumFor = await loadCumFactor(tx, symbol)
+  const importCum = cumFor(executedAt)
+  const originalQuantity = ptx.originalQuantity ?? ptx.quantity
+  const quantity = Math.abs(importCum - 1) < 1e-12 ? ptx.quantity : round8(originalQuantity * importCum)
 
   // EXPIRATION closes an expired (unexercised) option lot at zero value — it
   // must carry zero price and zero fees (the premium was booked on the SELL
@@ -1434,19 +1436,6 @@ async function insertImportPortfolioTx(
       `EXPIRATION requires price 0 and no fees (got price ${ptx.price}, fees ${ptx.fees ?? 0})`,
     )
   }
-
-  // §49 convention (interactive route): a DIVIDEND's totalAmount is the NET
-  // (gross − withholding tax); the wallet leg keeps whatever the importer
-  // sent (the sheet's actual cash). taxes > gross is contradictory → row error.
-  const taxes = ptx.taxes != null ? ptx.taxes : null
-  if (ptx.type === "DIVIDEND" && taxes != null && taxes > notional) {
-    throw new ImportRowError(
-      "dividend_taxes_exceed_gross",
-      row.externalId,
-      `taxes ${taxes} exceed gross ${notional}`,)
-  }
-  const totalAmount =
-    ptx.type === "DIVIDEND" && taxes != null ? round2(notional - taxes) : round2(notional)
 
   // §55.1: sheet-derived label names → this user's label ids; any unknown
   // name (one the bootstrap didn't create) fails the row loudly.
@@ -1465,7 +1454,7 @@ async function insertImportPortfolioTx(
     return insertImportTransfer(tx, userId, {
       source,
       row,
-      ptx,
+      ptx: { ...ptx, quantity },
       executedAt,
       symbol,
       listingCcy,
@@ -1482,6 +1471,24 @@ async function insertImportPortfolioTx(
   if (price == null) {
     throw new ImportRowError("missing_price", row.externalId, `price is required for type ${ptx.type}`)
   }
+  const originalPrice = ptx.originalPrice ?? price
+  const restatedPrice = Math.abs(importCum - 1) < 1e-12 ? price : round8(originalPrice / importCum)
+  const notional = quantity * restatedPrice
+  const feesSettled = settleImportFees(ptx.fees, ptx.feesType, notional)
+
+  // §49 convention (interactive route): a DIVIDEND's totalAmount is the NET
+  // (gross − withholding tax); the wallet leg keeps whatever the importer
+  // sent (the sheet's actual cash). taxes > gross is contradictory → row error.
+  const taxes = ptx.taxes != null ? ptx.taxes : null
+  if (ptx.type === "DIVIDEND" && taxes != null && taxes > notional) {
+    throw new ImportRowError(
+      "dividend_taxes_exceed_gross",
+      row.externalId,
+      `taxes ${taxes} exceed gross ${notional}`,
+    )
+  }
+  const totalAmount =
+    ptx.type === "DIVIDEND" && taxes != null ? round2(notional - taxes) : round2(notional)
 
   // A SHORT row opens (or adds to) a short option position — position-
   // creating, no realized P/L — whether it arrives as type BUY or SELL
@@ -1493,8 +1500,8 @@ async function insertImportPortfolioTx(
     const position = await upsertImportPositionOnBuy(tx, userId, ptx.portfolioId, {
       symbol,
       instrumentName: ptx.instrumentName ?? null,
-      quantity: ptx.quantity,
-      price,
+      quantity,
+      price: restatedPrice,
       currency: txCcy,
       assetType: ptx.assetType,
       feesSettled,
@@ -1511,8 +1518,8 @@ async function insertImportPortfolioTx(
   } else if (ptx.type === "SELL" || ptx.type === "EXPIRATION") {
     const res = await processImportSell(tx, userId, ptx.portfolioId, {
       symbol,
-      quantity: ptx.quantity,
-      price: ptx.type === "EXPIRATION" ? 0 : price,
+      quantity,
+      price: ptx.type === "EXPIRATION" ? 0 : restatedPrice,
       feesSettled: ptx.type === "EXPIRATION" ? 0 : feesSettled,
       executedAt,
       // SELL rows that reach this branch are always default-lot closes (a
@@ -1557,12 +1564,12 @@ async function insertImportPortfolioTx(
       type: ptx.type,
       instrumentSymbol: symbol,
       instrumentName: ptx.instrumentName ?? null,
-      quantity: scale8(ptx.quantity),
-      price: scale8(price),
+      quantity: scale8(quantity),
+      price: scale8(restatedPrice),
       // Default originals to the restated values (mirrors the interactive route
       // invariant), so §23.6 apply-split can restate rows from frozen originals.
-      originalQuantity: scale8(ptx.originalQuantity ?? ptx.quantity),
-      originalPrice: scale8(ptx.originalPrice ?? price),
+      originalQuantity: scale8(originalQuantity),
+      originalPrice: scale8(originalPrice),
       currency: txCcy,
       // §72.8 — a resolved listing currency beats the payment currency. Both
       // may legitimately differ, and when they do it is the listing currency that
@@ -1672,4 +1679,3 @@ async function resolveImportLabelIds(
   }
   return byName
 }
-
