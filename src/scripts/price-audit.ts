@@ -376,6 +376,10 @@ export function resolveInstrumentsToken(env: NodeJS.ProcessEnv = process.env): s
   )
 }
 
+export function logAuditProgress(asJson: boolean, message: string): void {
+  if (!asJson) console.log(`[price-audit] progress: ${message}`)
+}
+
 /** Raw native closes keyed by YYYY-MM-DD. No `?currency=` — that would convert. */
 async function fetchNativeBars(
   symbol: string,
@@ -437,7 +441,8 @@ async function main() {
       where t.type in ('BUY','SELL') and t.price is not null and t.price <> 0
         and t.instrument_symbol is not null
         ${only ? sql`and pf.name = ${only}` : sql``}
-      order by t.instrument_symbol, t.executed_at`)) as unknown as TradeRow[]
+       order by t.instrument_symbol, t.executed_at`)) as unknown as TradeRow[]
+    logAuditProgress(asJson, `loaded ${trades.length} BUY/SELL trades`)
 
     // §72.18 — an option premium is not a share trade, and comparing it with a
     // share price is a guaranteed false positive.
@@ -463,7 +468,14 @@ async function main() {
     // One history call per symbol, reused across every trade in it.
     const symbols = [...new Set(trades.map((t) => t.symbol))]
     const barCache = new Map<string, Awaited<ReturnType<typeof fetchNativeBars>>>()
-    for (const sym of symbols) barCache.set(sym, await fetchNativeBars(sym, token))
+    logAuditProgress(asJson, `fetching price bars for ${symbols.length} symbols`)
+    for (let i = 0; i < symbols.length; i++) {
+      const sym = symbols[i]
+      logAuditProgress(asJson, `fetching ${i + 1}/${symbols.length}: ${sym}`)
+      const bars = await fetchNativeBars(sym, token)
+      barCache.set(sym, bars)
+      logAuditProgress(asJson, `fetched ${i + 1}/${symbols.length}: ${sym} (${bars.bars.size} bars${bars.claimedCurrency ? `, ${bars.claimedCurrency}` : ""})`)
+    }
 
     const bySymbol = new Map<string, Array<Omit<TradeVerdict, "fxHint">>>()
     let optionLegsSkipped = 0
@@ -526,6 +538,7 @@ async function main() {
     }
 
     const reports: SymbolReport[] = []
+    logAuditProgress(asJson, `assessing ${bySymbol.size} symbols`)
     for (const [sym, list] of bySymbol) {
       const posCcy = (list[0] ? trades.find((t) => t.symbol === sym)?.instrumentCurrency : null) ?? null
       reports.push(summarise(sym, assessSymbol(list, rates), (posCcy ?? "").toUpperCase() || null, tolerance))

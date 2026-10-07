@@ -7,12 +7,15 @@ import {
   deviationPct,
   isOrderPriced,
   normaliseToBarCurrency,
+  logAuditProgress,
   pickBar,
   pickOrderPricedBar,
   resolveInstrumentsToken,
   summarise,
   type TradeVerdict,
 } from "./price-audit.js"
+
+import { vi } from "vitest"
 
 /**
  * §72 — the rules that decide whether a symbol is reported. Pure, so the policy
@@ -222,6 +225,22 @@ describe("resolveInstrumentsToken", () => {
     // Every bar read would be a 401 that looks like "no data", and an audit that
     // cannot check must never report clean.
     expect(() => resolveInstrumentsToken({} as NodeJS.ProcessEnv)).toThrow(/INSTRUMENTS_SERVICE_TOKEN/)
+  })
+})
+
+describe("logAuditProgress", () => {
+  it("writes visible progress in human-readable mode", () => {
+    const log = vi.spyOn(console, "log").mockImplementation(() => undefined)
+    logAuditProgress(false, "fetching 1/2: AAPL")
+    expect(log).toHaveBeenCalledWith("[price-audit] progress: fetching 1/2: AAPL")
+    log.mockRestore()
+  })
+
+  it("keeps JSON mode clean", () => {
+    const log = vi.spyOn(console, "log").mockImplementation(() => undefined)
+    logAuditProgress(true, "fetching 1/2: AAPL")
+    expect(log).not.toHaveBeenCalled()
+    log.mockRestore()
   })
 })
 
