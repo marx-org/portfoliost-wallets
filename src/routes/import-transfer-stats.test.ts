@@ -4,8 +4,8 @@ import { vi } from "vitest"
 import { makeHarness } from "./test-utils.js"
 import { createImportRoutes } from "./import.js"
 import { eq } from "drizzle-orm"
-import { portfolioCashTransactions, portfolioTransactions, positions, portfolios } from "../db/schema.js"
-import { computeSnapshotBatch, hasBackfillableHistory } from "../services/backfill.js"
+import { portfolioBackfillMetadata, portfolioCashTransactions, portfolioTransactions, positions, portfolios, valueSnapshots } from "../db/schema.js"
+import { computeSnapshotBatch, hasBackfillableHistory, recalcPortfolioHistory, recalcPortfolioSeries } from "../services/backfill.js"
 import { __resetBackfillRunnerForTests } from "../services/backfill-runner.js"
 import { externalCashInvested } from "../services/cashLedger.js"
 import { capitalBasisInvested } from "../services/transferFlows.js"
@@ -80,10 +80,17 @@ const TRANSFER = (pf: string, qty: number, id: string) => ({
  * showing a −100% day. The rendering case is the one where value survives.
  */
 describe("a transfer moves the capital basis at COST; the flow neutralises at MARKET", () => {
-  beforeEach(() => { process.env.INSTRUMENTS_URL = "http://instruments:3000" })
+  beforeEach(() => {
+    process.env.INSTRUMENTS_URL = "http://instruments:3000"
+    process.env.INSTRUMENTS_SERVICE_TOKEN = "test-instruments-service-token"
+    mockPriceBars({
+      AAPL: { dates: ["2026-01-01", "2026-01-31", "2026-02-01", "2026-02-02"], closes: [10, 11, 11, 11] },
+    })
+  })
   afterEach(() => {
     vi.unstubAllGlobals()
     delete process.env.INSTRUMENTS_URL
+    delete process.env.INSTRUMENTS_SERVICE_TOKEN
     __resetBackfillRunnerForTests()
   })
 
@@ -175,9 +182,73 @@ describe("a transfer moves the capital basis at COST; the flow neutralises at MA
     const cash = await h.db.select().from(portfolioCashTransactions)
     expect(cash.every((r) => r.type === "DEPOSIT")).toBe(true)
   })
+
+  it("uses the preceding close for a transfer-only portfolio starting on a Sunday", async () => {
+    const { h, post, from, to } = await setup()
+    await post([DEPOSIT("Equate+"), BUY(from, "Equate+")])
+    mockPriceBars({ AAPL: { dates: ["2026-01-30"], closes: [11] } })
+    await post([{
+      ...TRANSFER(from, 2, "x-sunday"), executedAt: "2026-02-01T12:00:00Z",
+    }])
+
+    const batch = await computeSnapshotBatch(h.db, to, "Bearer test", new Date("2026-02-03T00:00:00Z"))
+    const point = batch.rows.find((r) => r.snapshotDate === "2026-02-01")
+    expect(Number(point?.invested)).toBeCloseTo(20, 6)
+    expect(Number(point?.netFlow)).toBeCloseTo(22, 6)
+  })
+
+  it("fails a stored transfer with no price without overwriting its snapshots", async () => {
+    const { h, post, from } = await setup()
+    await post([DEPOSIT("Equate+"), BUY(from, "Equate+")])
+    await post([TRANSFER(from, 2, "x-1")])
+    await h.db.insert(valueSnapshots).values({
+      portfolioId: from, snapshotDate: "2026-01-31", value: "55", invested: "50", netFlow: "0",
+    })
+    mockPriceBars({})
+
+    await recalcPortfolioHistory(h.db, from, "Bearer test", new Date("2026-02-03T00:00:00Z"))
+    const [status] = await h.db.select().from(portfolioBackfillMetadata).where(eq(portfolioBackfillMetadata.portfolioId, from))
+    const rows = await h.db.select().from(valueSnapshots).where(eq(valueSnapshots.portfolioId, from))
+    expect(status.status).toBe("failed")
+    expect(status.errorMessage).toContain("AAPL on or before 2026-02-01")
+    expect(rows).toHaveLength(1)
+    expect(Number(rows[0].value)).toBe(55)
+  })
+
+  it("fails an additive rebuild without writing cost-valued transfer flows", async () => {
+    const { h, post, from } = await setup()
+    await post([DEPOSIT("Equate+"), BUY(from, "Equate+")])
+    await post([TRANSFER(from, 2, "x-1")])
+    await h.db.insert(valueSnapshots).values({
+      portfolioId: from, snapshotDate: "2026-01-31", value: "55", invested: "50", netFlow: "0",
+    })
+    mockPriceBars({})
+
+    await recalcPortfolioSeries(h.db, from, "Bearer test", new Date("2026-02-03T00:00:00Z"))
+    const [status] = await h.db.select().from(portfolioBackfillMetadata).where(eq(portfolioBackfillMetadata.portfolioId, from))
+    const rows = await h.db.select().from(valueSnapshots).where(eq(valueSnapshots.portfolioId, from))
+    expect(status.status).toBe("failed")
+    expect(status.errorMessage).toContain("AAPL on or before 2026-02-01")
+    expect(rows).toHaveLength(1)
+    expect(Number(rows[0].value)).toBe(55)
+  })
 })
 
 describe("the gain is counted exactly once, however many custody boundaries it crosses", () => {
+  beforeEach(() => {
+    process.env.INSTRUMENTS_URL = "http://instruments:3000"
+    process.env.INSTRUMENTS_SERVICE_TOKEN = "test-instruments-service-token"
+    mockPriceBars({
+      AAPL: { dates: ["2026-01-31", "2026-02-01", "2026-02-02"], closes: [11, 11, 11] },
+    })
+  })
+  afterEach(() => {
+    vi.unstubAllGlobals()
+    delete process.env.INSTRUMENTS_URL
+    delete process.env.INSTRUMENTS_SERVICE_TOKEN
+    __resetBackfillRunnerForTests()
+  })
+
   it("transfer plus sale books the full gain, on IBKR, and none at the transfer", async () => {
     const { h, post, from, to } = await setup()
     await post([DEPOSIT("Equate+"), BUY(from, "Equate+")])
@@ -206,6 +277,29 @@ describe("the gain is counted exactly once, however many custody boundaries it c
     for (const l of legs) {
       if (l.type === "TRANSFER_OUT" || l.type === "TRANSFER_IN") expect(l.realizedGainLoss).toBeNull()
     }
+  })
+
+  it("prices a same-day transfer and sale with no end-of-day holding", async () => {
+    const { h, post, from, to } = await setup()
+    await post([DEPOSIT("Equate+"), BUY(from, "Equate+")])
+    const response = await post([
+      TRANSFER(from, 5, "x-same-day"),
+      {
+        externalId: "s-same-day", portfolioName: "IBKR", executedAt: "2026-02-01T13:00:00Z",
+        portfolioTx: {
+          portfolioId: to, type: "SELL", instrumentSymbol: "AAPL", assetType: "STOCK",
+          quantity: 5, price: 12, currency: "USD", executedAt: "2026-02-01T13:00:00Z",
+        },
+      },
+    ])
+    const imported = await response.json()
+    expect(imported.errors).toEqual([])
+
+    const batch = await computeSnapshotBatch(h.db, to, "Bearer test", new Date("2026-02-03T00:00:00Z"))
+    const point = batch.rows.find((r) => r.snapshotDate === "2026-02-01")
+    expect(Number(point?.invested)).toBeCloseTo(50, 6)
+    expect(Number(point?.netFlow)).toBeCloseTo(55, 6)
+    expect(Number(point?.netFlow)).not.toBeCloseTo(50, 6)
   })
 
   it("quantity is conserved across the boundary", async () => {
@@ -250,10 +344,17 @@ describe("the gain is counted exactly once, however many custody boundaries it c
  * every aggregate hid it.
  */
 describe("#37: the stored total_invested column moves with a transfer, at cost", () => {
-  beforeEach(() => { process.env.INSTRUMENTS_URL = "http://instruments:3000" })
+  beforeEach(() => {
+    process.env.INSTRUMENTS_URL = "http://instruments:3000"
+    process.env.INSTRUMENTS_SERVICE_TOKEN = "test-instruments-service-token"
+    mockPriceBars({
+      AAPL: { dates: ["2026-01-01", "2026-01-31", "2026-02-01", "2026-02-02"], closes: [10, 11, 11, 11] },
+    })
+  })
   afterEach(() => {
     vi.unstubAllGlobals()
     delete process.env.INSTRUMENTS_URL
+    delete process.env.INSTRUMENTS_SERVICE_TOKEN
     __resetBackfillRunnerForTests()
   })
 

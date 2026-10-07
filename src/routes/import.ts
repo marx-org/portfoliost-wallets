@@ -27,6 +27,8 @@ import { preferredBaseCurrency } from "../services/preferences.js"
 import { nextPaletteColor } from "./labels.js"
 import { ISO_CURRENCY } from "../services/currency.js"
 import { notifyTransactionsChanged } from "../services/recalc-queue.js"
+import { transferCloseForDate } from "../services/backfill.js"
+import { resolveServiceToken } from "../services/instruments-fx.js"
 import type { components } from "../generated/api-types.js"
 
 type ImportPortfolioBootstrapResponse = components["schemas"]["ImportPortfolioBootstrapResponse"]
@@ -612,6 +614,7 @@ export function createImportRoutes(db?: DB) {
               source,
               row,
               ptx,
+              portfolioBaseCurrency: portfolio.baseCurrency,
             })
             insertedPtx++
             // A transfer also moves the RECEIVER's capital basis, and the
@@ -1142,9 +1145,10 @@ async function insertImportTransfer(
     txCcy: string
     rate: number
     positionLabelIds: string[]
+    portfolioBaseCurrency: string
   },
 ) {
-  const { source, row, ptx, executedAt, symbol, listingCcy, txCcy, rate, positionLabelIds } = input
+  const { source, row, ptx, executedAt, symbol, listingCcy, txCcy, rate, positionLabelIds, portfolioBaseCurrency } = input
   const toName = ptx.toPortfolioName?.trim()
   if (!toName) {
     throw new ImportRowError(
@@ -1199,6 +1203,27 @@ async function insertImportTransfer(
       row.externalId,
       `TRANSFER_OUT of ${ptx.quantity} exceeds ${openQuantity(lots)} open in ${symbol}`,
     )
+  }
+
+  const day = executedAt.toISOString().slice(0, 10)
+  for (const baseCurrency of new Set([portfolioBaseCurrency.toUpperCase(), target.baseCurrency.toUpperCase()])) {
+    let close: number | null
+    try {
+      close = await transferCloseForDate(symbol, day, resolveServiceToken(), baseCurrency, listingCcy)
+    } catch (err) {
+      throw new ImportRowError(
+        "transfer_price_source_unavailable",
+        row.externalId,
+        `${symbol} ${day} in ${baseCurrency}: ${err instanceof Error ? err.message : String(err)}`,
+      )
+    }
+    if (close == null || !Number.isFinite(close) || close <= 0) {
+      throw new ImportRowError(
+        "transfer_price_missing",
+        row.externalId,
+        `No historical close for transfer ${symbol} on or before ${day} in ${baseCurrency}`,
+      )
+    }
   }
 
   const transferGroupId = randomUUID()
@@ -1383,9 +1408,10 @@ async function insertImportPortfolioTx(
     source: { externalSource: string }
     row: z.infer<typeof ImportTransactionSchema>
     ptx: z.infer<typeof ImportPortfolioTxSchema>
+    portfolioBaseCurrency: string
   },
 ) {
-  const { source, row, ptx } = input
+  const { source, row, ptx, portfolioBaseCurrency } = input
   const executedAt = ptx.executedAt ? new Date(ptx.executedAt) : new Date(row.executedAt)
   const symbol = ptx.instrumentSymbol.toUpperCase()
   const txCcy = ptx.currency.toUpperCase()
@@ -1446,6 +1472,7 @@ async function insertImportPortfolioTx(
       txCcy,
       rate,
       positionLabelIds,
+      portfolioBaseCurrency,
     })
   }
 

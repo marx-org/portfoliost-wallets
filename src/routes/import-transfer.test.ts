@@ -1,9 +1,41 @@
-import { describe, expect, it } from "vitest"
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import { and, eq } from "drizzle-orm"
 import { makeHarness, type Harness } from "./test-utils.js"
 import { Hono } from "hono"
 import { createImportRoutes } from "./import.js"
 import { portfolioTransactions, positions, portfolios } from "../db/schema.js"
+import { __resetBackfillRunnerForTests } from "../services/backfill-runner.js"
+
+function stubTransferPrices(
+  get: (url: URL) => { dates: string[]; closes: number[]; currency: string } | null,
+) {
+  const previousFetch = globalThis.fetch
+  vi.stubGlobal("fetch", vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+    const url = String(input)
+    if (!url.includes("/price-bars?")) return previousFetch(input, init)
+    const data = get(new URL(url))
+    return data
+      ? new Response(JSON.stringify({ symbol: "AAPL", stale: false, ...data }))
+      : new Response(null, { status: 404 })
+  }))
+}
+
+beforeEach(() => {
+  process.env.INSTRUMENTS_URL = "http://instruments:3000"
+  process.env.INSTRUMENTS_SERVICE_TOKEN = "test-instruments-service-token"
+  stubTransferPrices((url) => ({
+    dates: [url.searchParams.get("from")!],
+    closes: [11],
+    currency: url.searchParams.get("currency") ?? "USD",
+  }))
+})
+
+afterEach(() => {
+  vi.unstubAllGlobals()
+  delete process.env.INSTRUMENTS_URL
+  delete process.env.INSTRUMENTS_SERVICE_TOKEN
+  __resetBackfillRunnerForTests()
+})
 
 async function boot() {
   const h = await makeHarness()
@@ -97,7 +129,7 @@ async function positionFor(h: Harness, portfolioId: string) {
 async function body(res: Response) {
   return (await res.json()) as {
     inserted?: number
-    errors?: { externalId: string; error: string }[]
+    errors?: { externalId: string; error: string; message: string }[]
     issues?: unknown[]
   }
 }
@@ -124,7 +156,7 @@ describe("an in-kind transfer draws FIFO and keeps each lot's price", () => {
     const ins = (await txsFor(h, to)).filter((t) => t.type === "TRANSFER_IN")
     expect(ins).toHaveLength(2)
     expect(ins.map((i) => [Number(i.quantity), Number(i.price)])).toEqual([[4, 10], [1, 12]])
-  })
+  }, 30_000)
 
   it("records the source BUY on each TRANSFER_OUT, and nothing was disposed of", async () => {
     const h = await boot()
@@ -207,6 +239,7 @@ describe("an in-kind transfer draws FIFO and keeps each lot's price", () => {
     await post(h, [buy(from, "Equate+", "b1", "2026-01-01T12:00:00Z", 4, 10), buy(from, "Equate+", "b2", "2026-02-01T12:00:00Z", 1, 12)])
     await post(h, [transferRow(from, "Equate+", "IBKR", 5)])
     const first = (await txsFor(h, from)).filter((t) => t.type === "TRANSFER_OUT").map((t) => t.externalId)
+    stubTransferPrices(() => null)
 
     const b = await body(await post(h, [transferRow(from, "Equate+", "IBKR", 5)]))
     expect(b.errors ?? []).toEqual([])
@@ -216,6 +249,74 @@ describe("an in-kind transfer draws FIFO and keeps each lot's price", () => {
     // And the receiving side is untouched too — a re-processed transfer would
     // consume the queue again and draw a different split.
     expect((await txsFor(h, to)).filter((t) => t.type === "TRANSFER_IN")).toHaveLength(2)
+  })
+})
+
+describe("a transfer requires a historical market close", () => {
+  it("rejects an unpriceable row without inserting either transfer leg", async () => {
+    const h = await boot()
+    const from = await seedPortfolio(h, "Equate+")
+    const to = await seedPortfolio(h, "IBKR")
+    await post(h, [buy(from, "Equate+", "b1", "2026-01-01T12:00:00Z", 2, 10)])
+    stubTransferPrices(() => null)
+
+    const result = await body(await post(h, [transferRow(from, "Equate+", "IBKR", 2)]))
+    expect(result.errors?.[0]?.error).toBe("transfer_price_missing")
+    expect(result.errors?.[0]?.message).toContain("AAPL on or before 2026-06-01")
+    expect((await txsFor(h, from)).filter((t) => t.type === "TRANSFER_OUT")).toHaveLength(0)
+    expect(await txsFor(h, to)).toHaveLength(0)
+    expect(Number((await positionFor(h, from)).quantity)).toBe(2)
+  })
+
+  it("reports an unavailable price source separately from missing history", async () => {
+    const h = await boot()
+    const from = await seedPortfolio(h, "Equate+")
+    const to = await seedPortfolio(h, "IBKR")
+    await post(h, [buy(from, "Equate+", "b1", "2026-01-01T12:00:00Z", 2, 10)])
+    stubTransferPrices(() => { throw new Error("price service offline") })
+
+    const result = await body(await post(h, [transferRow(from, "Equate+", "IBKR", 2)]))
+    expect(result.errors?.[0]?.error).toBe("transfer_price_source_unavailable")
+    expect(result.errors?.[0]?.message).toContain("2026-06-01")
+    expect((await txsFor(h, from)).filter((t) => t.type === "TRANSFER_OUT")).toHaveLength(0)
+    expect(await txsFor(h, to)).toHaveLength(0)
+  })
+
+  it("uses the preceding Friday close for a Sunday transfer", async () => {
+    const h = await boot()
+    const from = await seedPortfolio(h, "Equate+")
+    const to = await seedPortfolio(h, "IBKR")
+    await post(h, [buy(from, "Equate+", "b1", "2026-01-01T12:00:00Z", 2, 10)])
+    const requests: URL[] = []
+    stubTransferPrices((url) => {
+      requests.push(url)
+      return { dates: ["2026-05-29"], closes: [11], currency: "PLN" }
+    })
+
+    const result = await body(await post(h, [transferRow(from, "Equate+", "IBKR", 2, "2026-05-31T12:00:00Z")]))
+    expect(result.errors ?? []).toEqual([])
+    const preflight = requests.filter((url) => url.searchParams.get("from") === "2026-05-31")
+    expect(preflight).toHaveLength(1)
+    expect(preflight[0].searchParams.get("includePrevious")).toBe("true")
+    expect((await txsFor(h, from)).filter((t) => t.type === "TRANSFER_OUT")).toHaveLength(1)
+    expect((await txsFor(h, to)).filter((t) => t.type === "TRANSFER_IN")).toHaveLength(1)
+  })
+
+  it("validates the receiver's currency as well as the sender's", async () => {
+    const h = await boot()
+    const from = await seedPortfolio(h, "Equate+")
+    const to = await seedPortfolio(h, "IBKR")
+    await h.db.update(portfolios).set({ baseCurrency: "USD" }).where(eq(portfolios.id, to))
+    await post(h, [buy(from, "Equate+", "b1", "2026-01-01T12:00:00Z", 2, 10)])
+    stubTransferPrices((url) => url.searchParams.has("currency")
+      ? { dates: ["2026-06-01"], closes: [11], currency: "PLN" }
+      : null)
+
+    const result = await body(await post(h, [transferRow(from, "Equate+", "IBKR", 2)]))
+    expect(result.errors?.[0]?.error).toBe("transfer_price_missing")
+    expect(result.errors?.[0]?.message).toContain("USD")
+    expect((await txsFor(h, from)).filter((t) => t.type === "TRANSFER_OUT")).toHaveLength(0)
+    expect(await txsFor(h, to)).toHaveLength(0)
   })
 })
 

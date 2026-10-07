@@ -32,7 +32,7 @@ import {
 } from "./instruments-fx.js"
 import { cashBalanceSeries, dailyExternalFlows } from "./cashLedger.js"
 import { LOT_QUANTITY_TYPES, isTransferType, quantitySign } from "../transaction-types.js"
-import { dailyTransferBasis, dailyTransferFlows, marketValuedTransferFlows } from "./transferFlows.js"
+import { dailyTransferBasis, marketValuedTransferFlows } from "./transferFlows.js"
 // §63.2 — `composePortfolioValue` only. `splitPortfolioValue` is deliberately NOT
 // imported: the live path converts each position out of its own instrument
 // currency, and the closes reaching this file are already in the portfolio's base
@@ -83,12 +83,14 @@ async function fetchPriceBars(
    * whole portfolio with it. Declared here, honoured there, and never overriding a
    * base instruments can resolve itself (§47). */
   baseCcy?: string,
+  includePrevious = false,
 ): Promise<PriceBarSeries | null> {
   const base = instrumentsBase()
   if (!base) throw new InstrumentsUnavailableError(null, "instruments (INSTRUMENTS_URL unset)")
   const q = new URLSearchParams({ from, to })
   if (currency) q.set("currency", currency)
   if (baseCcy) q.set("baseCurrency", baseCcy)
+  if (includePrevious) q.set("includePrevious", "true")
   const url = `${base}/api/instruments/${encodeURIComponent(symbol)}/price-bars?${q}`
   let res: Response
   try {
@@ -272,6 +274,7 @@ export async function fetchPriceSeries(
     signal?: AbortSignal,
     currency?: string,
     baseCcy?: string,
+    includePrevious?: boolean,
   ) => Promise<PriceBarSeries | null> = fetchPriceBars,
   signal?: AbortSignal,
   targetCcy?: Map<string, string | null>,
@@ -282,6 +285,7 @@ export async function fetchPriceSeries(
    * by a quantity has to be in THIS currency, and it is the only reference that
    * can say whether a series arrived converted. */
   portfolioBase?: string,
+  previousSymbols?: ReadonlySet<string>,
 ): Promise<Map<string, PriceBarSeries>> {
   const out = new Map<string, PriceBarSeries>()
   let next = 0
@@ -301,7 +305,8 @@ export async function fetchPriceSeries(
       if (i >= symbols.length) return
       const wantCcy = targetCcy?.get(symbols[i] ?? "") ?? undefined
       const baseCcy = baseCcyMap?.get(symbols[i] ?? "") ?? undefined
-      let series = await fetcher(symbols[i], from, to, authToken, signal, wantCcy, baseCcy)
+      const includePrevious = previousSymbols?.has(symbols[i] ?? "") ?? false
+      let series = await fetcher(symbols[i], from, to, authToken, signal, wantCcy, baseCcy, includePrevious)
       if (failure !== null) return
 
       // §72.15 — the price-bars response states the currency of the closes it
@@ -326,7 +331,7 @@ export async function fetchPriceSeries(
         series.currency.toUpperCase() !== portfolioBase.toUpperCase()
       ) {
         const converted = await fetcher(
-          symbols[i], from, to, authToken, signal, portfolioBase, baseCcy,
+          symbols[i], from, to, authToken, signal, portfolioBase, baseCcy, includePrevious,
         )
         if (failure !== null) return
         if (converted && converted.dates.length > 0) series = converted
@@ -345,6 +350,24 @@ export async function fetchPriceSeries(
   )
   if (failure !== null) throw failure
   return out
+}
+
+export async function transferCloseForDate(
+  symbol: string,
+  day: string,
+  authToken: string,
+  baseCurrency: string,
+  instrumentCurrency: string,
+): Promise<number | null> {
+  const base = baseCurrency.toUpperCase()
+  const listing = instrumentCurrency.toUpperCase()
+  const prices = await fetchPriceSeries(
+    [symbol], day, day, authToken, fetchPriceBars, undefined,
+    new Map([[symbol, listing === base ? null : base]]),
+    new Map([[symbol, listing]]), base, new Set([symbol]),
+  )
+  const series = prices.get(symbol)
+  return series ? buildPriceMap(series.dates, series.closes, [day]).get(day) ?? null : null
 }
 
 /**
@@ -1139,7 +1162,7 @@ export async function computeSnapshotBatch(
     costMaps.set(sym, dayCost)
   }
 
-  // §63.10.5 — only ask for symbols this portfolio actually held INSIDE the
+  // §63.10.5 — only value symbols this portfolio actually held INSIDE the
   // window. `symbolCcy` is built from every BUY/SELL row ever imported, so it
   // also contains long-closed positions (PROD: IKE Beata's AFL, sold 2024-03,
   // in a window starting 2021-10). Those contribute nothing to any day, and one
@@ -1153,9 +1176,21 @@ export async function computeSnapshotBatch(
     }
     return false
   })
+  const transferMovesByDay = new Map<string, { symbol: string; quantity: number }[]>()
+  const transferSymbols = new Set<string>()
+  for (const tx of txRows) {
+    if (!tx.symbol || !isTransferType(tx.type)) continue
+    const day = toDateStr(tx.executedAt)
+    if (!day || day < from || day > to) continue
+    const arr = transferMovesByDay.get(day) ?? []
+    arr.push({ symbol: tx.symbol, quantity: quantitySign(tx.type) * Number(tx.quantity) })
+    transferMovesByDay.set(day, arr)
+    transferSymbols.add(tx.symbol)
+  }
+  const pricingSymbols = [...new Set([...symbols, ...transferSymbols])]
 
-  // 6. Fetch price series per held symbol from instruments (bounded fan-out —
-  //    see fetchPriceSeries; an aborted signal rejects promptly). A
+  // 6. Fetch price series per held or transferred symbol from instruments (bounded
+  //    fan-out — see fetchPriceSeries; an aborted signal rejects promptly). A
   //    cash-only portfolio has no symbols to price.
   // §63.10.5 — the known instrument currency travels with the request, so a
   // symbol instruments cannot resolve on its own is still convertible.
@@ -1163,8 +1198,11 @@ export async function computeSnapshotBatch(
   for (const [sym, ccy] of symbolCcy) {
     declaredBase.set(sym, ccy && KNOWN_CURRENCY.test(ccy) ? ccy.toUpperCase() : null)
   }
-  const priceSeries = symbols.length
-    ? await fetchPriceSeries(symbols, from, to, authToken, fetchPriceBars, signal, targetCcy, declaredBase, base)
+  const priceSeries = pricingSymbols.length
+    ? await fetchPriceSeries(
+        pricingSymbols, from, to, authToken, fetchPriceBars, signal,
+        targetCcy, declaredBase, base, transferSymbols,
+      )
     : new Map<string, PriceBarSeries>()
   throwIfAborted(signal)
 
@@ -1187,31 +1225,13 @@ export async function computeSnapshotBatch(
 
   // Pre-build carry-forward price maps per symbol
   const priceMaps = new Map<string, Map<string, number>>()
-  for (const sym of symbols) {
+  for (const sym of pricingSymbols) {
     const series = priceSeries.get(sym)
     if (series) {
       priceMaps.set(sym, buildPriceMap(series.dates, series.closes, days))
     }
   }
-
-  // The market-valued half of a transfer's neutralising flow, computed here
-  // because this is where the closes are. `priceMaps` is already converted to
-  // base, so `quantity × close` needs no FX step. The sign convention is the
-  // transfer's own: out is negative, in is positive.
-  const transferMovesByDay = new Map<string, { symbol: string; quantity: number }[]>()
-  for (const tx of txRows) {
-    if (!tx.symbol || !isTransferType(tx.type)) continue
-    const day = toDateStr(tx.executedAt)
-    if (!day || day < from || day > to) continue
-    const arr = transferMovesByDay.get(day) ?? []
-    const sign = quantitySign(tx.type)
-    arr.push({ symbol: tx.symbol, quantity: sign * Number(tx.quantity) })
-    transferMovesByDay.set(day, arr)
-  }
-  // Resolved below, where `transferFlows` (the cost fallback) is available. Declared
-// here so the day loop can read it; assigned once both are in hand.
-let transferMarketFlows = new Map<string, number>()
-const transferUnvaluedDays = new Set<string>()
+  const transferMarketFlows = marketValuedTransferFlows(transferMovesByDay, priceMaps)
 
   // §62 follow-up (2026-09-27): invested(day) = cumulative net EXTERNAL cash
   // flow up to that day (deposits − withdrawals ± transfer legs, base ccy) —
@@ -1253,24 +1273,11 @@ const transferUnvaluedDays = new Set<string>()
   // shares bought at 10 and sold at 12 gained 10, rebased at 11 they gain 5.
   //
   // The RETURN series is neutralised by the market-valued flow instead
-  // (`dailyTransferFlows`), because that is how far `value` actually moved. The
+  // (`marketValuedTransferFlows`), because that is how far `value` actually moved. The
   // two coincide unless the price moved since purchase.
   const transferBasisFlows = await dailyTransferBasis(
     db, authToken, portfolioId, from, to, base, { strict: true },
   )
-  // Market-valued, and this is the one that reaches `netFlow`: it is what offsets
-  // how far `value` actually moved, so a day on which the instrument changed
-  // custody reads ~0% instead of −100%. `netFlow` is the return series' neutral
-  // denominator and nothing else — `externalCashInvested` stays external-only, so
-  // "money actually put in" is unaffected by a transfer.
-  const transferFlows = await dailyTransferFlows(
-    db, authToken, portfolioId, from, to, base, { strict: true },
-  )
-  {
-    const market = marketValuedTransferFlows(transferMovesByDay, priceMaps, transferFlows)
-    transferMarketFlows = market.flows
-    for (const d of market.unvalued) transferUnvaluedDays.add(d)
-  }
   const preWindowBasis = dayBeforeWindow
     ? await dailyTransferBasis(db, authToken, portfolioId, "0000-01-01", dayBeforeWindow, base, { strict: true })
     : new Map<string, number>()
