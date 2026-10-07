@@ -137,6 +137,10 @@ export interface TradeVerdict {
   storedRate: number | null
   /** True when the trade row recorded two DIFFERENT currencies. */
   importConverted: boolean
+  /** Trade price after conversion into the bar currency, when comparable. */
+  normalisedPrice?: number | null
+  /** Historical rate used for the payment-to-bar conversion. */
+  conversionRate?: number | null
   /** §74.2 — the source row's asset class, for the report's provenance. */
   assetType?: string | null
   /** §74.3 — set on an order-priced trade. The deviation is left `null`. */
@@ -318,10 +322,10 @@ export function assessSymbol(
     // fund and false about the pipeline. `deviation: null` is what makes
     // `summarise` skip it — the trade is still present in the report, with its
     // bracketing bars, so nothing is hidden.
-    if (t.orderPriced) return { ...t, deviation: null }
+    if (t.orderPriced) return { ...t, deviation: null, normalisedPrice: norm.price, conversionRate: rateToBar }
     const deviation = usable ? deviationPct(norm.price, t.barClose!) : null
     // The hint stays on the RAW ratio: an unconverted gap that IS an FX rate is
-    return { ...t, deviation }
+    return { ...t, deviation, normalisedPrice: Number.isFinite(norm.price) ? norm.price : null, conversionRate: rateToBar }
   })
 }
 
@@ -630,7 +634,7 @@ async function main() {
             `      ${v.date} ${v.portfolioName}: trade ${v.tradePrice} ${v.tradeCurrency} vs bar ${v.barClose}` +
               ` (${(v.deviation! * 100).toFixed(1)}%${v.carriedDays ? `, close is ${v.carriedDays}d older` : ""})` +
               (v.tradeCurrency !== v.claimedCurrency
-                ? `  [${v.tradePrice} ${v.tradeCurrency} → ${v.claimedCurrency} at that day's rate]`
+                ? `  [${v.tradePrice} ${v.tradeCurrency} → ${v.normalisedPrice ?? "?"} ${v.claimedCurrency} at ${v.conversionRate ?? "?"}]`
                 : ""),
           )
         }

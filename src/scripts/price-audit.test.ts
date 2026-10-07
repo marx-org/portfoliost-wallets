@@ -97,6 +97,8 @@ describe("cross-currency trades (§72.10)", () => {
       rates,
     )
     expect(v.deviation).toBeCloseTo(0.023, 2)
+    expect(v.normalisedPrice).toBeCloseTo(12.91 * 0.1773, 6)
+    expect(v.conversionRate).toBe(0.1773)
   })
 
   it("does NOT fall back to 1:1 when the rate is unavailable — the trade is unchecked", () => {
