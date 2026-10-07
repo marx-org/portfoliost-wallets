@@ -4,7 +4,7 @@ import { eq } from "drizzle-orm"
 import { createInternalRoutes } from "./internal.js"
 import { createImportRoutes } from "./import.js"
 import { makeHarness, type Harness } from "./test-utils.js"
-import { portfolios, positions, portfolioTransactions } from "../db/schema.js"
+import { portfolios, positions, portfolioTransactions, splitEvents } from "../db/schema.js"
 
 async function boot() {
   const h = await makeHarness()
@@ -107,6 +107,14 @@ describe("POST /internal/apply-split (§23.6)", () => {
     const pos2 = await posOf(h, portfolioId)
     expect(Number(pos2[0].quantity)).toBe(60)
     expect(Number(pos2[0].averageCostBasis)).toBeCloseTo(16.66666667, 8)
+  })
+
+  it("persists provider provenance on the durable split event", async () => {
+    const h = await boot()
+    await applySplit(h, { symbol: "AAPL", factor: 2, effectiveDate: "2024-02-01", source: "openst:fmp" })
+    const events = await h.db.select().from(splitEvents)
+    expect(events[0]).toMatchObject({ symbol: "AAPL", factor: "2.00000000", effectiveDate: "2024-02-01", source: "openst:fmp" })
+    expect(events[0]?.appliedAt).toBeInstanceOf(Date)
   })
 
   it("re-applying the same (symbol, effectiveDate) is a no-op (idempotent from frozen originals)", async () => {

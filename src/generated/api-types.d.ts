@@ -2024,7 +2024,7 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** Apply a split adjustment factor for a symbol */
+        /** Apply a split candidate for a symbol */
         post: operations["applySplitCandidate"];
         delete?: never;
         options?: never;
@@ -3981,6 +3981,8 @@ export interface components {
             factor: number;
             /** Format: date */
             effectiveDate: string;
+            /** @description Event provenance, for example openst:fmp or admin */
+            source?: string;
         };
         ApplySplitResponse: {
             updatedTransactions: number;
@@ -4080,11 +4082,13 @@ export interface components {
             /** @description Overflow rows cleaned up in the last run (written by post-import hook) */
             rowsDeleted?: number | null;
         };
-        /** @description Detected price discontinuity at the stooq/overflow boundary awaiting admin review. */
+        /** @description Provider-backed or heuristic split candidate. detectedAt is discovery time; effectiveDate is when the split took effect. */
         SplitCandidate: {
             symbol: string;
             /** Format: date */
             detectedAt: string;
+            /** Format: date */
+            effectiveDate: string | null;
             /** Format: date */
             lastStooqDate?: string | null;
             lastStooqClose?: string | null;
@@ -4094,6 +4098,14 @@ export interface components {
             ratio?: string | null;
             suggestedFactor?: string | null;
             suggestedRatio?: string | null;
+            provider?: string | null;
+            providerNumerator?: string | null;
+            providerDenominator?: string | null;
+            providerFactor?: string | null;
+            providerStatus?: string;
+            evidence?: unknown;
+            /** Format: date-time */
+            appliedAt?: string | null;
             /** @enum {string} */
             status: "pending" | "applied" | "dismissed";
         };
@@ -5324,6 +5336,8 @@ export interface operations {
             query: {
                 from: string;
                 to: string;
+                /** @description Include the latest preceding bar when its currency can be resolved */
+                includePrevious?: boolean;
                 /** @description Optional ISO-4217 target currency — prices are converted server-side (plan §48.2); same/absent value serves the native series */
                 currency?: components["parameters"]["currency"];
                 /** @description Optional ISO-4217 currency the CALLER believes the prices are denominated in (e.g. wallets passes the position's `instrumentCurrency`). Honoured only where the server's own resolver is silent; a locally resolved base is never overridden (plan §47, "never guess"). Without it, a ticker listed on several venues in different currencies cannot be converted at all, which made `currency` unusable for the caller's whole request (plan §63.10.5). */
@@ -7254,8 +7268,10 @@ export interface operations {
         requestBody: {
             content: {
                 "application/json": {
-                    /** @description Split adjustment factor (e.g. 0.25 for 4:1) */
+                    /** @description Quantity multiplier (e.g. 4 for 4:1 or 0.2 for 1:5) */
                     factor: number;
+                    /** Format: date */
+                    effectiveDate: string;
                 };
             };
         };
@@ -7271,7 +7287,7 @@ export interface operations {
                         symbol?: string;
                         factor?: number;
                         /** Format: date */
-                        detectedAt?: string;
+                        effectiveDate?: string;
                     };
                 };
             };

@@ -17,6 +17,7 @@ const ApplySplitSchema = z.object({
   symbol: z.string().min(1).max(20),
   factor: z.number().finite().positive(),
   effectiveDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
+  source: z.string().min(1).max(80).default("admin"),
 })
 
 export function createInternalRoutes(db?: DB) {
@@ -32,7 +33,7 @@ export function createInternalRoutes(db?: DB) {
     if (!parsed.success) {
       return c.json({ message: "ValidationError", detail: parsed.error.issues[0]?.message }, 422)
     }
-    const { factor, effectiveDate } = parsed.data
+    const { factor, effectiveDate, source } = parsed.data
     const symbol = parsed.data.symbol.toUpperCase()
     const [yy, mm, dd] = effectiveDate.split("-").map(Number)
     const effectiveAt = new Date(Date.UTC(yy, mm - 1, dd))
@@ -50,7 +51,7 @@ export function createInternalRoutes(db?: DB) {
       const result = await database.transaction(async (tx) => {
         await tx
           .insert(splitEvents)
-          .values({ symbol, factor: String(factor), effectiveDate })
+          .values({ symbol, factor: String(factor), effectiveDate, source })
           .onConflictDoNothing({ target: [splitEvents.symbol, splitEvents.effectiveDate] })
 
         const rows = await tx
