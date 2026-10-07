@@ -330,6 +330,20 @@ export function assessSymbol(
   })
 }
 
+/**
+ * §74/§72.8 — does this trade have any evidence behind it?
+ *
+ * Evidence is either a bar the trade was compared against, or the bracketing
+ * bars an order-priced trade was shown instead (an order price is never
+ * deviation-judged, so its bar read is suppressed on purpose). Keying on
+ * `orderPriced` instead of the brackets would let a fund with NO bars at all
+ * count as "checked": exactly the §71.6/§72.8 failure where a failed bar read
+ * passes as clean and CHECKED NOTHING never fires.
+ */
+export function hasBarEvidence(v: TradeVerdict): boolean {
+  return v.barClose != null || v.orderPricedPrior != null || v.orderPricedNext != null
+}
+
 /** Per-symbol roll-up, worst deviation first at the call site. */
 export function summarise(
   symbol: string,
@@ -352,7 +366,13 @@ export function summarise(
     worstDeviation: worst,
     claimedCurrency: verdicts[0]?.claimedCurrency ?? null,
     positionCurrency,
-    unverifiable: verdicts.every((v) => v.barClose == null),
+    // §74/§72.8 — evidence is the bar the trade was compared against, or the
+    // bracketing bars an order-priced trade was shown instead (its barClose is
+    // suppressed on purpose: an order price against a valuation-date NAV is not
+    // a defect). Keying on `orderPriced` rather than the brackets would let a
+    // fund whose bar read FAILED count as checked — the §71.6/§72.8 failure
+    // where no data reads as clean.
+    unverifiable: verdicts.every((v) => !hasBarEvidence(v)),
     trades: verdicts,
   }
 }
@@ -570,7 +590,12 @@ async function main() {
     const unverifiable = reports.filter((r) => r.unverifiable)
     const orderPricedReports = reports.filter((r) => r.orderPriced > 0)
     const orderPricedTotal = orderPricedReports.reduce((n, r) => n + r.orderPriced, 0)
-    const checked = reports.reduce((n, r) => n + r.trades.filter((t) => t.barClose != null).length, 0)
+    // §74/§72.8 — count trades with EVIDENCE: a judged bar, or the bracketing
+    // bars an order-priced trade was shown. Keying on `orderPriced` alone would
+    // count a fund whose bar read failed and weaken the CHECKED NOTHING guard;
+    // keying on `barClose` alone would drop the bracketed fund trades from this
+    // total while §74 prints their brackets below.
+    const checked = reports.reduce((n, r) => n + r.trades.filter(hasBarEvidence).length, 0)
 
     if (asJson) {
       console.log(JSON.stringify({ tolerance, flagged: flagged.length, reports }, null, 2))

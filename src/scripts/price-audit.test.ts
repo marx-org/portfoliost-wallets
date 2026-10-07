@@ -5,6 +5,7 @@ import {
   ORDER_PRICED_WINDOW_DAYS,
   assessSymbol,
   deviationPct,
+  hasBarEvidence,
   isOrderPriced,
   normaliseToBarCurrency,
   logAuditProgress,
@@ -465,6 +466,47 @@ describe("§74 — order-priced fund trades", () => {
     // and the trade is present in the report, not filtered out of it
     expect(report.trades).toHaveLength(1)
     expect(report.trades[0].tradePrice).toBe(382.05)
+  })
+
+  it("74.5 — evidence is the BRACKETS, not the orderPriced flag (the v1.1.142 double-count)", () => {
+    // v1.1.142 listed 12 §74 symbols as "no bars" while it printed their
+    // bracketing bars in the same report: summarise keyed on `barClose == null`,
+    // and the order-priced bar read is suppressed. Keying instead on the
+    // orderPriced FLAG would overcorrect — a fund whose bar read FAILED has the
+    // flag and no brackets, and would read as checked. Evidence = bar or
+    // brackets, so both shapes sort correctly.
+    const bracketed = trade({
+      barClose: null, deviation: null, assetType: "FUND",
+      orderPriced: true,
+      orderPricedPrior: { date: "2023-04-06", close: 339.47, offsetDays: -1 },
+      orderPricedNext: { date: "2023-04-10", close: 340.2, offsetDays: 3 },
+    })
+    expect(hasBarEvidence(bracketed)).toBe(true)
+    expect(summarise("INGAKC.TFI", [bracketed], "PLN", 0.1).unverifiable).toBe(false)
+
+    // The flag with NO bars and NO brackets: nothing was compared.
+    const failed = trade({ barClose: null, deviation: null, assetType: "FUND", orderPriced: true })
+    expect(hasBarEvidence(failed)).toBe(false)
+    expect(summarise("STARVED.FUND", [failed], "PLN", 0.1).unverifiable).toBe(true)
+  })
+
+  it("74.5 — a single bracket is enough evidence for the trade, but a symbol is only as strong as its weakest check", () => {
+    // One side of the window can legitimately be empty (first/last bar in
+    // range); the comparison still happened.
+    const oneSide = trade({
+      barClose: null, deviation: null, assetType: "FUND",
+      orderPriced: true,
+      orderPricedNext: { date: "2023-04-10", close: 340.2, offsetDays: 3 },
+    })
+    expect(hasBarEvidence(oneSide)).toBe(true)
+
+    // A judged trade with a bar is evidence even without brackets.
+    expect(hasBarEvidence(trade({ barClose: 100 }))).toBe(true)
+
+    // Nothing backing anything — unverifiable, never clean (§71.6).
+    const starved = trade({ barClose: null, deviation: null })
+    expect(hasBarEvidence(starved)).toBe(false)
+    expect(summarise("STARVED", [starved], "USD", 0.1).unverifiable).toBe(true)
   })
 
   it("a MIXED symbol judges its exchange-traded trades and exempts only the fund ones", () => {
