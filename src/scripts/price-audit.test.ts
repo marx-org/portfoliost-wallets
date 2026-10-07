@@ -8,6 +8,7 @@ import {
   isOrderPriced,
   normaliseToBarCurrency,
   logAuditProgress,
+  priceAuditBarsUrl,
   pickBar,
   pickOrderPricedBar,
   resolveInstrumentsToken,
@@ -241,6 +242,13 @@ describe("logAuditProgress", () => {
     logAuditProgress(true, "fetching 1/2: AAPL")
     expect(log).not.toHaveBeenCalled()
     log.mockRestore()
+  })
+})
+
+describe("priceAuditBarsUrl", () => {
+  it("uses the canonical endpoint and requested audit window", () => {
+    expect(priceAuditBarsUrl("http://instruments/", "NVDA", "2022-01-01", "2026-10-07"))
+      .toBe("http://instruments/api/instruments/NVDA/price-bars?from=2022-01-01&to=2026-10-07")
   })
 })
 

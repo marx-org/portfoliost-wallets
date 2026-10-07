@@ -380,37 +380,40 @@ export function logAuditProgress(asJson: boolean, message: string): void {
   if (!asJson) console.log(`[price-audit] progress: ${message}`)
 }
 
-/** Raw native closes keyed by YYYY-MM-DD. No `?currency=` — that would convert. */
+/** Canonical native closes keyed by YYYY-MM-DD. No `?currency=` — that would convert. */
+export function priceAuditBarsUrl(base: string, symbol: string, from: string, to: string): string {
+  const q = new URLSearchParams({ from, to })
+  return `${base.replace(/\/$/, "")}/api/instruments/${encodeURIComponent(symbol)}/price-bars?${q}`
+}
+
 async function fetchNativeBars(
   symbol: string,
+  from: string,
+  to: string,
   authToken: string,
 ): Promise<{ bars: Map<string, number>; claimedCurrency: string | null }> {
   const base = (process.env.INSTRUMENTS_URL ?? process.env.API_INSTRUMENTS_URL ?? "").replace(/\/$/, "")
   if (!base) throw new Error("INSTRUMENTS_URL is not set — cannot read price bars")
-  const res = await fetch(`${base}/api/instruments/${encodeURIComponent(symbol)}/history?resolution=daily`, {
+  const res = await fetch(priceAuditBarsUrl(base, symbol, from, to), {
     headers: instrumentsAuthHeaders(authToken),
   })
   if (!res.ok) return { bars: new Map(), claimedCurrency: null }
   const body = (await res.json()) as {
-    timestamps?: number[]
-    closePrices?: Array<number | null>
+    dates?: string[]
+    closes?: Array<number | null>
     baseCurrency?: string | null
     currency?: string | null
-    currencySource?: string | null
   }
   const bars = new Map<string, number>()
-  for (let i = 0; i < (body.timestamps?.length ?? 0); i++) {
-    const close = body.closePrices?.[i]
+  for (let i = 0; i < (body.dates?.length ?? 0); i++) {
+    const close = body.closes?.[i]
     if (close == null || !(close > 0)) continue
-    bars.set(new Date(body.timestamps![i] * 1000).toISOString().slice(0, 10), close)
+    bars.set(body.dates![i], close)
   }
-  // §72.10 — `currency` is the TARGET (equal to the base here, since no
-  // ?currency= is sent) and `baseCurrency` is the resolved base, which comes back
-  // null whenever instruments could not resolve one. Reading only baseCurrency
-  // left several symbols — INGAKC.TFI among them — with an unknown bar currency,
-  // which after the conversion change would have made them all "unchecked".
-  // Taking whichever the service actually reported keeps them comparable.
-  const claimed = body.baseCurrency ?? (body.currencySource === "unknown" ? null : body.currency) ?? null
+  // price-bars is the canonical local/provider series. Its baseCurrency is the
+  // resolved instrument currency; currency is retained as a fallback for older
+  // instruments responses.
+  const claimed = body.baseCurrency ?? body.currency ?? null
   return { bars, claimedCurrency: typeof claimed === "string" ? claimed.toUpperCase() : null }
 }
 
@@ -467,12 +470,14 @@ async function main() {
 
     // One history call per symbol, reused across every trade in it.
     const symbols = [...new Set(trades.map((t) => t.symbol))]
+    const from = trades.reduce((min, t) => (t.date < min ? t.date : min), trades[0]?.date ?? "")
+    const to = trades.reduce((max, t) => (t.date > max ? t.date : max), trades[0]?.date ?? "")
     const barCache = new Map<string, Awaited<ReturnType<typeof fetchNativeBars>>>()
-    logAuditProgress(asJson, `fetching price bars for ${symbols.length} symbols`)
+    logAuditProgress(asJson, `fetching canonical price bars for ${symbols.length} symbols (${from} to ${to})`)
     for (let i = 0; i < symbols.length; i++) {
       const sym = symbols[i]
       logAuditProgress(asJson, `fetching ${i + 1}/${symbols.length}: ${sym}`)
-      const bars = await fetchNativeBars(sym, token)
+      const bars = await fetchNativeBars(sym, from, to, token)
       barCache.set(sym, bars)
       logAuditProgress(asJson, `fetched ${i + 1}/${symbols.length}: ${sym} (${bars.bars.size} bars${bars.claimedCurrency ? `, ${bars.claimedCurrency}` : ""})`)
     }
