@@ -311,7 +311,8 @@ export function assessSymbol(
     const rateToBar = t.importConverted
       ? t.storedRate
       : t.claimedCurrency
-        ? rates.get(`${t.tradeCurrency}>${t.claimedCurrency}`) ?? null
+        ? rates.get(`${t.tradeCurrency}>${t.claimedCurrency}>${t.date}`) ??
+          rates.get(`${t.tradeCurrency}>${t.claimedCurrency}`) ?? null
         : null
     const norm = normaliseToBarCurrency(t.tradePrice, t.tradeCurrency, t.claimedCurrency, rateToBar)
     const usable = t.barClose != null && Number.isFinite(norm.price)

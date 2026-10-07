@@ -101,6 +101,18 @@ describe("cross-currency trades (§72.10)", () => {
     expect(v.conversionRate).toBe(0.1773)
   })
 
+  it("prefers the trade-date rate over a generic pair rate", () => {
+    const [v] = assessSymbol(
+      [trade({ tradePrice: 100, barClose: 90, tradeCurrency: "USD", claimedCurrency: "CAD" })],
+      new Map([
+        ["USD>CAD", 1.5],
+        ["USD>CAD>2026-09-27", 1.35],
+      ]),
+    )
+    expect(v.conversionRate).toBe(1.35)
+    expect(v.normalisedPrice).toBeCloseTo(135, 6)
+  })
+
   it("does NOT fall back to 1:1 when the rate is unavailable — the trade is unchecked", () => {
     // Returning the unconverted number would recreate the exact false positive
     // the conversion exists to remove.
