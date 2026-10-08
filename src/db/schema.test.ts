@@ -38,6 +38,20 @@ describe("wallets schema (sync_runs only, §62)", () => {
     await db.insert(syncRuns).values(run)
     await expect(db.insert(syncRuns).values(run)).rejects.toThrow(/duplicate key|Failed query/u)
   })
+
+  it("documents sync_runs with a table comment (obj_description)", async () => {
+    const { db } = await createTestDb()
+    const rows = await db.execute(
+      sql`select obj_description('wallets.sync_runs'::regclass) as description`,
+    )
+    const description = String((rows.rows[0] as any).description ?? "")
+    // the comment must explain the purpose, not just be non-empty
+    expect(description).toMatch(/import/i)
+    expect(description).toMatch(/cash-transaction count/i)
+    expect(description).toMatch(/portfolio trade-transaction count/i)
+    expect(description).toMatch(/skipped/i)
+    expect(description).toMatch(/lifecycle status/i)
+  })
 })
 
 describe("portfolios cash schema (§62)", () => {

@@ -417,7 +417,7 @@ function syncRunToContract(r: typeof syncRuns.$inferSelect): SyncRun {
     startedAt: r.startedAt ? r.startedAt.toISOString() : null,
     completedAt: r.completedAt ? r.completedAt.toISOString() : null,
     error: r.error ?? null,
-    insertedCashTx: r.insertedWtx,
+    insertedCashTx: r.insertedCashTransactions,
     insertedPtx: r.insertedPtx,
     skipped: r.skipped,
   }
@@ -674,7 +674,7 @@ export function createImportRoutes(db?: DB) {
         startedAt: now,
         completedAt: now,
         error: status === "failed" ? fallbackMessage : null,
-        insertedWtx: insertedCashTx,
+        insertedCashTransactions: insertedCashTx,
         insertedPtx,
         skipped,
       })
@@ -685,7 +685,7 @@ export function createImportRoutes(db?: DB) {
           startedAt: now,
           completedAt: now,
           error: status === "failed" ? fallbackMessage : null,
-          insertedWtx: insertedCashTx,
+          insertedCashTransactions: insertedCashTx,
           insertedPtx,
           skipped,
         },

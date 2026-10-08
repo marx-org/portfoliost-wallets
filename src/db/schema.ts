@@ -35,6 +35,16 @@ export const walletsSchema = pgSchema("wallets")
  * Import sync-run tracking (import API). One row per (user, externalSource,
  * spreadsheetId, sheet) — the importer cursor + batch counters over the
  * /api/import surface.
+ *
+ * Records each user's external spreadsheet import: the source, the
+ * spreadsheet/sheet identity, the import progress (`lastRow`), the lifecycle
+ * `status` (pending|running|done|failed), the start/completion timestamps, the
+ * `error` text when a run failed, and the per-run counters — how many portfolio
+ * cash transactions (`insertedCashTransactions`), how many portfolio trade
+ * transactions (`insertedPtx`), and how many rows were skipped (`skipped`).
+ *
+ * This table has NO `description` data column: the purpose lives in the table
+ * comment (obj_description), not in a column.
  */
 export const syncRuns = walletsSchema.table(
   "sync_runs",
@@ -49,7 +59,7 @@ export const syncRuns = walletsSchema.table(
     startedAt: timestamp("started_at", { withTimezone: true }),
     completedAt: timestamp("completed_at", { withTimezone: true }),
     error: text("error"),
-    insertedWtx: integer("inserted_wtx").notNull().default(0),
+    insertedCashTransactions: integer("inserted_cash_transactions").notNull().default(0),
     insertedPtx: integer("inserted_ptx").notNull().default(0),
     skipped: integer("skipped").notNull().default(0),
   },

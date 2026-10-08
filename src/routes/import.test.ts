@@ -838,7 +838,7 @@ describe("POST /api/import/transactions (§23.4)", () => {
 
     const runs = await h.db.select().from(syncRuns)
     expect(runs).toHaveLength(1)
-    expect(runs[0].insertedWtx).toBe(0)
+    expect(runs[0].insertedCashTransactions).toBe(0)
     expect(runs[0].skipped).toBe(2)
   })
 })
