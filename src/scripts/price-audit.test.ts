@@ -217,6 +217,12 @@ describe("summarise", () => {
     expect(r.worstDeviation).toBe(0)
   })
 
+  it("separates unresolved venue currency from residual deviations", () => {
+    const r = summarise("MFC.NYQ", assessSymbol([trade({ claimedCurrency: null, barClose: null, deviation: null, unresolvedVenue: true })]), "USD", 0.1)
+    expect(r.unresolvedVenue).toBe(true)
+    expect(r.unreconciled).toBe(0)
+  })
+
   it("honours a caller tolerance", () => {
     const v = assessSymbol([trade({ tradePrice: 118, barClose: 100, deviation: 0.18 })])
     expect(summarise("X", v, "PLN", 0.1).unreconciled).toBe(1)
