@@ -693,7 +693,8 @@ async function main() {
         )
       }
       console.log(
-        `[price-audit] ${flagged.length} symbol(s) need a venue override or a currency fix. Nothing was modified.`,
+        `[price-audit] ${flagged.length} symbol(s) have residual price deviations after ` +
+          `trade-date currency normalization. Nothing was modified.`,
       )
     }
     // §72.22 — persist the report so it is readable from the admin UI.
