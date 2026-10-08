@@ -454,7 +454,7 @@ async function main() {
   const db = await getDb()
   try {
     const token = resolveInstrumentsToken()
-    const trades = (await db.execute(sql`
+    let trades = (await db.execute(sql`
       select pf.name as "portfolioName",
              t.instrument_symbol as symbol,
              to_char(t.executed_at at time zone 'UTC', 'YYYY-MM-DD') as date,
@@ -470,7 +470,15 @@ async function main() {
         and t.instrument_symbol is not null
         ${only ? sql`and pf.name = ${only}` : sql``}
        order by t.instrument_symbol, t.executed_at`)) as unknown as TradeRow[]
-    logAuditProgress(asJson, `loaded ${trades.length} BUY/SELL trades`)
+    const unsupportedTrades = trades.filter((t) => (t.assetType ?? "").trim().toUpperCase() === "BOND")
+    trades = trades.filter((t) => (t.assetType ?? "").trim().toUpperCase() !== "BOND")
+    if (!asJson && unsupportedTrades.length > 0) {
+      console.log(
+        `[price-audit] skipped ${unsupportedTrades.length} BOND trade(s): fixed-income trades ` +
+          `require bond valuation data, not equity price bars.`,
+      )
+    }
+    logAuditProgress(asJson, `loaded ${trades.length} auditable BUY/SELL trades`)
 
     // §72.18 — an option premium is not a share trade, and comparing it with a
     // share price is a guaranteed false positive.
