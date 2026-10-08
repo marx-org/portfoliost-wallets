@@ -148,6 +148,8 @@ export interface TradeVerdict {
   /** The bracketing bars around an order-priced trade, with their offsets. */
   orderPricedPrior?: { date: string; close: number; offsetDays: number } | null
   orderPricedNext?: { date: string; close: number; offsetDays: number } | null
+  /** No venue-specific currency evidence was available for the bar series. */
+  unresolvedVenue?: boolean
 }
 
 export interface SymbolReport {
@@ -159,6 +161,8 @@ export interface SymbolReport {
   positionCurrency: string | null
   /** No bars at all: nothing could be checked, which is itself worth saying. */
   unverifiable: boolean
+  /** Currency/venue was unresolved; this is separate from a residual deviation. */
+  unresolvedVenue: boolean
   /** §74 — trades that are order-priced and therefore not deviation-judged. */
   orderPriced: number
   trades: TradeVerdict[]
@@ -373,6 +377,7 @@ export function summarise(
     // fund whose bar read FAILED count as checked — the §71.6/§72.8 failure
     // where no data reads as clean.
     unverifiable: verdicts.every((v) => !hasBarEvidence(v)),
+    unresolvedVenue: verdicts.some((v) => v.unresolvedVenue === true),
     trades: verdicts,
   }
 }
@@ -543,6 +548,7 @@ async function main() {
         orderPriced,
         orderPricedPrior: bracket?.prior ?? null,
         orderPricedNext: bracket?.next ?? null,
+        unresolvedVenue: claimedCurrency == null,
         tradeCurrency: (t.currency ?? "").toUpperCase(),
         claimedCurrency,
         storedRate: t.exchangeRate ?? null,
@@ -692,6 +698,13 @@ async function main() {
             unverifiable.map((r) => r.symbol).join(", "),
         )
       }
+      const unresolvedVenue = reports.filter((r) => r.unresolvedVenue)
+      if (unresolvedVenue.length > 0) {
+        console.log(
+          `[price-audit] ${unresolvedVenue.length} symbol(s) have unresolved venue currency data: ` +
+            unresolvedVenue.map((r) => r.symbol).join(", "),
+        )
+      }
       console.log(
         `[price-audit] ${flagged.length} symbol(s) have residual price deviations after ` +
           `trade-date currency normalization. Nothing was modified.`,
@@ -722,6 +735,7 @@ async function main() {
         symbol: r.symbol,
         unreconciled: r.unreconciled,
         unverifiable: r.unverifiable,
+        unresolvedVenue: r.unresolvedVenue,
         trades: r.trades,
       })),
     })
