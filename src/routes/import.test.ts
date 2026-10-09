@@ -250,7 +250,6 @@ describe("DELETE /api/import/source/:externalSource (§23.5)", () => {
       type: "DEPOSIT",
       amount: "50",
       currency: "USD",
-      status: "completed",
       transactionDate: "2024-01-01",
     })
 

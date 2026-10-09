@@ -137,12 +137,18 @@ export const portfolios = portfoliosSchema.table(
 )
 
 /**
- * Portfolio-scoped cash transactions (plan §62). The portfolio owns its cash
- * as a per-currency ledger; balances are DERIVED by replay of portfolio
- * trade rows (BUY/SELL/DIVIDEND effects) + these external rows — nothing is
+ * Portfolio-owned cash ledger (plan §62) — the external cash rows for one
+ * portfolio: deposits, withdrawals and transfers. The portfolio owns its cash
+ * as a per-currency ledger and its balances are DERIVED by replay of these rows
+ * plus the portfolio trade rows (BUY/SELL/DIVIDEND cash effects); no balance is
  * stored. Amounts are signed in the ROW's currency (DEPOSIT +, WITHDRAWAL −,
- * TRANSFER as sent). Cross-currency transfers store both legs plus
- * `transferFxRate` linked via `linkedTxId` (D22, portfolio-scoped).
+ * TRANSFER as sent). Cross-currency transfers store both legs linked via
+ * `linkedTxId` plus `transferFxRate` (D22, portfolio-scoped).
+ *
+ * Provenance: `externalSource` + `externalId` tag imported rows and are the
+ * import idempotency key; `reference` correlates a row to its source
+ * transaction / import row (or, for a manual transfer, a human-readable
+ * transfer reference). Manually created rows leave the external fields NULL.
  */
 export const portfolioCashTransactions = portfoliosSchema.table(
   "portfolio_cash_transactions",
@@ -150,20 +156,29 @@ export const portfolioCashTransactions = portfoliosSchema.table(
     id: uuid("id").primaryKey().default(sql`gen_random_uuid()`),
     // denormalized owner (D24): direct authorization on every tx operation
     userId: text("user_id").notNull(),
+    // owning portfolio; deleting the portfolio cascades to its ledger rows
     portfolioId: uuid("portfolio_id")
       .notNull()
       .references(() => portfolios.id, { onDelete: "cascade" }),
+    // cash event kind: DEPOSIT | WITHDRAWAL | TRANSFER
     type: text("type", { enum: TX_TYPES }).notNull(),
+    // signed in the row's own currency: DEPOSIT +, WITHDRAWAL −, TRANSFER as sent
     amount: numeric("amount", { precision: 28, scale: 8 }).notNull(),
+    // the row's own currency (ISO-4217), independent of the portfolio base
     currency: char("currency", { length: 3 }).notNull(),
-    status: text("status").notNull().default("completed"),
+    // free-text note shown on the cash row
     description: text("description"),
+    // user-facing date of the cash event (nullable for "today" rows)
     transactionDate: date("transaction_date"),
-    paymentMethod: text("payment_method"),
+    // fee amount, denominated in fee_currency
     fees: numeric("fees", { precision: 20, scale: 8 }),
+    // how the fee was expressed: a fixed amount or a percentage of the principal
     feesType: text("fees_type", { enum: ["fixed", "pct"] }),
+    // currency the fee was paid in (ISO-4217); null when there is no fee
     feeCurrency: char("fee_currency", { length: 3 }),
+    // TRANSFER destination portfolio (null for non-transfer rows)
     toPortfolioId: uuid("to_portfolio_id").references(() => portfolios.id, { onDelete: "cascade" }),
+    // the paired cash leg for a cross-currency transfer (D22); null otherwise
     linkedTxId: uuid("linked_tx_id"),
     /**
      * §87.2 — the TRADE this cash leg belongs to (a `#d` deposit funding a buy, a
@@ -179,20 +194,32 @@ export const portfolioCashTransactions = portfoliosSchema.table(
     linkedTradeId: uuid("linked_trade_id").references(() => portfolioTransactions.id, {
       onDelete: "cascade",
     }),
+    // source-row correlation: for imported rows the base source transaction /
+    // import-row id; for a manual transfer a human-readable transfer reference
     reference: text("reference"),
+    // FX rate applied to the row currency against the portfolio base
     exchangeRate: numeric("exchange_rate", { precision: 20, scale: 10 }),
+    // whether exchangeRate came from the FX service or was set by hand
     rateSource: text("rate_source", { enum: ["automatic", "manual"] })
       .notNull()
       .default("automatic"),
+    // whether feeExchangeRate came from the FX service or was set by hand
     feeRateSource: text("fee_rate_source", { enum: ["automatic", "manual"] })
       .notNull()
       .default("automatic"),
+    // FX rate applied to the fee currency against the portfolio base
     feeExchangeRate: numeric("fee_exchange_rate", { precision: 20, scale: 10 }),
+    // cross-currency transfer rate between the two legs (D22)
     transferFxRate: numeric("transfer_fx_rate", { precision: 20, scale: 10 }),
+    // D22 elastic target leg: the destination-side amount, server-computed when omitted
     targetAmount: numeric("target_amount", { precision: 20, scale: 8 }),
+    // import provenance tag for imported rows (NULL = created manually)
     externalSource: text("external_source"),
+    // importer-supplied dedup key; unique per externalSource (idempotency)
     externalId: text("external_id"),
+    // row creation timestamp
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    // bumped on every ledger-row mutation
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (t) => [

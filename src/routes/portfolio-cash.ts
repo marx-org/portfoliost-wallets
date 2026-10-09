@@ -78,9 +78,7 @@ const DepositCashSchema = FeeFxFieldsSchema.extend({
   feesType: z.enum(["fixed", "pct"]).nullable().optional(),
 }).strict()
 
-const WithdrawCashSchema = DepositCashSchema.extend({
-  paymentMethod: z.string().nullable().optional(),
-}).strict()
+const WithdrawCashSchema = DepositCashSchema
 
 const TransferCashSchema = FeeFxFieldsSchema.extend({
   amount: z.number(),
@@ -222,11 +220,9 @@ function serializeCash(
     type: r.type,
     amount: Number(r.amount),
     currency: r.currency,
-    status: r.status,
     createdAt: r.createdAt.toISOString(),
     description: r.description,
     transactionDate: r.transactionDate,
-    paymentMethod: r.paymentMethod,
     fees: r.fees != null ? Number(r.fees) : null,
     feesType: r.feesType,
     feeCurrency: r.feeCurrency,
@@ -461,7 +457,6 @@ export function createPortfolioCashRoutes(db?: DB) {
         currency: ccy,
         description: body.description ?? null,
         transactionDate: body.transactionDate ?? null,
-        paymentMethod: (body as { paymentMethod?: string | null }).paymentMethod ?? null,
         ...baseRow,
       })
       .returning()

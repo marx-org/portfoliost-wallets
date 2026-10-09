@@ -3803,7 +3803,6 @@ export interface components {
             currency?: string;
             description?: string;
             transactionDate?: string;
-            paymentMethod?: string;
         };
         TransferCashRequest: components["schemas"]["FeeFxFields"] & {
             amount: number;
@@ -3835,12 +3834,10 @@ export interface components {
             type: string;
             amount: number;
             currency: string;
-            status: string;
             /** Format: date-time */
             createdAt: string;
             description?: string | null;
             transactionDate?: string | null;
-            paymentMethod?: string | null;
             fees?: number | null;
             feesType?: string | null;
             /** Format: uuid */
@@ -3950,8 +3947,6 @@ export interface components {
             description?: string | null;
             /** Format: date */
             transactionDate?: string | null;
-            status?: string;
-            paymentMethod?: string | null;
             fees?: number | null;
             /** @enum {string|null} */
             feesType?: "fixed" | "pct" | null;

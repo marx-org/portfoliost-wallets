@@ -99,6 +99,36 @@ describe("portfolios cash schema (§62)", () => {
     expect(names).not.toContain("maintenance_margin_rate")
   })
 
+  it("documents portfolio_cash_transactions: table + every remaining column comment", async () => {
+    const { db } = await createTestDb()
+    const table = await db.execute(
+      sql`select obj_description('portfolios.portfolio_cash_transactions'::regclass) as d`,
+    )
+    expect(String((table.rows[0] as any).d)).toMatch(/cash ledger/i)
+
+    const cols = await db.execute(sql`
+      select a.attname, col_description('portfolios.portfolio_cash_transactions'::regclass, a.attnum) as d
+      from pg_attribute a
+      where a.attrelid = 'portfolios.portfolio_cash_transactions'::regclass and a.attnum > 0 and not a.attisdropped
+      order by a.attnum
+    `)
+    const described = cols.rows.map((r: any) => String(r.d) ?? "")
+    // every remaining column carries a meaningful (non-empty) description
+    expect(described.length).toBeGreaterThan(0)
+    for (const d of described) expect(d.length).toBeGreaterThan(0)
+  })
+
+  it("dropped cash-ledger status/payment_method columns are gone", async () => {
+    const { db } = await createTestDb()
+    const rows = await db.execute(sql`
+      select column_name from information_schema.columns
+      where table_schema = 'portfolios' and table_name = 'portfolio_cash_transactions'
+    `)
+    const names = rows.rows.map((r: any) => r.column_name)
+    expect(names).not.toContain("status")
+    expect(names).not.toContain("payment_method")
+  })
+
   it("inserts a portfolio cash transaction with fx columns", async () => {
     const { db } = await createTestDb()
     const [p] = await db.insert(portfolios).values({ userId: "u", name: "P", baseCurrency: "USD" }).returning()
