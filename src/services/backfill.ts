@@ -515,6 +515,13 @@ export function calendarDays(from: string, to: string): string[] {
  * Build a carry-forward price map from a PriceBarSeries.
  * For each date in `days`, the price is the last known close on or before
  * that date (weekend/holiday carry-forward).
+ *
+ * pfire-docs#84 — when a date is repeated in the series, the FIRST occurrence
+ * is authoritative. instruments serves a stooq/overflow pair stooq-first (its
+ * split-adjusted close is the preferred value), and a last-wins `set` let the
+ * lower-priority overflow close overwrite it in the valuation grid and the
+ * transfer flows. The series endpoint now de-duplicates at the source, so this
+ * is the explicit precedence the grid keeps if a duplicate ever arrives.
  */
 export function buildPriceMap(
   dates: string[],
@@ -525,7 +532,7 @@ export function buildPriceMap(
   const priceByDate = new Map<string, number>()
   for (let i = 0; i < dates.length; i++) {
     const c = closes[i]
-    if (c !== undefined && c > 0) priceByDate.set(dates[i], c)
+    if (c !== undefined && c > 0 && !priceByDate.has(dates[i])) priceByDate.set(dates[i], c)
   }
   const sortedDates = [...priceByDate.keys()].sort()
 

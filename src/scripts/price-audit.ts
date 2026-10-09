@@ -416,6 +416,28 @@ export function priceAuditBarsUrl(base: string, symbol: string, from: string, to
   return `${base.replace(/\/$/, "")}/api/instruments/${encodeURIComponent(symbol)}/price-bars?${q}`
 }
 
+/**
+ * One close per date, FIRST occurrence authoritative.
+ *
+ * pfire-docs#84 — a stooq/overflow pair for the same date arrives stooq-first
+ * (instruments' deterministic ordering); a last-wins `set` let the lower-
+ * priority overflow close win the comparison. The series endpoint de-duplicates
+ * at the source, so this is the explicit precedence the audit keeps if a
+ * duplicate ever arrives.
+ */
+export function barsFromSeries(
+  body: { dates?: string[]; closes?: Array<number | null> },
+): Map<string, number> {
+  const bars = new Map<string, number>()
+  for (let i = 0; i < (body.dates?.length ?? 0); i++) {
+    const close = body.closes?.[i]
+    if (close == null || !(close > 0)) continue
+    const date = body.dates![i]
+    if (!bars.has(date)) bars.set(date, close)
+  }
+  return bars
+}
+
 async function fetchNativeBars(
   symbol: string,
   from: string,
@@ -434,12 +456,7 @@ async function fetchNativeBars(
     baseCurrency?: string | null
     currency?: string | null
   }
-  const bars = new Map<string, number>()
-  for (let i = 0; i < (body.dates?.length ?? 0); i++) {
-    const close = body.closes?.[i]
-    if (close == null || !(close > 0)) continue
-    bars.set(body.dates![i], close)
-  }
+  const bars = barsFromSeries(body)
   // price-bars is the canonical local/provider series. Its baseCurrency is the
   // resolved instrument currency; currency is retained as a fallback for older
   // instruments responses.
