@@ -573,3 +573,9 @@ describe("#121 — labels documentation", () => {
     await expectDocumented("labels", /label/i)
   })
 })
+
+describe("#122 — position_labels documentation", () => {
+  it("documents the table and every one of its columns", async () => {
+    await expectDocumented("position_labels", /label/i)
+  })
+})

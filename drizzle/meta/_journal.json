@@ -204,6 +204,13 @@
       "when": 1791550026240,
       "tag": "0028_doc_wallets_labels",
       "breakpoints": true
+    },
+    {
+      "idx": 29,
+      "version": "7",
+      "when": 1791552294369,
+      "tag": "0029_doc_wallets_position_labels",
+      "breakpoints": true
     }
   ]
 }
