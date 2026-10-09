@@ -73,29 +73,21 @@ const CASH_LEG_DEFAULT_PORTFOLIOS = new Set([
 export const CreatePortfolioSchema = z.object({
   name: z.string().min(1),
   description: z.string().optional(),
-  strategy: z.string().optional(),
-  type: z.string().optional(),
   baseCurrency: z.string().regex(ISO_CURRENCY).optional(),
   isPublic: z.boolean().optional(),
   // §87.5 — UI-only; see the schema.ts note. Never read by the import.
   cashLegOnTrade: z.boolean().optional(),
   isMarginEnabled: z.boolean().optional(),
-  marginRate: z.number().optional(),
-  maintenanceMarginRate: z.number().optional(),
 })
 
 export const UpdatePortfolioSchema = z.object({
   name: z.string().min(1).optional(),
   description: z.string().optional(),
-  strategy: z.string().optional(),
-  type: z.string().optional(),
   baseCurrency: z.string().regex(ISO_CURRENCY).optional(),
   isPublic: z.boolean().optional(),
   // §87.5 — UI-only; see the schema.ts note. Never read by the import.
   cashLegOnTrade: z.boolean().optional(),
   isMarginEnabled: z.boolean().optional(),
-  marginRate: z.number().nullable().optional(),
-  maintenanceMarginRate: z.number().nullable().optional(),
 })
 
 // ── Serializers ────────────────────────────────────────────────────────
@@ -106,8 +98,6 @@ function serializePortfolio(p: typeof portfolios.$inferSelect) {
     userId: p.userId,
     name: p.name,
     description: p.description,
-    strategy: p.strategy,
-    type: p.type,
     baseCurrency: p.baseCurrency,
     // §41/S3 — the wire field is `capitalBasis`; the DB column keeps its
     // name. Read from the column, reported under the question it answers.
@@ -117,8 +107,6 @@ function serializePortfolio(p: typeof portfolios.$inferSelect) {
     // §87.5 — the SPA reads this to pre-tick the form's cash checkbox.
     cashLegOnTrade: p.cashLegOnTrade,
     isMarginEnabled: p.isMarginEnabled,
-    marginRate: p.marginRate != null ? Number(p.marginRate) : null,
-    maintenanceMarginRate: p.maintenanceMarginRate != null ? Number(p.maintenanceMarginRate) : null,
     createdAt: p.createdAt.toISOString(),
     updatedAt: p.updatedAt.toISOString(),
   }
@@ -763,8 +751,6 @@ async function resolveAggregateBase(
           userId: identity.id,
           name: parsed.data.name,
           description: parsed.data.description ?? null,
-          strategy: parsed.data.strategy ?? "GROWTH",
-          type: parsed.data.type ?? "regular",
           baseCurrency: defaultBase.toUpperCase(),
           isPublic: parsed.data.isPublic ?? false,
           // §87.5 — a created portfolio defaults the switch ON for the kontо that
@@ -774,9 +760,6 @@ async function resolveAggregateBase(
             parsed.data.cashLegOnTrade ??
             CASH_LEG_DEFAULT_PORTFOLIOS.has(parsed.data.name.trim()),
           isMarginEnabled: parsed.data.isMarginEnabled ?? false,
-          marginRate: parsed.data.marginRate != null ? String(parsed.data.marginRate) : null,
-          maintenanceMarginRate:
-            parsed.data.maintenanceMarginRate != null ? String(parsed.data.maintenanceMarginRate) : null,
         })
         .returning()
       return c.json(serializePortfolio(created) satisfies Portfolio, 201)
@@ -1165,16 +1148,10 @@ async function resolveAggregateBase(
     const updates: Record<string, unknown> = { updatedAt: new Date() }
     if (data.name !== undefined) updates.name = data.name
     if (data.description !== undefined) updates.description = data.description
-    if (data.strategy !== undefined) updates.strategy = data.strategy
-    if (data.type !== undefined) updates.type = data.type
     if (data.baseCurrency !== undefined) updates.baseCurrency = data.baseCurrency.toUpperCase()
     if (data.isPublic !== undefined) updates.isPublic = data.isPublic
     if (data.cashLegOnTrade !== undefined) updates.cashLegOnTrade = data.cashLegOnTrade
     if (data.isMarginEnabled !== undefined) updates.isMarginEnabled = data.isMarginEnabled
-    if (data.marginRate !== undefined) updates.marginRate = data.marginRate != null ? String(data.marginRate) : null
-    if (data.maintenanceMarginRate !== undefined)
-      updates.maintenanceMarginRate =
-        data.maintenanceMarginRate != null ? String(data.maintenanceMarginRate) : null
 
     const [updated] = await database
       .update(portfolios)
@@ -1808,7 +1785,6 @@ export function createPublicShareRoutes(db?: DB) {
       portfolio: {
         name: portfolio.name,
         description: portfolio.description,
-        strategy: portfolio.strategy,
         currency: portfolio.baseCurrency,
       },
     })

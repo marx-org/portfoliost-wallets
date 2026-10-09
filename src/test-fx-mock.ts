@@ -15,6 +15,15 @@ export interface FxMockOpts {
   asOf?: string
   /** When true, every pair 404s (the "no table at all" degrade). */
   empty?: boolean
+  /**
+   * The user's declared base-currency preference (users-auth). When set, the
+   * preferences endpoint returns it (200); when omitted it 404s, which is what
+   * pushes `resolveAggregateBase` onto its most-common-portfolio fallback.
+   * Setting it makes the aggregate base deterministic — tests that sum
+   * differently-based portfolios must do this, or the base is a fragile
+   * row-order tie-break.
+   */
+  preferences?: { baseCurrency?: string }
 }
 
 const INSTRUMENTS_URL = "http://instruments.test"
@@ -39,6 +48,12 @@ export function mockInstrumentsFx(opts: FxMockOpts): void {
           return new Response(JSON.stringify({ error: "NotFound", message: "no rate" }), { status: 404 })
         }
         return new Response(JSON.stringify({ rate, asOf }), { status: 200 })
+      }
+      if (url.includes("/api/users/preferences")) {
+        if (opts.preferences) {
+          return new Response(JSON.stringify({ uiPreferences: opts.preferences }), { status: 200 })
+        }
+        return new Response("not found", { status: 404 })
       }
       return new Response("not found", { status: 404 })
     }),

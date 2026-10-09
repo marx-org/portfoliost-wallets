@@ -33,7 +33,6 @@ describe("Portfolio CRUD (§15 Phase B)", () => {
     const body = await res.json()
     expect(body.name).toBe("Growth")
     expect(body.baseCurrency).toBe("USD")
-    expect(body.strategy).toBe("GROWTH")
     expect(body.capitalBasis).toBe(0)
     expect(body.id).toBeDefined()
   })

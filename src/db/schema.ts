@@ -75,11 +75,21 @@ export const syncRuns = walletsSchema.table(
 export const portfoliosSchema = pgSchema("portfolios")
 
 /**
- * Portfolio container (D54). base_currency is the display/valuation currency,
- * defaulted from user prefs at creation time (D21b). §62: `currency` and
- * `wallet_id` are dropped — a portfolio owns its cash natively (see
- * portfolio_cash_transactions); baseCurrency is the single portfolio currency.
- * `externalSource` tags portfolios created by an import source (NULL = manual).
+ * Portfolio container (D54) — the unit a user organizes holdings around.
+ *
+ * Ownership: one row per (userId, name) — the `uq_portfolios_user_name` natural
+ * key doubles as the import bootstrap's idempotency key (§23.3). A portfolio
+ * owns its cash natively (§62: `currency`/`wallet_id` dropped); the per-currency
+ * ledger lives in portfolio_cash_transactions.
+ *
+ * base_currency is the display/valuation currency (D21b), defaulted from user
+ * prefs at creation; total_invested (the capital BASIS) and current_value are
+ * both denominated in base_currency. is_public toggles the public share
+ * projection; is_margin_enabled suppresses the negative-cash warning in the cash
+ * UI. external_source tags portfolios created by an import (NULL = manual).
+ *
+ * The strategy, type, and numeric margin-rate columns were dropped (#113): no
+ * strategy selection, portfolio type, or numeric margin calculation is served.
  */
 export const portfolios = portfoliosSchema.table(
   "portfolios",
@@ -87,13 +97,17 @@ export const portfolios = portfoliosSchema.table(
     id: uuid("id").primaryKey().default(sql`gen_random_uuid()`),
     userId: text("user_id").notNull(),
     name: text("name").notNull(),
+    // free-text blurb shown on the portfolio card/detail; NULL for most.
     description: text("description"),
-    strategy: text("strategy").notNull().default("GROWTH"),
-    type: text("type").notNull().default("regular"),
+    // display + valuation currency (D21b); total_invested/current_value are in it.
     baseCurrency: char("base_currency", { length: 3 }).notNull().default("USD"),
+    // tags portfolios created by an import source (NULL = manual); see import §23.3.
     externalSource: text("external_source"),
+    // capital BASIS in base_currency: net external contributions + in-kind cost.
     totalInvested: numeric("total_invested", { precision: 20, scale: 8 }).notNull().default("0"),
+    // live market valuation in base_currency (instruments + cash).
     currentValue: numeric("current_value", { precision: 20, scale: 8 }).notNull().default("0"),
+    // toggles the auth-exempt public share projection.
     isPublic: boolean("is_public").notNull().default(false),
     /**
      * §87.5 — UI-only. Pre-ticks the transaction form's "also create a cash
@@ -108,10 +122,11 @@ export const portfolios = portfoliosSchema.table(
      * Default `false` so no existing account changes behaviour on deploy.
      */
     cashLegOnTrade: boolean("cash_leg_on_trade").notNull().default(false),
+    // the flag PortfolioCashTab.vue uses to suppress the negative-cash warning;
+    // margin accounts are expected to run a negative cash balance.
     isMarginEnabled: boolean("is_margin_enabled").notNull().default(false),
-    marginRate: numeric("margin_rate", { precision: 9, scale: 4 }),
-    maintenanceMarginRate: numeric("maintenance_margin_rate", { precision: 9, scale: 4 }),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    // bumped on every portfolio mutation (name/currency/flags).
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (t) => [

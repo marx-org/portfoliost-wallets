@@ -2125,6 +2125,115 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/admin/listing-overrides": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List and search curated listing overrides
+         * @description Admin-facing list of curated venue overrides. Search matches ticker,
+         *     venue and listing key; `status` filters active/disabled. Each row
+         *     carries `upstreamPresent`, `tickerConflict` and `precedence` so the
+         *     reviewer sees how it relates to the upstream GitHub reference.
+         */
+        get: operations["listAdminListingOverrides"];
+        put?: never;
+        /** Create a curated listing override */
+        post: operations["createAdminListingOverride"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/admin/listing-overrides/preview": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Preview upstream conflict and precedence for a prospective override
+         * @description Resolves the upstream/conflict picture for a ticker+venue *before* an
+         *     override is saved, so the reviewer can see the upstream currency and any
+         *     ambiguity the override would take precedence over.
+         */
+        get: operations["previewAdminListingOverride"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/admin/listing-overrides/{listingKey}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description `<EXCHANGE>::<TICKER>` (URL-encoded) */
+                listingKey: string;
+            };
+            cookie?: never;
+        };
+        get?: never;
+        /** Edit a curated listing override */
+        put: operations["updateAdminListingOverride"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/admin/listing-overrides/{listingKey}/disable": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description `<EXCHANGE>::<TICKER>` (URL-encoded) */
+                listingKey: string;
+            };
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Disable a curated listing override
+         * @description Flips status to `disabled`; the row and its history are retained.
+         */
+        post: operations["disableAdminListingOverride"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/admin/listing-overrides/{listingKey}/history": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description `<EXCHANGE>::<TICKER>` (URL-encoded) */
+                listingKey: string;
+            };
+            cookie?: never;
+        };
+        /** Audit history for a curated listing override */
+        get: operations["getAdminListingOverrideHistory"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/internal/apply-split": {
         parameters: {
             query?: never;
@@ -3087,16 +3196,12 @@ export interface components {
             userId: string;
             name: string;
             description?: string | null;
-            strategy: string;
-            type: string;
             baseCurrency?: string;
             capitalBasis: number;
             currentValue: number;
             isPublic: boolean;
             cashLegOnTrade?: boolean;
             isMarginEnabled: boolean;
-            marginRate?: number | null;
-            maintenanceMarginRate?: number | null;
             /** Format: date-time */
             createdAt: string;
             /** Format: date-time */
@@ -3112,7 +3217,6 @@ export interface components {
         CreatePortfolioRequest: {
             name: string;
             description?: string | null;
-            strategy?: string;
             currency?: string;
             isPublic?: boolean;
             cashLegOnTrade?: boolean;
@@ -4159,6 +4263,91 @@ export interface components {
         AdminFxRatesResponse: {
             items: components["schemas"]["AdminFxRate"][];
             pagination: components["schemas"]["AdminPagination"];
+        };
+        AdminListingOverride: {
+            /** @description `<EXCHANGE>::<TICKER>` — the venue-qualified primary key. */
+            listingKey: string;
+            ticker: string;
+            /** @description Venue/exchange code (e.g. NYSE, LSE, TSX). */
+            exchange: string;
+            /** @description ISO-4217 quote currency for this listing. */
+            quoteCurrency: string;
+            assetType: string;
+            /** @enum {string} */
+            status: "active" | "disabled";
+            /** @description Why the override exists (required; reviewed with the row). */
+            rationale: string;
+            /** @description Where the fact came from (issue ref, analyst, source URL). */
+            provenance: string;
+            /**
+             * @description Which writer won — `admin` for an admin edit, or the curated
+             *     source version string when seeded from the versioned source.
+             */
+            sourceVersion: string;
+            /** Format: date-time */
+            createdAt: string;
+            /** Format: date-time */
+            updatedAt: string;
+            /** @description A GitHub ticker-reference row exists for the same listingKey. */
+            upstreamPresent: boolean;
+            /** @description More than one upstream row shares this ticker (venue ambiguity). */
+            tickerConflict: boolean;
+            /**
+             * @description Curated always outranks upstream. Surfaced explicitly so a conflict
+             *     is visible rather than silently resolved.
+             * @enum {string}
+             */
+            precedence: "curated";
+        };
+        AdminListingOverrideInput: {
+            ticker: string;
+            exchange: string;
+            quoteCurrency: string;
+            assetType: string;
+            /**
+             * @default active
+             * @enum {string}
+             */
+            status: "active" | "disabled";
+            rationale: string;
+            provenance: string;
+        };
+        AdminListingOverridesResponse: {
+            items: components["schemas"]["AdminListingOverride"][];
+            pagination: components["schemas"]["AdminPagination"];
+        };
+        AdminListingOverrideHistoryEntry: {
+            id: number;
+            listingKey: string;
+            /** @enum {string} */
+            action: "created" | "updated" | "disabled";
+            /** @description The override row as written, verbatim (free-form JSON). */
+            snapshot?: unknown;
+            /** @description `<user-id> <email>` of the writer. */
+            actor: string;
+            /** Format: date-time */
+            createdAt: string;
+        };
+        AdminListingOverrideHistoryResponse: {
+            items: components["schemas"]["AdminListingOverrideHistoryEntry"][];
+        };
+        AdminListingOverridePreview: {
+            listingKey: string;
+            ticker: string;
+            exchange: string;
+            /** @description An upstream GitHub row exists for this exact listing key. */
+            upstreamPresent: boolean;
+            /** @description More than one upstream row shares this ticker. */
+            tickerConflict: boolean;
+            /**
+             * @description Quote currency the upstream reference currently resolves for this
+             *     key, so a reviewer sees the value the override would replace.
+             */
+            upstreamCurrency?: string | null;
+            /** @description The override already stored for this key, if any. */
+            existingOverride?: components["schemas"]["AdminListingOverride"] | null;
+            /** @enum {string} */
+            precedence: "curated";
         };
         TopologyStatusResponse: {
             services: components["schemas"]["TopologyServiceStatus"][];
@@ -7438,6 +7627,313 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["AdminFxRatesResponse"];
+                };
+            };
+            /** @description Missing or invalid token */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Not a portfoliost_admin */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+        };
+    };
+    listAdminListingOverrides: {
+        parameters: {
+            query?: {
+                page?: number;
+                per_page?: number;
+                search?: string;
+                status?: "active" | "disabled";
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Paginated override list */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AdminListingOverridesResponse"];
+                };
+            };
+            /** @description Missing or invalid token */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Not a portfoliost_admin */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+        };
+    };
+    createAdminListingOverride: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["AdminListingOverrideInput"];
+            };
+        };
+        responses: {
+            /** @description Created */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AdminListingOverride"];
+                };
+            };
+            /** @description Missing or invalid token */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Not a portfoliost_admin */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description An override for this listing key already exists */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Validation failed */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+        };
+    };
+    previewAdminListingOverride: {
+        parameters: {
+            query: {
+                ticker: string;
+                exchange: string;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Precedence and conflict metadata for the proposed key */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AdminListingOverridePreview"];
+                };
+            };
+            /** @description Missing or invalid token */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Not a portfoliost_admin */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Ticker or exchange missing/invalid */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+        };
+    };
+    updateAdminListingOverride: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description `<EXCHANGE>::<TICKER>` (URL-encoded) */
+                listingKey: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["AdminListingOverrideInput"];
+            };
+        };
+        responses: {
+            /** @description Updated */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AdminListingOverride"];
+                };
+            };
+            /** @description Missing or invalid token */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Not a portfoliost_admin */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description No override with that listing key */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Validation failed */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+        };
+    };
+    disableAdminListingOverride: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description `<EXCHANGE>::<TICKER>` (URL-encoded) */
+                listingKey: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Disabled */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AdminListingOverride"];
+                };
+            };
+            /** @description Missing or invalid token */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Not a portfoliost_admin */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description No override with that listing key */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+        };
+    };
+    getAdminListingOverrideHistory: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description `<EXCHANGE>::<TICKER>` (URL-encoded) */
+                listingKey: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description History, newest first */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AdminListingOverrideHistoryResponse"];
                 };
             };
             /** @description Missing or invalid token */

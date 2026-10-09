@@ -1492,7 +1492,10 @@ describe("Aggregates & metrics (§15 Phase G)", () => {
     const h = await makeHarness()
     const a = app(h.db)
     // EUR-quoted table: PLN→USD = 2/4 = 0.5 (the D27 cross-rate).
-    mockInstrumentsFx({ table: { USD: 2, PLN: 4 } })
+    // Declare the USD preference explicitly so the aggregate base is USD
+    // deterministically — otherwise it is a fragile row-order tie-break
+    // between the two portfolio bases (1 PLN + 1 USD).
+    mockInstrumentsFx({ table: { USD: 2, PLN: 4 }, preferences: { baseCurrency: "USD" } })
     try {
       // PLN-base portfolio (prod shape: `currency` left at the API default,
       // base declared separately) holding a PLN position.

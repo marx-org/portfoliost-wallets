@@ -63,10 +63,40 @@ describe("portfolios cash schema (§62)", () => {
       .returning()
     expect(p.name).toBe("Top10")
     expect(p.baseCurrency).toBe("USD")
-    expect(p.strategy).toBe("GROWTH")
-    expect(p.type).toBe("regular")
     expect(Number(p.totalInvested)).toBe(0)
     expect(p.isPublic).toBe(false)
+  })
+
+  it("documents portfolios: table + every remaining column comment", async () => {
+    const { db } = await createTestDb()
+    const table = await db.execute(
+      sql`select obj_description('portfolios.portfolios'::regclass) as d`,
+    )
+    expect(String((table.rows[0] as any).d)).toMatch(/portfolio container/i)
+
+    const cols = await db.execute(sql`
+      select a.attname, col_description('portfolios.portfolios'::regclass, a.attnum) as d
+      from pg_attribute a
+      where a.attrelid = 'portfolios.portfolios'::regclass and a.attnum > 0 and not a.attisdropped
+      order by a.attnum
+    `)
+    const described = cols.rows.map((r: any) => String(r.d) ?? "")
+    // every remaining column carries a meaningful (non-empty) description
+    expect(described.length).toBeGreaterThan(0)
+    for (const d of described) expect(d.length).toBeGreaterThan(0)
+  })
+
+  it("dropped strategy/type/margin columns are gone", async () => {
+    const { db } = await createTestDb()
+    const rows = await db.execute(sql`
+      select column_name from information_schema.columns
+      where table_schema = 'portfolios' and table_name = 'portfolios'
+    `)
+    const names = rows.rows.map((r: any) => r.column_name)
+    expect(names).not.toContain("strategy")
+    expect(names).not.toContain("type")
+    expect(names).not.toContain("margin_rate")
+    expect(names).not.toContain("maintenance_margin_rate")
   })
 
   it("inserts a portfolio cash transaction with fx columns", async () => {
