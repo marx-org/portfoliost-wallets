@@ -4,6 +4,7 @@ import {
   MAX_CARRY_DAYS,
   ORDER_PRICED_WINDOW_DAYS,
   assessSymbol,
+  barsFromSeries,
   deviationPct,
   hasBarEvidence,
   isOrderPriced,
@@ -270,6 +271,30 @@ describe("priceAuditBarsUrl", () => {
   it("uses the canonical endpoint and requested audit window", () => {
     expect(priceAuditBarsUrl("http://instruments/", "NVDA", "2022-01-01", "2026-10-07"))
       .toBe("http://instruments/api/instruments/NVDA/price-bars?from=2022-01-01&to=2026-10-07")
+  })
+})
+
+describe("barsFromSeries", () => {
+  it("keeps the first (stooq-first) close when a date is repeated (#84)", () => {
+    const bars = barsFromSeries({
+      dates: ["2022-03-18", "2022-03-18", "2022-07-27"],
+      closes: [115.976, 567.91, 89.72],
+    })
+    expect(bars.get("2022-03-18")).toBe(115.976)
+    expect(bars.get("2022-07-27")).toBe(89.72)
+    expect(bars.size).toBe(2)
+  })
+
+  it("skips non-positive and missing closes", () => {
+    const bars = barsFromSeries({ dates: ["a", "b", "c"], closes: [0, null, 10] })
+    expect(bars.get("a")).toBeUndefined()
+    expect(bars.get("b")).toBeUndefined()
+    expect(bars.get("c")).toBe(10)
+  })
+
+  it("handles an empty or absent body", () => {
+    expect(barsFromSeries({}).size).toBe(0)
+    expect(barsFromSeries({ dates: [], closes: [] }).size).toBe(0)
   })
 })
 

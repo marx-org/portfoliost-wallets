@@ -15,6 +15,7 @@ import {
   runBackfill,
   recalcPortfolioHistory,
   recalcPortfolioSeries,
+  transferCloseForDate,
 } from "./backfill.js"
 import { snapshotPortfolioValue, __resetQuoteCachesForTests } from "./quotes.js"
 import { __resetBackfillRunnerForTests } from "./backfill-runner.js"
@@ -203,6 +204,19 @@ describe("buildPriceMap", () => {
     expect(map.has("2026-07-09")).toBe(false)
     expect(map.get("2026-07-10")).toBe(100)
   })
+  it("keeps the first (stooq-first) close when a date is repeated (#84)", () => {
+    // instruments serves a stooq/overflow pair stooq-first for an overlapping
+    // date; the split-adjusted stooq close must not be overwritten by the
+    // lower-priority overflow twin.
+    const map = buildPriceMap(
+      ["2026-07-01", "2026-07-02", "2026-07-02"],
+      [150, 58.025, 333.43],
+      ["2026-07-01", "2026-07-02", "2026-07-03"],
+    )
+    expect(map.get("2026-07-01")).toBe(150)
+    expect(map.get("2026-07-02")).toBe(58.025)
+    expect(map.get("2026-07-03")).toBe(58.025) // carry-forward of the kept close
+  })
 })
 
 describe("runBackfill (H6)", () => {
@@ -248,6 +262,47 @@ describe("runBackfill (H6)", () => {
     const netFlowByDate = new Map(snaps.map((s) => [s.snapshotDate, Number(s.netFlow)]))
     expect(netFlowByDate.get("2026-07-01")).toBeCloseTo(1500)
     expect(netFlowByDate.get("2026-07-02")).toBe(0)
+  })
+
+  it("values a duplicated stooq/overflow date at the stooq close exactly once (#84)", async () => {
+    const { db, user } = await makeHarness("bf-user-84")
+    const pf = await seedPortfolio(db, user.id)
+    await seedBuy(db, user.id, pf.id, "OVR84", 10, 55, "2026-07-30")
+    await seedPosition(db, user.id, pf.id, "OVR84", 10, 55)
+
+    // The same-date pair as the price_bars_all view carries it: the split-
+    // adjusted stooq close served first, the overflow twin second.
+    mockPriceBars({
+      OVR84: {
+        dates: ["2026-07-30", "2026-07-30"],
+        closes: [58.025, 333.43],
+      },
+    })
+
+    const now = new Date("2026-07-31T00:00:00Z")
+    await runBackfill(db, pf.id, "Bearer test", now)
+
+    const snaps = await db
+      .select()
+      .from(valueSnapshots)
+      .where(eq(valueSnapshots.portfolioId, pf.id))
+      .orderBy(valueSnapshots.snapshotDate)
+
+    const day = snaps.find((s) => s.snapshotDate === "2026-07-30")
+    expect(day).toBeDefined()
+    // 10 × 58.025 — not 10 × 333.43 (the overflow twin), not doubled.
+    expect(Number(day!.value)).toBeCloseTo(580.25)
+  })
+
+  it("transferCloseForDate keeps the stooq close for a duplicated date (#84)", async () => {
+    mockPriceBars({
+      OVR84: {
+        dates: ["2026-07-30", "2026-07-30"],
+        closes: [58.025, 333.43],
+      },
+    })
+    const close = await transferCloseForDate("OVR84", "2026-07-30", "Bearer test", "USD", "USD")
+    expect(close).toBe(58.025)
   })
 
   it("carries forward price on weekend gaps", async () => {
