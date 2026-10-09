@@ -567,3 +567,9 @@ describe("#120 — portfolio_backfill_metadata documentation", () => {
     await expectDocumented("portfolio_backfill_metadata", /backfill/i)
   })
 })
+
+describe("#121 — labels documentation", () => {
+  it("documents the table and every one of its columns", async () => {
+    await expectDocumented("labels", /label/i)
+  })
+})

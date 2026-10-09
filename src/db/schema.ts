@@ -637,11 +637,17 @@ export const portfolioBackfillMetadata = portfoliosSchema.table(
 export const labels = portfoliosSchema.table(
   "labels",
   {
+    /** Label primary key. */
     id: uuid("id").primaryKey().default(sql`gen_random_uuid()`),
+    /** Owner of the label; the authorization boundary and the unique-name scope. */
     userId: text("user_id").notNull(),
+    /** Label name; unique per user (uq_labels_user_name). */
     name: text("name").notNull(),
+    /** Hex "#rrggbb" from the fixed 10-colour palette; auto-assigned via palette cycling when omitted. */
     color: text("color").notNull(),
+    /** When the label was created. */
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    /** When the label was last modified. */
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (t) => [

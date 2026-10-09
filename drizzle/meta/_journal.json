@@ -197,6 +197,13 @@
       "when": 1791546704667,
       "tag": "0027_doc_wallets_backfill_metadata",
       "breakpoints": true
+    },
+    {
+      "idx": 28,
+      "version": "7",
+      "when": 1791550026240,
+      "tag": "0028_doc_wallets_labels",
+      "breakpoints": true
     }
   ]
 }
