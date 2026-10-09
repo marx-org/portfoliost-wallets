@@ -15,6 +15,25 @@ import {
 import { TransactionCreateSchema } from "../routes/portfolio-transactions.js"
 import { ImportPortfolioTxSchema } from "../routes/import.js"
 
+// Asserts a table and every one of its remaining columns carry a PostgreSQL
+// comment, and that the table comment explains the table's purpose (matches a
+// regex) rather than being a bare placeholder. `table` is a trusted constant.
+async function expectDocumented(table: string, purpose: RegExp) {
+  const { db } = await createTestDb()
+  const t = await db.execute(
+    sql`select obj_description(('portfolios.' || ${table})::regclass, 'pg_class') as c`,
+  )
+  const doc = String((t.rows[0] as any).c ?? "")
+  expect(doc, `${table} table comment`).toBeTruthy()
+  expect(doc).toMatch(purpose)
+  const missing = await db.execute(sql`
+    select column_name from information_schema.columns
+    where table_schema = 'portfolios' and table_name = ${table}
+      and col_description(('portfolios.' || ${table})::regclass, ordinal_position) is null
+  `)
+  expect(missing.rows, `${table} columns missing a comment`).toEqual([])
+}
+
 describe("wallets schema (sync_runs only, §62)", () => {
   it("keeps the dedicated pg schema via migrations (sync_runs home)", async () => {
     const { db } = await createTestDb()
@@ -540,5 +559,11 @@ describe("#119 — value_snapshots documentation", () => {
         and col_description('portfolios.value_snapshots'::regclass, ordinal_position) is null
     `)
     expect(missing.rows).toEqual([])
+  })
+})
+
+describe("#120 — portfolio_backfill_metadata documentation", () => {
+  it("documents the table and every one of its columns", async () => {
+    await expectDocumented("portfolio_backfill_metadata", /backfill/i)
   })
 })

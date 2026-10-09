@@ -190,6 +190,13 @@
       "when": 1791544395612,
       "tag": "0026_doc_wallets_value_snapshots",
       "breakpoints": true
+    },
+    {
+      "idx": 27,
+      "version": "7",
+      "when": 1791546704667,
+      "tag": "0027_doc_wallets_backfill_metadata",
+      "breakpoints": true
     }
   ]
 }

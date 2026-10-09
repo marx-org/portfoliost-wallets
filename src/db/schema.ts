@@ -580,12 +580,17 @@ export const valueSnapshots = portfoliosSchema.table(
 export const portfolioBackfillMetadata = portfoliosSchema.table(
   "portfolio_backfill_metadata",
   {
+    /** Portfolio this status row belongs to; primary key, one row per portfolio. */
     portfolioId: uuid("portfolio_id")
       .primaryKey()
       .references(() => portfolios.id, { onDelete: "cascade" }),
+    /** Backfill lifecycle status: 'pending' | 'complete' | 'failed'. */
     status: text("status").notNull().default("pending"), // 'pending'|'complete'|'failed'
+    /** When the latest backfill pass started. */
     startedAt: timestamp("started_at", { withTimezone: true }),
+    /** When the latest backfill pass finished (success or failure). */
     completedAt: timestamp("completed_at", { withTimezone: true }),
+    /** Why the latest pass failed; null when the latest pass did not fail. */
     errorMessage: text("error_message"),
     // §63.8 — symbols the latest backfill pass held (qty > 0 on the window's
     // last day) but had NO price bar for → the stored value is a *partial*
@@ -595,6 +600,7 @@ export const portfolioBackfillMetadata = portfoliosSchema.table(
     // a symbol held in 2022 with no bar then, and sold since, still belongs in
     // it. That is why it is NOT the field a UI uses to say "the value you are
     // looking at is short" — see `heldGapSymbols`.
+    /** Window-wide symbols held in the backfill window with no price bar → stored value is a partial sum; null/absent = every held symbol priced. */
     gapSymbols: text("gap_symbols").array(),
     // §72.30 — the subset of `gapSymbols` still held on the window's last day.
     // Non-empty means the LATEST stored point is itself a partial sum.
@@ -604,6 +610,7 @@ export const portfolioBackfillMetadata = portfoliosSchema.table(
     // IKE Beata on 2026-10-01, whose 7 flagged symbols were all CLOSED. The
     // current value was complete. A warning that is wrong about the number in
     // front of the user is worse than no warning, because it is believed.
+    /** Subset of gap_symbols still held on the window's last day; non-empty means the latest stored point is a partial sum. */
     heldGapSymbols: text("held_gap_symbols").array(),
     // §72.21 — symbol → number of held days on which the price series came back
     // with NO bar. jsonb rather than a second text[] because the useful part is
@@ -617,6 +624,7 @@ export const portfolioBackfillMetadata = portfoliosSchema.table(
     // the same reason as `gapSymbols`: consumers need to tell "no holes" from
     // "not measured yet" — a row written before this column existed has null while
     // the backfill has certainly run.
+    /** symbol → number of held days with no price bar; null = no symbol had a hole. */
     fxCoverageHoles: jsonb("fx_coverage_holes").$type<Record<string, number>>(),
   },
 )
