@@ -490,3 +490,21 @@ describe("#116 — transactions derive display currency and metadata elsewhere",
     expect(missing.rows).toEqual([])
   })
 })
+
+describe("#117 — split_events documentation", () => {
+  it("documents the split_events table and every one of its columns", async () => {
+    const { db } = await createTestDb()
+    const table = await db.execute(sql`select obj_description('portfolios.split_events'::regclass, 'pg_class') as c`)
+    const doc = String((table.rows[0] as any).c ?? "")
+    expect(doc).toBeTruthy()
+    // The comment must explain what the ledger is for, not just be non-empty.
+    expect(doc).toMatch(/split/i)
+    expect(doc).toMatch(/quantity/i)
+    const missing = await db.execute(sql`
+      select column_name from information_schema.columns
+      where table_schema = 'portfolios' and table_name = 'split_events'
+        and col_description('portfolios.split_events'::regclass, ordinal_position) is null
+    `)
+    expect(missing.rows).toEqual([])
+  })
+})

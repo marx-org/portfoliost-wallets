@@ -169,6 +169,13 @@
       "when": 1791536168986,
       "tag": "0023_early_lady_bullseye",
       "breakpoints": true
+    },
+    {
+      "idx": 24,
+      "version": "7",
+      "when": 1791540039459,
+      "tag": "0024_doc_wallets_split_events",
+      "breakpoints": true
     }
   ]
 }

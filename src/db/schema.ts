@@ -470,11 +470,17 @@ export const portfolioTransactions = portfoliosSchema.table(
 export const splitEvents = portfoliosSchema.table(
   "split_events",
   {
+    /** Split event primary key. */
     id: serial("id").primaryKey(),
+    /** Ticker the split applies to. */
     symbol: text("symbol").notNull(),
+    /** Quantity multiplier (2 for a 2:1 split); not a price multiplier. */
     factor: numeric("factor", { precision: 20, scale: 8 }).notNull(),
+    /** First date the factor applies; pre-split rows on/before this date restated. */
     effectiveDate: date("effective_date").notNull(),
+    /** Who recorded the event; "admin" is the default internal-ingest source. */
     source: text("source").notNull().default("admin"),
+    /** When the event was recorded. */
     appliedAt: timestamp("applied_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (t) => [uniqueIndex("uq_split_events").on(t.symbol, t.effectiveDate)],
