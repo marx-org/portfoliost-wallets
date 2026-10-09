@@ -525,3 +525,20 @@ describe("#118 — shares documentation", () => {
     expect(missing.rows).toEqual([])
   })
 })
+
+describe("#119 — value_snapshots documentation", () => {
+  it("documents the value_snapshots table and every one of its columns", async () => {
+    const { db } = await createTestDb()
+    const table = await db.execute(sql`select obj_description('portfolios.value_snapshots'::regclass, 'pg_class') as c`)
+    const doc = String((table.rows[0] as any).c ?? "")
+    expect(doc).toBeTruthy()
+    // The comment must explain what the table is for, not just be non-empty.
+    expect(doc).toMatch(/snapshot/i)
+    const missing = await db.execute(sql`
+      select column_name from information_schema.columns
+      where table_schema = 'portfolios' and table_name = 'value_snapshots'
+        and col_description('portfolios.value_snapshots'::regclass, ordinal_position) is null
+    `)
+    expect(missing.rows).toEqual([])
+  })
+})

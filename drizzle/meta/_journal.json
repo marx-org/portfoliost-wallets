@@ -183,6 +183,13 @@
       "when": 1791542155389,
       "tag": "0025_doc_wallets_shares",
       "breakpoints": true
+    },
+    {
+      "idx": 26,
+      "version": "7",
+      "when": 1791544395612,
+      "tag": "0026_doc_wallets_value_snapshots",
+      "breakpoints": true
     }
   ]
 }

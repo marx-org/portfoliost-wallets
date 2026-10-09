@@ -526,12 +526,17 @@ export const shares = portfoliosSchema.table(
 export const valueSnapshots = portfoliosSchema.table(
   "value_snapshots",
   {
+    /** Portfolio this snapshot belongs to; PK with snapshot_date. */
     portfolioId: uuid("portfolio_id")
       .notNull()
       .references(() => portfolios.id, { onDelete: "cascade" }),
+    /** Business day of the snapshot; PK with portfolio_id. */
     snapshotDate: date("snapshot_date").notNull(),
+    /** Total portfolio value (positions + cash) for the day, in base currency; excludes unpriced positions. */
     value: numeric("value", { precision: 20, scale: 8 }).notNull(),
+    /** Cumulative net invested capital (position cost basis) as of the day, in base currency. */
     invested: numeric("invested", { precision: 20, scale: 8 }).notNull(),
+    /** Net cash flow of the day (trades + transfers), in base currency. */
     netFlow: numeric("net_flow", { precision: 20, scale: 8 }).notNull().default("0"),
     // §78.5 — base-currency COST of positions held on this day that have no
     // price. `value` already excludes them, so this is the only place the
@@ -540,6 +545,7 @@ export const valueSnapshots = portfoliosSchema.table(
     // that as "worth 0 unpriced" would be the opposite of true for exactly the
     // portfolios that need it — so existing rows are backfilled by the next
     // recompute, and readers should treat a pre-migration row as unknown.
+    /** Base-currency cost of positions with no price on the day; `value` excludes them, so this is the only place the withheld amount exists. */
     unpricedValue: numeric("unpriced_value", { precision: 20, scale: 8 }).notNull().default("0"),
     // §72.31 — cost of positions priced from a CARRIED-FORWARD close on a day
     // the market was open. Separate from `unpriced_value` because carry-forward
@@ -549,12 +555,16 @@ export const valueSnapshots = portfoliosSchema.table(
     //
     // Closures are excluded, so this is not ~29% of every series the way raw
     // carry-forward would be.
+    /** Base-currency cost of positions priced from a carried-forward close on a market-open day; closures excluded. */
     carriedValue: numeric("carried_value", { precision: 20, scale: 8 }).notNull().default("0"),
     // §53.2 — widened from numeric(20,8): an XIRR that "converges" to a
     // garbage rate produced cumulative_mwr ≈ 1e12 → 'numeric field overflow'.
     // (The §53.1 solver guard makes this a belt-and-braces bound.)
+    /** Cumulative time-weighted return as of the day; null until computed. */
     cumulativeTwr: numeric("cumulative_twr", { precision: 28, scale: 8 }),
+    /** Cumulative money-weighted (XIRR) return as of the day; null until computed. */
     cumulativeMwr: numeric("cumulative_mwr", { precision: 28, scale: 8 }),
+    /** Cumulative simple return as of the day; null until computed. */
     cumulativeSimple: numeric("cumulative_simple", { precision: 28, scale: 8 }),
   },
   (t) => [
