@@ -218,6 +218,13 @@
       "when": 1791554474900,
       "tag": "0030_doc_wallets_transaction_labels",
       "breakpoints": true
+    },
+    {
+      "idx": 31,
+      "version": "7",
+      "when": 1791556804057,
+      "tag": "0031_doc_wallets_cash_tx_labels",
+      "breakpoints": true
     }
   ]
 }

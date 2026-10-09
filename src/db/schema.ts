@@ -702,13 +702,20 @@ export const transactionLabels = portfoliosSchema.table(
   ],
 )
 
-/** Many-to-many: label -> portfolio cash transaction (§62, D65). */
+/**
+ * Many-to-many join: label to portfolio cash transaction (§62, D65). Written
+ * with replace semantics (D67/D68): the full label set for a cash transaction is
+ * cleared and re-inserted in one transaction. Rows cascade on cash transaction
+ * or label delete.
+ */
 export const portfolioCashTransactionLabels = portfoliosSchema.table(
   "portfolio_cash_transaction_labels",
   {
+    /** Cash transaction the label attaches to; cascades on cash transaction delete. */
     cashTransactionId: uuid("cash_transaction_id")
       .notNull()
       .references(() => portfolioCashTransactions.id, { onDelete: "cascade" }),
+    /** Label being attached; cascades on label delete. */
     labelId: uuid("label_id")
       .notNull()
       .references(() => labels.id, { onDelete: "cascade" }),

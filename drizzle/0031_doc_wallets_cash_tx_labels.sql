@@ -1,0 +1,3 @@
+COMMENT ON TABLE "portfolios"."portfolio_cash_transaction_labels" IS 'Many-to-many join: label to portfolio cash transaction (section 62, D65). Written with replace semantics (D67/D68): the full label set for a cash transaction is cleared and re-inserted in one transaction. Rows cascade on cash transaction or label delete.';--> statement-breakpoint
+COMMENT ON COLUMN "portfolios"."portfolio_cash_transaction_labels"."cash_transaction_id" IS 'Cash transaction the label attaches to; cascades on cash transaction delete.';--> statement-breakpoint
+COMMENT ON COLUMN "portfolios"."portfolio_cash_transaction_labels"."label_id" IS 'Label being attached; cascades on label delete.';
