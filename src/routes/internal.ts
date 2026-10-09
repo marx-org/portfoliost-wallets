@@ -175,7 +175,7 @@ export function createInternalRoutes(db?: DB) {
         // The window's START is irrelevant to the answer and is the expensive
         // part (every day is a row), so ask for the single day asked for.
         const series = await cashBalanceSeries(database, token, p.id, asOf, asOf, p.baseCurrency, { strict: true })
-        const perCurrency = await cashBalances(database, token, p.id)
+        const perCurrency = await cashBalances(database, token, p.id, asOf)
         out.push({
           id: p.id,
           name: p.name,
