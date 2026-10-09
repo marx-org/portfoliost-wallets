@@ -494,16 +494,25 @@ export const splitEvents = portfoliosSchema.table(
 export const shares = portfoliosSchema.table(
   "shares",
   {
+    /** Public share-link id; the auth-exempt route is addressed by this id. */
     id: uuid("id").primaryKey().default(sql`gen_random_uuid()`),
+    /** Owner who created the link; the authorization boundary for list/create/delete. */
     userId: text("user_id").notNull(),
+    /** Portfolio this link exposes; cascades on portfolio delete. */
     portfolioId: uuid("portfolio_id")
       .notNull()
       .references(() => portfolios.id, { onDelete: "cascade" }),
+    /** Public display name; falls back to the portfolio name when empty. */
     displayName: text("display_name").notNull().default(""),
+    /** Count of public views; incremented on each auth-exempt read. */
     viewCount: integer("view_count").notNull().default(0),
+    /** Optional expiry; null means the link does not expire. */
     expiresAt: timestamp("expires_at", { withTimezone: true }),
+    /** Position-projection switches for the public route (showValues, positionsToHide, …). */
     privacySettings: jsonb("privacy_settings").notNull(),
+    /** When the link was created. */
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    /** Last touched (bumped on each public view). */
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (t) => [index("idx_shares_portfolio").on(t.portfolioId)],

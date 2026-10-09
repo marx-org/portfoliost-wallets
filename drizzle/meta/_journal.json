@@ -176,6 +176,13 @@
       "when": 1791540039459,
       "tag": "0024_doc_wallets_split_events",
       "breakpoints": true
+    },
+    {
+      "idx": 25,
+      "version": "7",
+      "when": 1791542155389,
+      "tag": "0025_doc_wallets_shares",
+      "breakpoints": true
     }
   ]
 }

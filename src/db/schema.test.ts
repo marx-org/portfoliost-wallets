@@ -508,3 +508,20 @@ describe("#117 — split_events documentation", () => {
     expect(missing.rows).toEqual([])
   })
 })
+
+describe("#118 — shares documentation", () => {
+  it("documents the shares table and every one of its columns", async () => {
+    const { db } = await createTestDb()
+    const table = await db.execute(sql`select obj_description('portfolios.shares'::regclass, 'pg_class') as c`)
+    const doc = String((table.rows[0] as any).c ?? "")
+    expect(doc).toBeTruthy()
+    // The comment must explain what the table is for, not just be non-empty.
+    expect(doc).toMatch(/share/i)
+    const missing = await db.execute(sql`
+      select column_name from information_schema.columns
+      where table_schema = 'portfolios' and table_name = 'shares'
+        and col_description('portfolios.shares'::regclass, ordinal_position) is null
+    `)
+    expect(missing.rows).toEqual([])
+  })
+})
