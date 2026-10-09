@@ -67,6 +67,39 @@ function applySplit(h: Harness, body: Record<string, unknown>) {
   })
 }
 
+async function importSell(
+  h: Harness,
+  portfolioId: string,
+  executedAt: string,
+  quantity: number,
+  price: number,
+) {
+  const res = await h.app.request("/api/import/transactions", {
+    method: "POST",
+    headers: { ...h.headers, "content-type": "application/json" },
+    body: JSON.stringify({
+      source: { externalSource: "google-sheets:transakcje", spreadsheetId: "spr-1", sheet: "tx" },
+      transactions: [
+        {
+          externalId: `sell-${Math.random().toString(36).slice(2, 8)}`,
+          portfolioName: "Transakcje",
+          executedAt,
+          portfolioTx: {
+            portfolioId,
+            type: "SELL",
+            instrumentSymbol: "AAPL",
+            assetType: "STOCK",
+            quantity,
+            price,
+            currency: "USD",
+          },
+        },
+      ],
+    }),
+  })
+  expect(res.status).toBe(200)
+}
+
 async function ptxOf(h: Harness, portfolioId: string) {
   const rows = await h.db.select().from(portfolioTransactions).where(eq(portfolioTransactions.portfolioId, portfolioId))
   return rows
@@ -338,6 +371,48 @@ describe("POST /internal/apply-split (§23.6)", () => {
     })
     expect(res.status).toBe(200)
     expect((await res.json()).updatedTransactions).toBe(1)
+  })
+
+  // #110 — a split detected AFTER a position closed must still restate its
+  // historical transactions (the daily scan now covers closed positions, and
+  // this is the apply-side guarantee that restates them).
+  it("#110 — a closed position with a post-close split is restated and stays closed", async () => {
+    const h = await boot()
+    const { portfolioId } = await seedPortfolio(h)
+    // BUY 10 @ 100 on 2024-01-15, SELL 10 @ 120 on 2024-04-15 → closed position.
+    await importBuy(h, portfolioId)
+    await importSell(h, portfolioId, "2024-04-15T10:00:00.000Z", 10, 120)
+
+    const posBefore = await posOf(h, portfolioId)
+    expect(posBefore.length).toBe(1)
+    expect(posBefore[0].isOpen).toBe(false)
+    expect(Number(posBefore[0].quantity)).toBe(0)
+
+    // 5:1 split effective 2024-06-10 — after both the buy and the sell.
+    const res = await (await applySplit(h, { symbol: "AAPL", factor: 5, effectiveDate: "2024-06-10" })).json()
+    expect(res).toEqual({ updatedTransactions: 2, affectedPortfolios: 1 })
+
+    const rows = (await ptxOf(h, portfolioId)).sort(
+      (a, b) => (a.executedAt < b.executedAt ? -1 : 1),
+    )
+    expect(rows).toHaveLength(2)
+    // BUY restated: quantity ×5, price ÷5 (frozen originals intact).
+    expect(rows[0].type).toBe("BUY")
+    expect(Number(rows[0].quantity)).toBe(50)
+    expect(Number(rows[0].price)).toBe(20)
+    expect(Number(rows[0].originalQuantity)).toBe(10)
+    expect(Number(rows[0].originalPrice)).toBe(100)
+    // SELL restated too — this is the row the open-only scan could never see.
+    expect(rows[1].type).toBe("SELL")
+    expect(Number(rows[1].quantity)).toBe(50)
+    expect(Number(rows[1].price)).toBeCloseTo(24, 8)
+
+    // The position stays closed at zero; only its average cost basis moves.
+    const posAfter = await posOf(h, portfolioId)
+    expect(posAfter.length).toBe(1)
+    expect(posAfter[0].isOpen).toBe(false)
+    expect(Number(posAfter[0].quantity)).toBe(0)
+    expect(Number(posAfter[0].averageCostBasis)).toBe(20)
   })
 })
 
