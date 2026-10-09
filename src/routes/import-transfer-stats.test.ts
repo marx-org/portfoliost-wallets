@@ -4,7 +4,7 @@ import { vi } from "vitest"
 import { makeHarness } from "./test-utils.js"
 import { createImportRoutes } from "./import.js"
 import { eq } from "drizzle-orm"
-import { portfolioBackfillMetadata, portfolioCashTransactions, portfolioTransactions, positions, portfolios, valueSnapshots } from "../db/schema.js"
+import { portfolioBackfillMetadata, portfolioCashTransactions, portfolioTransactions, positions, positionPortfolios, portfolios, valueSnapshots } from "../db/schema.js"
 import { computeSnapshotBatch, hasBackfillableHistory, recalcPortfolioHistory, recalcPortfolioSeries } from "../services/backfill.js"
 import { __resetBackfillRunnerForTests } from "../services/backfill-runner.js"
 import { externalCashInvested } from "../services/cashLedger.js"
@@ -306,7 +306,10 @@ describe("the gain is counted exactly once, however many custody boundaries it c
     const { h, post, from, to } = await setup()
     await post([DEPOSIT("Equate+"), BUY(from, "Equate+")])
     await post([TRANSFER(from, 2, "x-1")])
-    const rows = await h.db.select().from(positions)
+    const rows = await h.db
+      .select({ portfolioId: positionPortfolios.portfolioId, quantity: positions.quantity })
+      .from(positions)
+      .innerJoin(positionPortfolios, eq(positionPortfolios.positionId, positions.id))
     const byPf = new Map<string, number>()
     for (const r of rows) byPf.set(r.portfolioId, (byPf.get(r.portfolioId) ?? 0) + Number(r.quantity))
     expect(byPf.get(from) ?? 0).toBe(3)

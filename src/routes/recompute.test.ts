@@ -2,7 +2,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import { Hono } from "hono"
 import { createPortfolioRoutes } from "./portfolios.js"
-import { makeHarness } from "./test-utils.js"
+import { makeHarness, insertPosition } from "./test-utils.js"
+import { positionInPortfolio } from "../db/position-membership.js"
 import {
   portfolios,
   positions,
@@ -72,7 +73,7 @@ async function seedBuy(db: DB, userId: string, portfolioId: string, symbol: stri
 }
 
 async function seedPosition(db: DB, userId: string, portfolioId: string, symbol: string, qty: number, avg: number) {
-  await db.insert(positions).values({
+  await insertPosition(db, {
     userId,
     portfolioId,
     symbol,
@@ -145,7 +146,7 @@ describe("POST /api/portfolios/:id/recompute (plan §27.2)", () => {
       }),
     )
 
-    const [before] = await h.db.select().from(positions).where(eq(positions.portfolioId, pf.id))
+    const [before] = await h.db.select().from(positions).where(positionInPortfolio(pf.id))
     expect(before.marketValue).toBeNull()
 
     const res = await a.request(`/api/portfolios/${pf.id}/recompute?mode=upsert`, {
@@ -159,7 +160,7 @@ describe("POST /api/portfolios/:id/recompute (plan §27.2)", () => {
     // prices already stored on the positions and never calls instruments, so the
     // button completed, reported success, and left an unpriced portfolio
     // unpriced. Found by §76.5's PROD check, not by a unit test.
-    const [after] = await h.db.select().from(positions).where(eq(positions.portfolioId, pf.id))
+    const [after] = await h.db.select().from(positions).where(positionInPortfolio(pf.id))
     expect(after.marketValue).not.toBeNull()
     expect(Number(after.marketValue)).toBeCloseTo(2220) // 10 × 222
     expect(after.priceSource).toBe("quote")

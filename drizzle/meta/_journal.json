@@ -141,6 +141,27 @@
       "when": 1791525647487,
       "tag": "0019_eminent_carlie_cooper",
       "breakpoints": true
+    },
+    {
+      "idx": 20,
+      "version": "7",
+      "when": 1791531082982,
+      "tag": "0020_simple_hellfire_club",
+      "breakpoints": true
+    },
+    {
+      "idx": 21,
+      "version": "7",
+      "when": 1791531105092,
+      "tag": "0021_data_wallets_position_portfolios",
+      "breakpoints": true
+    },
+    {
+      "idx": 22,
+      "version": "7",
+      "when": 1791531148110,
+      "tag": "0022_glossy_maria_hill",
+      "breakpoints": true
     }
   ]
 }

@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import { Hono } from "hono"
 import { createPortfolioRoutes } from "./portfolios.js"
-import { makeHarness } from "./test-utils.js"
+import { makeHarness, insertPosition } from "./test-utils.js"
 import {
   portfolios,
   positions,
@@ -123,7 +123,7 @@ describe("Portfolio CRUD (§15 Phase B)", () => {
     const portfolio = await createRes.json()
 
     // Insert a position + transaction
-    await h.db.insert(positions).values({
+    await insertPosition(h.db, {
       userId: h.user.id,
       portfolioId: portfolio.id,
       symbol: "AAPL",
@@ -173,7 +173,7 @@ describe("Portfolio CRUD (§15 Phase B)", () => {
         body: JSON.stringify({ name: "NoFetch", currency: "USD" }),
       })
     ).json()
-    await h.db.insert(positions).values({
+    await insertPosition(h.db, {
       userId: h.user.id,
       portfolioId: created.id,
       symbol: "AAPL",
@@ -305,7 +305,7 @@ describe("Portfolio CRUD (§15 Phase B)", () => {
     })
     const portfolio = await createRes.json()
 
-    await h.db.insert(positions).values({
+    await insertPosition(h.db, {
       userId: h.user.id,
       portfolioId: portfolio.id,
       symbol: "AAPL",

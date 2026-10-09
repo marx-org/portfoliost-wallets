@@ -1,5 +1,14 @@
 // Scheduled additive snapshot refresh (2026-09-27).
 //
+// Schedule: daily at 13:00 controller-local — HelmRelease job `snapshotssync`,
+// cron `0 13 * * *` (homelab runs the k3s controller on CEST/UTC+2, so this is
+// 11:00 UTC; the HelmRelease records the verified `lastScheduleTime`). The pass
+// runs its two phases in a fixed order per portfolio: `refreshQuotes` FIRST,
+// which recalculates and stores the quote-derived position valuation fields
+// (`positions.market_value`, `positions.day_change`, `positions.day_change_percent`),
+// and only THEN `runBackfillRecent`, so value_snapshots are valued off prices
+// that are actually fresh (#115).
+//
 // Cron job (wallets HelmRelease `snapshotssync` + `snapshotssync-postfx`): for
 // EVERY portfolio, upsert value_snapshots for [first trade, TODAY] — never
 // deletes, so a failed/slow pass can't blank a chart. Extends past the normal

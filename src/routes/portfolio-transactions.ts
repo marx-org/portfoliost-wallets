@@ -7,11 +7,13 @@ import { getDb as resolveDb, type DB } from "../db/index.js"
 import {
   portfolios,
   positions,
+  positionPortfolios,
   portfolioTransactions,
   portfolioCashTransactions,
   positionLabels,
   transactionLabels,
 } from "../db/schema.js"
+import { positionInPortfolio } from "../db/position-membership.js"
 import { resolveFeeFx } from "../services/fee-fx.js"
 import { capitalBasisInvested } from "../services/transferFlows.js"
 import { fxTo, resolveRates } from "../services/instruments-fx.js"
@@ -163,7 +165,7 @@ async function upsertPositionOnBuy(
         and(
           eq(positions.id, body.positionId),
           eq(positions.userId, userId),
-          eq(positions.portfolioId, portfolioId),
+          positionInPortfolio(portfolioId),
         ),
       )
     pos = existing
@@ -176,7 +178,7 @@ async function upsertPositionOnBuy(
       .where(
         and(
           eq(positions.userId, userId),
-          eq(positions.portfolioId, portfolioId),
+          positionInPortfolio(portfolioId),
           eq(positions.symbol, symbol),
           eq(positions.isOpen, true),
         ),
@@ -203,7 +205,6 @@ async function upsertPositionOnBuy(
         sector: body.sector ?? pos.sector,
         industry: body.industry ?? pos.industry,
         country: body.country ?? pos.country,
-        fees: String(Number(pos.fees ?? "0") + body.feesSettled),
         updatedAt: new Date(),
       })
       .where(eq(positions.id, pos.id))
@@ -215,7 +216,6 @@ async function upsertPositionOnBuy(
     .insert(positions)
     .values({
       userId,
-      portfolioId,
       symbol,
       companyName: body.instrumentName ?? null,
       quantity: String(body.quantity),
@@ -230,11 +230,12 @@ async function upsertPositionOnBuy(
       sector: body.sector ?? "Other",
       industry: body.industry ?? "Other",
       country: body.country ?? "Other",
-      fees: String(body.feesSettled),
       isOpen: true,
       openedAt: body.openedAt ?? new Date(),
     })
     .returning()
+  // #115 — ownership is the many-to-many membership, not a column on positions.
+  await tx.insert(positionPortfolios).values({ positionId: created.id, portfolioId })
   return created
 }
 
@@ -262,7 +263,7 @@ async function processSell(
         and(
           eq(positions.id, body.positionId),
           eq(positions.userId, userId),
-          eq(positions.portfolioId, portfolioId),
+          positionInPortfolio(portfolioId),
         ),
       )
     pos = existing
@@ -274,7 +275,7 @@ async function processSell(
       .where(
         and(
           eq(positions.userId, userId),
-          eq(positions.portfolioId, portfolioId),
+          positionInPortfolio(portfolioId),
           eq(positions.symbol, symbol),
           eq(positions.isOpen, true),
         ),
@@ -297,7 +298,6 @@ async function processSell(
 
   const updateData: Record<string, unknown> = {
     quantity: String(newQty),
-    fees: String(Number(pos.fees ?? "0") + body.feesSettled),
     updatedAt: new Date(),
   }
   if (newQty < 1e-9) {
@@ -452,8 +452,9 @@ export async function openPositionsValueByPortfolio(
   userId: string,
 ): Promise<Map<string, number>> {
   const rows = await db
-    .select({ portfolioId: positions.portfolioId, marketValue: positions.marketValue, quantity: positions.quantity, averageCostBasis: positions.averageCostBasis })
+    .select({ portfolioId: positionPortfolios.portfolioId, marketValue: positions.marketValue, quantity: positions.quantity, averageCostBasis: positions.averageCostBasis })
     .from(positions)
+    .innerJoin(positionPortfolios, eq(positionPortfolios.positionId, positions.id))
     .where(and(eq(positions.userId, userId), eq(positions.isOpen, true)))
   const totals = new Map<string, number>()
   for (const p of rows) {
@@ -470,7 +471,7 @@ async function openPositionsValue(db: DB, userId: string, portfolioId: string) {
     .where(
       and(
         eq(positions.userId, userId),
-        eq(positions.portfolioId, portfolioId),
+        positionInPortfolio(portfolioId),
         eq(positions.isOpen, true),
       ),
     )
@@ -831,7 +832,7 @@ export function createTransactionRoutes(db?: DB) {
           .where(
             and(
               eq(positions.userId, identity.id),
-              eq(positions.portfolioId, portfolioId),
+              positionInPortfolio(portfolioId),
               eq(positions.symbol, existing.instrumentSymbol!),
               eq(positions.isOpen, true),
             ),
@@ -918,7 +919,7 @@ export function createTransactionRoutes(db?: DB) {
         and(
           eq(positions.id, positionId),
           eq(positions.userId, identity.id),
-          eq(positions.portfolioId, portfolioId),
+          positionInPortfolio(portfolioId),
         ),
       )
     if (!pos) return c.json({ error: "NotFound", message: "Position not found" }, 404)
@@ -988,7 +989,7 @@ export function createTransactionRoutes(db?: DB) {
         and(
           eq(positions.id, positionId),
           eq(positions.userId, identity.id),
-          eq(positions.portfolioId, portfolioId),
+          positionInPortfolio(portfolioId),
         ),
       )
     if (!pos) return c.json({ error: "NotFound", message: "Position not found" }, 404)
@@ -1354,7 +1355,7 @@ export function createTransactionRoutes(db?: DB) {
     const labelsFilter = labelFilterIds(c.req.query("labels"))
     const conditions: SQL[] = [
       eq(positions.userId, identity.id),
-      eq(positions.portfolioId, portfolioId),
+      positionInPortfolio(portfolioId),
     ]
     attachLabelCondition(
       conditions,
@@ -1403,7 +1404,7 @@ export function createTransactionRoutes(db?: DB) {
       .where(
         and(
           eq(positions.userId, identity.id),
-          eq(positions.portfolioId, portfolioId),
+          positionInPortfolio(portfolioId),
           eq(positions.isOpen, true),
         ),
       )
@@ -1483,7 +1484,7 @@ export function createTransactionRoutes(db?: DB) {
       .where(
         and(
           eq(positions.userId, identity.id),
-          eq(positions.portfolioId, portfolioId),
+          positionInPortfolio(portfolioId),
         ),
       )
 
@@ -1517,7 +1518,7 @@ export function createTransactionRoutes(db?: DB) {
       .where(
         and(
           eq(positions.userId, identity.id),
-          eq(positions.portfolioId, portfolioId),
+          positionInPortfolio(portfolioId),
           eq(positions.isOpen, true),
         ),
       )

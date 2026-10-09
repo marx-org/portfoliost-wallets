@@ -4,6 +4,7 @@ import { makeHarness, type Harness } from "./test-utils.js"
 import { Hono } from "hono"
 import { createImportRoutes } from "./import.js"
 import { portfolioTransactions, positions, portfolios } from "../db/schema.js"
+import { positionInPortfolio } from "../db/position-membership.js"
 import { __resetBackfillRunnerForTests } from "../services/backfill-runner.js"
 
 function stubTransferPrices(
@@ -122,7 +123,7 @@ async function positionFor(h: Harness, portfolioId: string) {
   const [p] = await h.db
     .select()
     .from(positions)
-    .where(and(eq(positions.portfolioId, portfolioId), eq(positions.symbol, "AAPL")))
+    .where(and(positionInPortfolio(portfolioId), eq(positions.symbol, "AAPL")))
   return p
 }
 

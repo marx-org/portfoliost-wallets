@@ -11,6 +11,7 @@
 import { and, eq, inArray } from "drizzle-orm"
 import type { DB } from "../db/index.js"
 import { positions } from "../db/schema.js"
+import { positionInPortfolio } from "../db/position-membership.js"
 
 const DEFAULT_TICKER_LIMIT = 50
 const DEFAULT_FETCH_LIMIT = 50
@@ -65,7 +66,7 @@ export async function getPortfolioSymbols(
     .from(positions)
     .where(
       and(
-        eq(positions.portfolioId, portfolioId),
+        positionInPortfolio(portfolioId),
         eq(positions.userId, userId),
         eq(positions.isOpen, true),
       ),

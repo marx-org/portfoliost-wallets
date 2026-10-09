@@ -28,7 +28,8 @@
  */
 import { and, eq, sql } from "drizzle-orm"
 import { getDb, closeDb } from "../db/index.js"
-import { portfolios, portfolioTransactions, portfolioCashTransactions, positions, valueSnapshots } from "../db/schema.js"
+import { portfolios, portfolioTransactions, portfolioCashTransactions, positions, positionPortfolios, valueSnapshots } from "../db/schema.js"
+import { positionInPortfolio } from "../db/position-membership.js"
 import { resolveServiceToken, fxTo } from "../services/instruments-fx.js"
 import { splitPortfolioValue } from "../services/valuation.js"
 import { cashBalances } from "../services/cashLedger.js"
@@ -277,18 +278,19 @@ export function findReconciliationGaps(
 export async function auditCurrencies(db: Awaited<ReturnType<typeof getDb>>) {
   return db
     .select({
-      portfolioId: positions.portfolioId,
+      portfolioId: positionPortfolios.portfolioId,
       portfolioName: portfolios.name,
       symbol: positions.symbol,
       storedCurrency: positions.instrumentCurrency,
       transactionCurrencies: sql<string[]>`array_agg(distinct ${portfolioTransactions.instrumentCurrency})`,
     })
     .from(positions)
-    .innerJoin(portfolios, eq(positions.portfolioId, portfolios.id))
+    .innerJoin(positionPortfolios, eq(positionPortfolios.positionId, positions.id))
+    .innerJoin(portfolios, eq(portfolios.id, positionPortfolios.portfolioId))
     .innerJoin(
       portfolioTransactions,
       and(
-        eq(portfolioTransactions.portfolioId, positions.portfolioId),
+        eq(portfolioTransactions.portfolioId, positionPortfolios.portfolioId),
         eq(portfolioTransactions.instrumentSymbol, positions.symbol),
       ),
     )
@@ -320,7 +322,7 @@ export async function auditReconciliation(
         instrumentCurrency: positions.instrumentCurrency,
       })
       .from(positions)
-      .where(and(eq(positions.portfolioId, p.id), eq(positions.isOpen, true)))
+      .where(and(positionInPortfolio(p.id), eq(positions.isOpen, true)))
 
     const split = await splitPortfolioValue(toBase, posRows, await cashBalances(db, authToken, p.id))
     if (split.unpricedPositions > 0) continue // an incomplete total cannot be compared

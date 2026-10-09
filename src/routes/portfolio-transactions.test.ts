@@ -14,6 +14,7 @@ import {
   portfolioCashTransactions,
   valueSnapshots,
 } from "../db/schema.js"
+import { positionInPortfolio } from "../db/position-membership.js"
 import { and, eq, sql } from "drizzle-orm"
 
 function app(db: Parameters<typeof makeHarness>[0] extends string ? never : Parameters<typeof createPortfolioRoutes>[0]) {
@@ -1394,7 +1395,7 @@ describe("Aggregates & metrics (§15 Phase G)", () => {
       const state = async () => ({
         positions: await h.db
           .select({ mv: positions.marketValue, asOf: positions.priceAsOf })
-          .from(positions).where(eq(positions.portfolioId, id)),
+          .from(positions).where(positionInPortfolio(id)),
         currentValue: (await h.db.select({ v: portfolios.currentValue })
           .from(portfolios).where(eq(portfolios.id, id)))[0].v,
         snapshots: await h.db.select().from(valueSnapshots).where(eq(valueSnapshots.portfolioId, id)),
@@ -2362,7 +2363,7 @@ describe("§63.2: the headline total equals the latest snapshot (quotes fresh)",
       await h.db
         .update(positions)
         .set({ marketValue: null })
-        .where(and(eq(positions.portfolioId, id), eq(positions.symbol, "GHOST")))
+        .where(and(positionInPortfolio(id), eq(positions.symbol, "GHOST")))
 
       const body = await (await a.request("/api/portfolios/total-metrics", { headers: h.headers })).json()
       const row = body.portfolioBreakdown[0]
@@ -2442,7 +2443,7 @@ describe("§76.1 — GET read paths are pure (no writes)", () => {
         priceSource: positions.priceSource,
       })
       .from(positions)
-      .where(eq(positions.portfolioId, portfolioId))
+      .where(positionInPortfolio(portfolioId))
     return {
       snapshotCount: snaps[0]?.n ?? 0,
       currentValue: pf[0]?.currentValue ?? null,
@@ -2472,7 +2473,7 @@ describe("§76.1 — GET read paths are pure (no writes)", () => {
     await h.db
       .update(positions)
       .set({ marketValue: "1500", priceAsOf: null, priceSource: "manual" })
-      .where(eq(positions.portfolioId, portfolio.id))
+      .where(positionInPortfolio(portfolio.id))
     await h.db
       .update(portfolios)
       .set({ currentValue: "1500" })
@@ -2535,7 +2536,7 @@ describe("§76.1 — GET read paths are pure (no writes)", () => {
     await h.db
       .update(positions)
       .set({ priceAsOf: new Date("2026-09-30T06:00:00Z"), priceSource: "quote" })
-      .where(eq(positions.portfolioId, portfolio.id))
+      .where(positionInPortfolio(portfolio.id))
 
     const body = await (
       await a.request(`/api/portfolios/${portfolio.id}/positions`, { headers: h.headers })

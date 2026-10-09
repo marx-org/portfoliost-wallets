@@ -13,6 +13,7 @@
 import { and, eq } from "drizzle-orm"
 import type { DB } from "../db/index.js"
 import { positions } from "../db/schema.js"
+import { positionInPortfolio } from "../db/position-membership.js"
 import type { components } from "../generated/api-types.js"
 
 export type CalendarHolding = components["schemas"]["CalendarHolding"]
@@ -53,7 +54,7 @@ export async function getPortfolioSymbols(
     .from(positions)
     .where(
       and(
-        eq(positions.portfolioId, portfolioId),
+        positionInPortfolio(portfolioId),
         eq(positions.userId, userId),
         eq(positions.isOpen, true),
       ),

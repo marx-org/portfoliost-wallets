@@ -1,7 +1,8 @@
 import type { Hono } from "hono"
 import { and, eq } from "drizzle-orm"
 import { createTestDb } from "../db/test-db.js"
-import { positions } from "../db/schema.js"
+import { positions, positionPortfolios } from "../db/schema.js"
+import { positionInPortfolio } from "../db/position-membership.js"
 import type { DB } from "../db/index.js"
 
 export interface Harness {
@@ -42,7 +43,7 @@ export async function priceOpenPositions(
   const open = await db
     .select({ id: positions.id, quantity: positions.quantity, averageCostBasis: positions.averageCostBasis })
     .from(positions)
-    .where(and(eq(positions.portfolioId, portfolioId), eq(positions.isOpen, true)))
+    .where(and(positionInPortfolio(portfolioId), eq(positions.isOpen, true)))
   for (const p of open) {
     const price = typeof pricePerUnit === "function" ? pricePerUnit(p) : pricePerUnit
     await db
@@ -50,5 +51,39 @@ export async function priceOpenPositions(
       .set({ marketValue: String(price * Number(p.quantity)) })
       .where(eq(positions.id, p.id))
   }
+}
+
+export type PositionInsert = typeof positions.$inferInsert
+
+/**
+ * #115 — insert positions and their portfolio membership in one step.
+ *
+ * `positions` no longer carries `portfolio_id`; ownership lives in the
+ * `position_portfolios` join row. Tests keep passing `portfolioId` in the
+ * values for readability — it is extracted here and written to the join table,
+ * so the seeded data still belongs to the intended portfolio.
+ */
+export async function insertPositions(
+  db: DB,
+  rows: Array<PositionInsert & { portfolioId?: string }>,
+): Promise<Array<typeof positions.$inferSelect>> {
+  const inserted: Array<typeof positions.$inferSelect> = []
+  for (const { portfolioId, ...values } of rows) {
+    const [row] = await db.insert(positions).values(values).returning()
+    if (portfolioId) {
+      await db.insert(positionPortfolios).values({ positionId: row.id, portfolioId })
+    }
+    inserted.push(row)
+  }
+  return inserted
+}
+
+/** #115 — singular form of {@link insertPositions}. */
+export async function insertPosition(
+  db: DB,
+  row: PositionInsert & { portfolioId?: string },
+): Promise<typeof positions.$inferSelect> {
+  const [created] = await insertPositions(db, [row])
+  return created
 }
 

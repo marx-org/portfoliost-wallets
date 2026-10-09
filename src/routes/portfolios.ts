@@ -1,15 +1,17 @@
 import { Hono, type Context } from "hono"
-import { and, asc, count as drizzleCount, desc, eq, sql } from "drizzle-orm"
+import { and, asc, count as drizzleCount, desc, eq, inArray, sql } from "drizzle-orm"
 import { z } from "zod"
 import { userIdentityMiddleware } from "../auth.js"
 import { getDb, type DB } from "../db/index.js"
 import {
   portfolios,
   positions,
+  positionPortfolios,
   portfolioTransactions,
   shares,
   valueSnapshots,
 } from "../db/schema.js"
+import { positionInPortfolio } from "../db/position-membership.js"
 import { preferredBaseCurrency } from "../services/preferences.js"
 import { dominantPriceSource, oldestPriceAsOf, splitPortfolioValue } from "../services/valuation.js"
 import { getPortfolioNews } from "../services/portfolioNews.js"
@@ -121,7 +123,7 @@ async function computeMetrics(db: DB, portfolioId: string) {
       open: sql<number>`count(*) filter (where ${positions.isOpen} = true)::int`,
     })
     .from(positions)
-    .where(sql`${positions.portfolioId} = ${portfolioId}`)
+    .where(positionInPortfolio(portfolioId))
 
   const [txSums] = await db
     .select({
@@ -282,7 +284,7 @@ export function createPortfolioRoutes(db?: DB) {
         const [cnt] = await database
           .select({ count: drizzleCount() })
           .from(positions)
-          .where(sql`${positions.portfolioId} = ${p.id}`)
+          .where(positionInPortfolio(p.id))
 
         return {
           ...serializePortfolio(p),
@@ -348,7 +350,7 @@ export function createPortfolioRoutes(db?: DB) {
             priceSource: positions.priceSource,
           })
           .from(positions)
-          .where(and(sql`${positions.portfolioId} = ${p.id}`, eq(positions.isOpen, true)))
+          .where(and(positionInPortfolio(p.id), eq(positions.isOpen, true)))
 
         // §68 — the same split the recalc path and /summary-metrics compute. This
         // loop previously summed positions ONLY, which is precisely why the
@@ -793,9 +795,10 @@ async function resolveAggregateBase(
     // §76.1 — a read prices nothing: no refreshQuotes here, same as
     // GET /:id/positions.
     const rows = await database
-      .select({ position: positions, portfolioName: portfolios.name, baseCurrency: portfolios.baseCurrency })
+      .select({ position: positions, portfolioId: positionPortfolios.portfolioId, portfolioName: portfolios.name, baseCurrency: portfolios.baseCurrency })
       .from(positions)
-      .innerJoin(portfolios, eq(positions.portfolioId, portfolios.id))
+      .innerJoin(positionPortfolios, eq(positionPortfolios.positionId, positions.id))
+      .innerJoin(portfolios, eq(portfolios.id, positionPortfolios.portfolioId))
       .where(and(eq(positions.userId, identity.id), eq(positions.isOpen, true)))
       // The performers cards sort on P/L; ordering here means the SPA does not
       // have to, and the response is already in display order.
@@ -829,8 +832,8 @@ async function resolveAggregateBase(
       return {
         ...positionWire(
           r.position,
-          { id: r.position.portfolioId, baseCurrency: r.baseCurrency },
-          totalsByPortfolio.get(r.position.portfolioId) ?? 0,
+          { id: r.portfolioId, baseCurrency: r.baseCurrency },
+          totalsByPortfolio.get(r.portfolioId) ?? 0,
           // §83.5 — converted at the OWNING portfolio's base, so a row here is
           // the same number its per-portfolio tab shows. The performers cards
           // print the P/L in `instrumentCurrency` regardless; converting the whole
@@ -1081,11 +1084,11 @@ async function resolveAggregateBase(
     const posRows = await database
       .select()
       .from(positions)
-      .where(sql`${positions.portfolioId} = ${id}`)
+      .where(positionInPortfolio(id))
 
     const posSummaries = posRows.map((pos) => ({
       id: pos.id,
-      portfolioId: pos.portfolioId,
+      portfolioId: id,
       symbol: pos.symbol,
       companyName: pos.companyName,
       assetType: pos.assetType,
@@ -1190,13 +1193,38 @@ async function resolveAggregateBase(
       .select({ count: drizzleCount() })
       .from(positions)
       .where(
-        and(sql`${positions.portfolioId} = ${id}`, sql`${positions.isOpen} = true`),
+        and(positionInPortfolio(id), eq(positions.isOpen, true)),
       )
     if (posCount && posCount.count > 0) {
       return c.json({ error: "Conflict", message: "portfolio has open positions" }, 409)
     }
 
-    await database.delete(portfolios).where(sql`${portfolios.id} = ${id}`)
+    // #115 — deleting the portfolio drops its memberships via the join-table FK
+    // cascade. A position left with no membership was owned only by this
+    // portfolio, so it is removed too: the pre-m2m schema deleted positions with
+    // their portfolio, and that cleanup must not silently start leaking orphan
+    // rows once ownership became many-to-many.
+    await database.transaction(async (tx) => {
+      const members = await tx
+        .select({ id: positionPortfolios.positionId })
+        .from(positionPortfolios)
+        .where(eq(positionPortfolios.portfolioId, id))
+      const memberIds = members.map((m) => m.id)
+      await tx.delete(portfolios).where(sql`${portfolios.id} = ${id}`)
+      if (memberIds.length > 0) {
+        const surviving = await tx
+          .select({ id: positionPortfolios.positionId })
+          .from(positionPortfolios)
+          .where(inArray(positionPortfolios.positionId, memberIds))
+        const alive = new Set(surviving.map((s) => s.id))
+        const orphanIds = memberIds.filter((pid) => !alive.has(pid))
+        if (orphanIds.length > 0) {
+          await tx
+            .delete(positions)
+            .where(and(inArray(positions.id, orphanIds), eq(positions.userId, identity.id)))
+        }
+      }
+    })
     return c.body(null, 204)
   })
 
@@ -1223,7 +1251,7 @@ async function resolveAggregateBase(
       .where(
         and(
           eq(positions.userId, identity.id),
-          eq(positions.portfolioId, portfolioId),
+          positionInPortfolio(portfolioId),
           eq(positions.isOpen, true),
         ),
       )

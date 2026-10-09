@@ -1,9 +1,10 @@
 import { describe, expect, it } from "vitest"
 import { Hono } from "hono"
 import { and, eq, sql } from "drizzle-orm"
-import { makeHarness, type Harness } from "./test-utils.js"
+import { makeHarness, insertPosition, type Harness } from "./test-utils.js"
 import { createImportRoutes } from "./import.js"
 import { createPortfolioRoutes } from "./portfolios.js"
+import { positionInPortfolio } from "../db/position-membership.js"
 import {
   portfolios,
   portfolioCashTransactions,
@@ -282,7 +283,7 @@ describe("DELETE /api/import/source/:externalSource (§23.5)", () => {
       baseCurrency: "PLN",
       externalSource: "imp:src",
     })
-    await h.db.insert(positions).values({ userId: "user-1", portfolioId: sourcePortfolioId, symbol: "AAPL" })
+    await insertPosition(h.db, { userId: "user-1", portfolioId: sourcePortfolioId, symbol: "AAPL" })
     await h.db.insert(valueSnapshots).values({
       portfolioId: sourcePortfolioId,
       snapshotDate: "2024-01-15",
@@ -335,7 +336,7 @@ describe("POST /api/import/transactions (§23.4)", () => {
     expect(body.skipped).toBe(0)
     expect(body.errors).toEqual([])
 
-    const [pos] = await h.db.select().from(positions).where(eq(positions.portfolioId, portfolioId))
+    const [pos] = await h.db.select().from(positions).where(positionInPortfolio(portfolioId))
     expect(pos.isOpen).toBe(true)
     expect(Number(pos.quantity)).toBe(6)
     expect(Number(pos.averageCostBasis)).toBe(100)
@@ -373,7 +374,7 @@ describe("POST /api/import/transactions (§23.4)", () => {
       },
     ])
     expect(res.status).toBe(200)
-    let [pos] = await h.db.select().from(positions).where(eq(positions.portfolioId, portfolioId))
+    let [pos] = await h.db.select().from(positions).where(positionInPortfolio(portfolioId))
     expect(pos.sector).toBe("Healthcare")
     expect(pos.industry).toBe("Medical Devices")
     expect(pos.country).toBe("PL")
@@ -388,7 +389,7 @@ describe("POST /api/import/transactions (§23.4)", () => {
       },
     ])
     expect(res2.status).toBe(200)
-    ;[pos] = await h.db.select().from(positions).where(eq(positions.portfolioId, portfolioId))
+    ;[pos] = await h.db.select().from(positions).where(positionInPortfolio(portfolioId))
     expect(pos.sector).toBe("Healthcare")
     expect(pos.country).toBe("PL")
   })
@@ -406,7 +407,7 @@ describe("POST /api/import/transactions (§23.4)", () => {
       },
     ])
     expect(res.status).toBe(200)
-    const [pos] = await h.db.select().from(positions).where(eq(positions.portfolioId, portfolioId))
+    const [pos] = await h.db.select().from(positions).where(positionInPortfolio(portfolioId))
     expect(pos.sector).toBe("Other")
     expect(pos.industry).toBe("Other")
     expect(pos.country).toBe("Other")
@@ -429,7 +430,7 @@ describe("POST /api/import/transactions (§23.4)", () => {
     expect(body.inserted).toBe(1)
     expect(body.errors).toEqual([])
 
-    const [pos] = await h.db.select().from(positions).where(eq(positions.portfolioId, portfolioId))
+    const [pos] = await h.db.select().from(positions).where(positionInPortfolio(portfolioId))
     expect(pos.isOpen).toBe(true)
     expect(Number(pos.quantity)).toBe(21)
     expect(Number(pos.averageCostBasis)).toBe(0)
@@ -457,7 +458,7 @@ describe("POST /api/import/transactions (§23.4)", () => {
     expect(body.errors).toEqual([])
     expect(body.inserted).toBe(2)
 
-    const [pos] = await h.db.select().from(positions).where(eq(positions.portfolioId, portfolioId))
+    const [pos] = await h.db.select().from(positions).where(positionInPortfolio(portfolioId))
     expect(pos.isOpen).toBe(false)
     expect(Number(pos.quantity)).toBeCloseTo(0, 9)
   })
@@ -499,7 +500,7 @@ describe("POST /api/import/transactions (§23.4)", () => {
     const res = await postTransactions(h, [buyRow(portfolioId, { instrumentSymbol: "SAP" }), optRow("e-opt-1", 0.5)])
     expect((await res.json()).errors).toEqual([])
 
-    const lots = await h.db.select().from(positions).where(eq(positions.portfolioId, portfolioId))
+    const lots = await h.db.select().from(positions).where(positionInPortfolio(portfolioId))
     const equity = lots.find((p) => p.direction == null)
     const option = lots.find((p) => p.direction === "SHORT")
     expect(Number(equity?.quantity)).toBe(10) // equity lot untouched by the option sell
@@ -511,7 +512,7 @@ describe("POST /api/import/transactions (§23.4)", () => {
     // second written call adds to the SHORT lot (weighted-avg premium)
     const res2 = await postTransactions(h, [optRow("e-opt-2", 0.7)])
     expect((await res2.json()).errors).toEqual([])
-    const after = await h.db.select().from(positions).where(eq(positions.portfolioId, portfolioId))
+    const after = await h.db.select().from(positions).where(positionInPortfolio(portfolioId))
     const short2 = after.find((p) => p.direction === "SHORT")
     expect(Number(short2?.quantity)).toBe(200)
     expect(Number(short2?.averageCostBasis)).toBe(0.6)
@@ -552,7 +553,7 @@ describe("POST /api/import/transactions (§23.4)", () => {
     const res = await postTransactions(h, [leg("SELL", "e-exp-open"), leg("EXPIRATION", "e-exp-open#e")])
     expect((await res.json()).errors).toEqual([])
 
-    const lots = await h.db.select().from(positions).where(eq(positions.portfolioId, portfolioId))
+    const lots = await h.db.select().from(positions).where(positionInPortfolio(portfolioId))
     const option = lots.find((p) => p.direction === "SHORT")
     expect(option?.isOpen).toBe(false)
     expect(Number(option?.quantity)).toBe(0)
@@ -639,7 +640,7 @@ describe("POST /api/import/transactions (§23.4)", () => {
     expect(Number(ptxRow.originalQuantity)).toBe(20)
     expect(Number(ptxRow.originalPrice)).toBe(50)
 
-    const [pos] = await h.db.select().from(positions).where(eq(positions.portfolioId, portfolioId))
+    const [pos] = await h.db.select().from(positions).where(positionInPortfolio(portfolioId))
     expect(Number(pos.quantity)).toBe(10)
     expect(Number(pos.averageCostBasis)).toBe(100)
   })
@@ -933,7 +934,7 @@ describe("import labels + dividend tax convention (§55.2)", () => {
     ])
     expect((await res.json()).errors).toEqual([])
 
-    const [pos] = await h.db.select().from(positions).where(eq(positions.portfolioId, portfolioId))
+    const [pos] = await h.db.select().from(positions).where(positionInPortfolio(portfolioId))
     const posLabels = await h.db.select().from(positionLabels).where(eq(positionLabels.positionId, pos.id))
     expect(posLabels.map((r) => r.labelId).sort()).toEqual(
       (await h.db.select({ id: labels.id, name: labels.name }).from(labels).where(eq(labels.userId, "user-1")))
@@ -1040,7 +1041,7 @@ describe("import labels + dividend tax convention (§55.2)", () => {
     ])
     expect((await r2.json()).errors).toEqual([])
 
-    const [pos] = await h.db.select().from(positions).where(eq(positions.portfolioId, portfolioId))
+    const [pos] = await h.db.select().from(positions).where(positionInPortfolio(portfolioId))
     expect(Number(pos.quantity)).toBe(10) // untouched by the DIVIDEND row
     const joined = await h.db.select().from(positionLabels).where(eq(positionLabels.positionId, pos.id))
     expect(joined).toHaveLength(1)
@@ -1380,7 +1381,7 @@ describe("§72.13 — position dates come from the trade, not the import", () =>
     const res = await postTransactions(h, [buyRow(portfolioId)])
     expect(res.status).toBe(200)
 
-    const [pos] = await h.db.select().from(positions).where(eq(positions.portfolioId, portfolioId))
+    const [pos] = await h.db.select().from(positions).where(positionInPortfolio(portfolioId))
     expect(pos.openedAt.toISOString()).toBe("2024-01-15T10:00:00.000Z")
   })
 
@@ -1395,7 +1396,7 @@ describe("§72.13 — position dates come from the trade, not the import", () =>
       buyRow(portfolioId, { executedAt: "2024-01-15T10:00:00.000Z", quantity: 10 }),
     ])
 
-    const rows = await h.db.select().from(positions).where(eq(positions.portfolioId, portfolioId))
+    const rows = await h.db.select().from(positions).where(positionInPortfolio(portfolioId))
     expect(rows).toHaveLength(1)
     expect(rows[0].openedAt.toISOString()).toBe("2024-01-15T10:00:00.000Z")
   })
@@ -1422,7 +1423,7 @@ describe("§72.13 — position dates come from the trade, not the import", () =>
     const res = await postTransactions(h, [sell])
     expect(res.status).toBe(200)
 
-    const [pos] = await h.db.select().from(positions).where(eq(positions.portfolioId, portfolioId))
+    const [pos] = await h.db.select().from(positions).where(positionInPortfolio(portfolioId))
     expect(pos.isOpen).toBe(false)
     expect(pos.closedAt?.toISOString()).toBe("2022-09-26T10:00:00.000Z")
   })
@@ -1443,7 +1444,7 @@ describe("§72.8 — a resolved listing currency beats the payment currency", ()
     ])
     expect(res.status).toBe(200)
 
-    const [pos] = await h.db.select().from(positions).where(eq(positions.portfolioId, portfolioId))
+    const [pos] = await h.db.select().from(positions).where(positionInPortfolio(portfolioId))
     expect(pos.instrumentCurrency).toBe("USD")
   })
 
@@ -1452,7 +1453,7 @@ describe("§72.8 — a resolved listing currency beats the payment currency", ()
     const { portfolioId } = await seedPortfolio(h)
 
     await postTransactions(h, [buyRow(portfolioId, { currency: "PLN" })])
-    const [pos] = await h.db.select().from(positions).where(eq(positions.portfolioId, portfolioId))
+    const [pos] = await h.db.select().from(positions).where(positionInPortfolio(portfolioId))
     expect(pos.instrumentCurrency).toBe("PLN")
   })
 
@@ -1478,7 +1479,7 @@ describe("§72.8 — a resolved listing currency beats the payment currency", ()
       .select()
       .from(portfolioTransactions)
       .where(eq(portfolioTransactions.portfolioId, portfolioId))
-    const [pos] = await h.db.select().from(positions).where(eq(positions.portfolioId, portfolioId))
+    const [pos] = await h.db.select().from(positions).where(positionInPortfolio(portfolioId))
     expect(tx.currency).toBe("PLN")          // paid in PLN
     expect(tx.instrumentCurrency).toBe("GBP") // trades in GBP
     expect(pos.instrumentCurrency).toBe("GBP")

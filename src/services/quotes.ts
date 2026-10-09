@@ -15,6 +15,7 @@
 import { and, eq, sql } from "drizzle-orm"
 import type { DB } from "../db/index.js"
 import { positions, portfolios, valueSnapshots } from "../db/schema.js"
+import { positionInPortfolio } from "../db/position-membership.js"
 import { fxTo, instrumentsAuthHeaders } from "./instruments-fx.js"
 import { cashBalances, dailyExternalFlows } from "./cashLedger.js"
 import { capitalBasisInvested } from "./transferFlows.js"
@@ -268,7 +269,7 @@ export async function refreshQuotesUnlocked(
     .where(
       and(
         eq(positions.userId, userId),
-        eq(positions.portfolioId, portfolioId),
+        positionInPortfolio(portfolioId),
         eq(positions.isOpen, true),
       ),
     )

@@ -14,6 +14,7 @@ import {
   portfolioCashTransactionLabels,
   portfolioTransactions,
   positions,
+  positionPortfolios,
   syncRuns,
   valueSnapshots,
   shares,
@@ -23,6 +24,7 @@ import {
   splitEvents,
   transactionLabels,
 } from "../db/schema.js"
+import { positionInPortfolio } from "../db/position-membership.js"
 import { preferredBaseCurrency } from "../services/preferences.js"
 import { nextPaletteColor } from "./labels.js"
 import { ISO_CURRENCY } from "../services/currency.js"
@@ -230,7 +232,7 @@ async function upsertImportPositionOnBuy(
     .where(
       and(
         eq(positions.userId, userId),
-        eq(positions.portfolioId, portfolioId),
+        positionInPortfolio(portfolioId),
         eq(positions.symbol, symbol),
         eq(positions.isOpen, true),
         body.direction
@@ -261,7 +263,6 @@ async function upsertImportPositionOnBuy(
         sector: body.sector ?? existing.sector,
         industry: body.industry ?? existing.industry,
         country: body.country ?? existing.country,
-        fees: String(Number(existing.fees ?? "0") + body.feesSettled),
         updatedAt: new Date(),
       })
       .where(eq(positions.id, existing.id))
@@ -273,7 +274,6 @@ async function upsertImportPositionOnBuy(
     .insert(positions)
     .values({
       userId,
-      portfolioId,
       symbol,
       companyName: body.instrumentName,
       quantity: String(body.quantity),
@@ -286,7 +286,6 @@ async function upsertImportPositionOnBuy(
       sector: body.sector ?? "Other",
       industry: body.industry ?? "Other",
       country: body.country ?? "Other",
-      fees: String(body.feesSettled),
       isOpen: true,
       // §72.13 — was `new Date()`, i.e. the import's own timestamp. Every one of
       // the 269 positions in the database opened on 2026-09-28, the day of the
@@ -299,6 +298,8 @@ async function upsertImportPositionOnBuy(
       openedAt: body.executedAt,
     })
     .returning()
+  // #115 — ownership is the many-to-many membership, not a column on positions.
+  await tx.insert(positionPortfolios).values({ positionId: created.id, portfolioId })
   return created
 }
 
@@ -331,7 +332,7 @@ async function processImportSell(
     .where(
       and(
         eq(positions.userId, userId),
-        eq(positions.portfolioId, portfolioId),
+        positionInPortfolio(portfolioId),
         eq(positions.symbol, symbol),
         eq(positions.isOpen, true),
         body.direction != null
@@ -362,7 +363,6 @@ async function processImportSell(
 
   const updateData: Record<string, unknown> = {
     quantity: String(newQty),
-    fees: String(Number(pos.fees ?? "0") + body.feesSettled),
     updatedAt: new Date(),
   }
   if (newQty < 1e-9) {
@@ -825,7 +825,18 @@ export function createImportRoutes(db?: DB) {
         .returning({ id: portfolioTransactions.id })
       const positionsRows = await tx
         .delete(positions)
-        .where(and(inArray(positions.portfolioId, sourcePortfolioIds), eq(positions.userId, identity.id)))
+        .where(
+          and(
+            inArray(
+              positions.id,
+              tx
+                .select({ id: positionPortfolios.positionId })
+                .from(positionPortfolios)
+                .where(inArray(positionPortfolios.portfolioId, sourcePortfolioIds)),
+            ),
+            eq(positions.userId, identity.id),
+          ),
+        )
         .returning({ id: positions.id })
       const valueSnapshotsRows = await tx
         .delete(valueSnapshots)
@@ -1373,7 +1384,7 @@ async function decrementTransferPosition(
     .where(
       and(
         eq(positions.userId, userId),
-        eq(positions.portfolioId, portfolioId),
+        positionInPortfolio(portfolioId),
         eq(positions.symbol, symbol),
         eq(positions.isOpen, true),
         sql`${positions.direction} is null or ${positions.direction} = 'LONG'`,
@@ -1543,7 +1554,7 @@ async function insertImportPortfolioTx(
       .where(
         and(
           eq(positions.userId, userId),
-          eq(positions.portfolioId, ptx.portfolioId),
+          sql`exists (select 1 from ${positionPortfolios} where ${positionPortfolios.positionId} = ${positions.id} and ${positionPortfolios.portfolioId} = ${ptx.portfolioId})`,
           eq(positions.symbol, symbol),
           eq(positions.isOpen, true),
         ),

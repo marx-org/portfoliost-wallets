@@ -1,7 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
-import { makeHarness } from "../routes/test-utils.js"
-import { portfolios, positions } from "../db/schema.js"
-import { uuid } from "drizzle-orm/pg-core"
+import { makeHarness, insertPosition, insertPositions } from "../routes/test-utils.js"
+import { portfolios } from "../db/schema.js"
 
 import {
   getPortfolioNews,
@@ -45,14 +44,14 @@ describe("getPortfolioSymbols", () => {
       .insert(portfolios)
       .values({ name: "Growth", userId: h.user.id })
       .returning()
-    await h.db.insert(positions).values([
+    await insertPositions(h.db, [
       { portfolioId: p.id, userId: h.user.id, symbol: "AAPL", isOpen: true },
       { portfolioId: p.id, userId: h.user.id, symbol: "MSFT", isOpen: true },
       { portfolioId: p.id, userId: h.user.id, symbol: "TSLA", isOpen: true },
       { portfolioId: p.id, userId: h.user.id, symbol: "CLOSED", isOpen: false },
     ])
     // another user's positions must not leak
-    await h.db.insert(positions).values({ portfolioId: p.id, userId: "user-2", symbol: "NVDA", isOpen: true })
+    await insertPosition(h.db, { portfolioId: p.id, userId: "user-2", symbol: "NVDA", isOpen: true })
     const syms = await getPortfolioSymbols(h.db, p.id, h.user.id)
     expect(syms).toEqual(["AAPL", "MSFT", "TSLA"])
   })
@@ -76,7 +75,7 @@ describe("getPortfolioNews", () => {
       .insert(portfolios)
       .values({ name: "Growth", userId: h.user.id })
       .returning()
-    await h.db.insert(positions).values([
+    await insertPositions(h.db, [
       { portfolioId: p.id, userId: h.user.id, symbol: "AAPL", isOpen: true },
       { portfolioId: p.id, userId: h.user.id, symbol: "MSFT", isOpen: true },
     ])
@@ -118,7 +117,7 @@ describe("getPortfolioNews", () => {
       .insert(portfolios)
       .values({ name: "Growth", userId: h.user.id })
       .returning()
-    await h.db.insert(positions).values({ portfolioId: p.id, userId: h.user.id, symbol: "AAPL", isOpen: true })
+    await insertPosition(h.db, { portfolioId: p.id, userId: h.user.id, symbol: "AAPL", isOpen: true })
     vi.stubGlobal("fetch", vi.fn().mockRejectedValue(new Error("down")))
     const out = await getPortfolioNews(h.db, p.id, h.user.id, "Bearer x")
     expect(out.data).toEqual([])

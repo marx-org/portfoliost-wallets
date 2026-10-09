@@ -1,7 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import { crossRate } from "@marx2/contracts/fx"
-import { makeHarness } from "../routes/test-utils.js"
+import { makeHarness, insertPosition } from "../routes/test-utils.js"
 import { portfolios, portfolioTransactions, positions, valueSnapshots, portfolioCashTransactions, portfolioBackfillMetadata } from "../db/schema.js"
+import { positionInPortfolio } from "../db/position-membership.js"
 import { eq, and } from "drizzle-orm"
 import {
   buildPriceMap,
@@ -151,7 +152,7 @@ async function seedPosition(
   qty: number,  avg: number,
   ccy = "USD",
 ) {
-  await db.insert(positions).values({
+  await insertPosition(db, {
     userId,
     portfolioId,
     symbol,
@@ -905,7 +906,7 @@ describe("§76.3 — recalcPortfolioSeries (additive re-value behind the mutatio
     const [pos] = await db
       .select({ mv: positions.marketValue, src: positions.priceSource })
       .from(positions)
-      .where(eq(positions.portfolioId, pf.id))
+      .where(positionInPortfolio(pf.id))
     expect(pos.mv).not.toBeNull()
     expect(Number(pos.mv)).toBeGreaterThan(0)
 

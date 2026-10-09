@@ -236,55 +236,104 @@ export const portfolioCashTransactions = portfoliosSchema.table(
 )
 
 /**
- * Position lots (D54). One row per AddPositionDialog submit; SELLs target a
- * specific position_id or fall back to FIFO. Moving-average cost basis
- * maintained in the same SQL transaction as every ledger write.
+ * Position lots (#115). One row per position; SELLs target a specific
+ * position_id or fall back to FIFO. Moving-average cost basis is maintained in
+ * the same SQL transaction as every ledger write. Ownership is the many-to-many
+ * `positionPortfolios` membership — a position is no longer owned by a single
+ * portfolio. Quote refresh recalculates and stores the quote-derived valuation
+ * fields, and the lifecycle fields drive portfolio filtering and the API.
+ * Transaction rows remain the source of fee data; there are no position-level
+ * fee columns.
  */
 export const positions = portfoliosSchema.table(
   "positions",
   {
     id: uuid("id").primaryKey().default(sql`gen_random_uuid()`),
+    /** Owner of the position; the direct authorization boundary (D24). */
     userId: text("user_id").notNull(),
-    portfolioId: uuid("portfolio_id")
-      .notNull()
-      .references(() => portfolios.id, { onDelete: "cascade" }),
+    /** Ticker symbol of the instrument, e.g. AAPL. */
     symbol: text("symbol").notNull(),
+    /** Display name of the issuer/instrument, when known. */
     companyName: text("company_name"),
+    /** Instrument class; defaults to STOCK. */
     assetType: text("asset_type").notNull().default("STOCK"),
+    /** Derivative contract size (units per contract), accepted by imports and returned by the position API; null for cash equities. */
     contractSize: numeric("contract_size", { precision: 20, scale: 8 }),
+    /** Position direction, LONG or SHORT; null when untracked. */
     direction: text("direction"),
+    /** Option type, CALL or PUT; null for non-option positions. */
     optionType: text("option_type"),
+    /** Option strike price in instrument currency; null when not an option. */
     strikePrice: numeric("strike_price", { precision: 20, scale: 8 }),
+    /** Option expiration date; null when not an option. */
     expirationDate: date("expiration_date"),
+    /** Current open quantity in instrument units (negative for short). */
     quantity: numeric("quantity", { precision: 20, scale: 8 }).notNull().default("0"),
+    /** Average cost basis per unit in purchase currency. */
     averageCostBasis: numeric("average_cost_basis", { precision: 20, scale: 8 }).notNull().default("0"),
+    /** Currency the instrument is quoted in (ISO 4217). */
     instrumentCurrency: char("instrument_currency", { length: 3 }).notNull().default("USD"),
+    /** Currency the position was purchased in, when it differs from the instrument currency. */
     purchaseCurrency: char("purchase_currency", { length: 3 }),
+    /** Sector classification, when known. */
     sector: text("sector"),
+    /** Industry classification within the sector, when known. */
     industry: text("industry"),
+    /** Country of the instrument listing/issuer, when known. */
     country: text("country"),
-    fees: numeric("fees", { precision: 20, scale: 8 }),
-    feesType: text("fees_type", { enum: ["fixed", "pct"] }),
-    feeCurrency: char("fee_currency", { length: 3 }),
+    /** True while the position has an open quantity; drives lifecycle filtering and API/UI behavior. */
     isOpen: boolean("is_open").notNull().default(true),
+    /** Timestamp the position was first opened. */
     openedAt: timestamp("opened_at", { withTimezone: true }).notNull().defaultNow(),
+    /** Timestamp the position was fully closed; null while open. */
     closedAt: timestamp("closed_at", { withTimezone: true }),
+    /** Latest quote price in instrument currency. */
     currentPrice: numeric("current_price", { precision: 20, scale: 8 }),
+    /** Source of current_price (e.g. manual or a quote provider). */
     priceSource: text("price_source").notNull().default("manual"),
+    /** Timestamp the latest quote price was captured. */
     priceAsOf: timestamp("price_as_of", { withTimezone: true }),
+    /** Quote-derived market value, recalculated and stored on quote refresh. */
     marketValue: numeric("market_value", { precision: 20, scale: 8 }),
+    /** Unrealized gain/loss versus cost basis. */
     unrealizedGainLoss: numeric("unrealized_gain_loss", { precision: 20, scale: 8 }),
+    /** Quote-derived change in value since the prior close, stored on quote refresh. */
     dayChange: numeric("day_change", { precision: 20, scale: 8 }),
+    /** Quote-derived day change as a percentage of the prior value, stored on quote refresh. */
     dayChangePercent: numeric("day_change_percent", { precision: 20, scale: 8 }),
+    /** Row creation timestamp. */
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    /** Row last-update timestamp. */
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (t) => [
-    index("idx_positions_portfolio").on(t.portfolioId),
     index("idx_positions_symbol").on(t.userId, t.symbol),
     check("ck_positions_direction", sql`${t.direction} in ('LONG','SHORT')`),
     check("ck_positions_option_type", sql`${t.optionType} in ('CALL','PUT')`),
-    check("ck_positions_fees_type", sql`${t.feesType} in ('fixed','pct')`),
+  ],
+)
+
+/**
+ * Many-to-many membership: position -> portfolio. A position is no longer owned
+ * by exactly one portfolio; ownership is this normalized relationship, so a
+ * position may belong to several portfolios (#115). Each row grants one
+ * position membership in one portfolio. `positions.user_id` still carries the
+ * owner for direct authorization, and the per-portfolio query and authorization
+ * boundaries are preserved by joining through this table.
+ */
+export const positionPortfolios = portfoliosSchema.table(
+  "position_portfolios",
+  {
+    positionId: uuid("position_id")
+      .notNull()
+      .references(() => positions.id, { onDelete: "cascade" }),
+    portfolioId: uuid("portfolio_id")
+      .notNull()
+      .references(() => portfolios.id, { onDelete: "cascade" }),
+  },
+  (t) => [
+    primaryKey({ columns: [t.positionId, t.portfolioId] }),
+    index("idx_position_portfolios_portfolio").on(t.portfolioId),
   ],
 )
 

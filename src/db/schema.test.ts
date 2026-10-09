@@ -1,12 +1,14 @@
 import { describe, expect, it } from "vitest"
-import { sql } from "drizzle-orm"
+import { eq, sql } from "drizzle-orm"
 import { createTestDb } from "./test-db.js"
 import {
   walletsSchema, syncRuns,
-  portfoliosSchema, portfolios, positions, portfolioTransactions,
+  portfoliosSchema, portfolios, positions, positionPortfolios, portfolioTransactions,
   portfolioCashTransactions, portfolioCashTransactionLabels, shares, valueSnapshots,
   labels,
 } from "./schema.js"
+import { insertPosition } from "../routes/test-utils.js"
+import { positionInPortfolio } from "./position-membership.js"
 import {
   POSITION_TX_TYPES, TRADE_CASH_TYPES, TRANSFER_TX_TYPES, isTradeCashType,
 } from "../transaction-types.js"
@@ -240,13 +242,13 @@ describe("portfolios schema (§15, D54)", () => {
     expect(rows.rows.length).toBe(1)
   })
 
-  it("cascades delete from portfolio to positions, transactions, cash txs, shares, snapshots", async () => {
+  it("cascades delete from portfolio to transactions, cash txs, shares, snapshots; positions keep rows but lose membership", async () => {
     const { db } = await createTestDb()
     const [p] = await db
       .insert(portfolios)
       .values({ userId: "user-a", name: "P", baseCurrency: "USD" })
       .returning()
-    await db.insert(positions).values({
+    await insertPosition(db, {
       userId: "user-a", portfolioId: p.id, symbol: "X",
     })
     await db.insert(portfolioTransactions).values({
@@ -268,7 +270,11 @@ describe("portfolios schema (§15, D54)", () => {
 
     await db.delete(portfolios).where(sql`${portfolios.id} = ${p.id}`)
 
-    expect((await db.select().from(positions).where(sql`${positions.portfolioId} = ${p.id}`)).length).toBe(0)
+    // #115 — ownership is the `position_portfolios` row: it cascades with the
+    // portfolio, while the normalized position row itself survives (the delete
+    // route removes now-orphaned positions at the application layer).
+    expect((await db.select().from(positionPortfolios).where(eq(positionPortfolios.portfolioId, p.id))).length).toBe(0)
+    expect((await db.select().from(positions).where(eq(positions.userId, "user-a"))).length).toBe(1)
     expect((await db.select().from(portfolioTransactions).where(sql`${portfolioTransactions.portfolioId} = ${p.id}`)).length).toBe(0)
     expect((await db.select().from(portfolioCashTransactions).where(sql`${portfolioCashTransactions.portfolioId} = ${p.id}`)).length).toBe(0)
     expect((await db.select().from(shares).where(sql`${shares.portfolioId} = ${p.id}`)).length).toBe(0)
@@ -281,7 +287,7 @@ describe("portfolios schema (§15, D54)", () => {
       .insert(portfolios)
       .values({ userId: "user-a", name: "A", baseCurrency: "USD" })
       .returning()
-    await db.insert(positions).values({
+    await insertPosition(db, {
       userId: "user-a", portfolioId: p.id, symbol: "AAPL",
     })
     const rows = await db.select().from(positions).where(sql`${positions.userId} = 'user-a'`)
@@ -357,5 +363,94 @@ describe("the transaction type set cannot drift from the SQL check", () => {
     // cash-effect list stayed a separate hand-written literal.
     expect(isTradeCashType("EXPIRATION")).toBe(false)
     expect([...TRADE_CASH_TYPES]).toEqual(["BUY", "SELL", "DIVIDEND"])
+  })
+})
+
+describe("positions many-to-many membership (#115)", () => {
+  it("drops the single-owner column and the position-level fee columns", async () => {
+    const { db } = await createTestDb()
+    const rows = await db.execute(sql`
+      select column_name from information_schema.columns
+      where table_schema = 'portfolios' and table_name = 'positions'
+    `)
+    const names = rows.rows.map((r: any) => r.column_name)
+    expect(names).not.toContain("portfolio_id")
+    expect(names).not.toContain("fees")
+    expect(names).not.toContain("fees_type")
+    expect(names).not.toContain("fee_currency")
+    for (const kept of [
+      "contract_size", "is_open", "opened_at", "closed_at",
+      "market_value", "day_change", "day_change_percent",
+    ]) {
+      expect(names, `${kept} must survive the normalization`).toContain(kept)
+    }
+  })
+
+  it("drops the position fee-type check constraint with its columns", async () => {
+    const { db } = await createTestDb()
+    const rows = await db.execute(sql`select conname from pg_constraint where conname = 'ck_positions_fees_type'`)
+    expect(rows.rows.length).toBe(0)
+  })
+
+  it("creates position_portfolios with a composite key and cascade FKs", async () => {
+    const { db } = await createTestDb()
+    const cols = await db.execute(sql`
+      select column_name from information_schema.columns
+      where table_schema = 'portfolios' and table_name = 'position_portfolios'
+      order by column_name
+    `)
+    expect(cols.rows.map((r: any) => r.column_name)).toEqual(["portfolio_id", "position_id"])
+    const pk = await db.execute(sql`
+      select pg_get_constraintdef(oid) as def from pg_constraint
+      where conname = 'position_portfolios_position_id_portfolio_id_pk'
+    `)
+    expect(pk.rows.length).toBe(1)
+    const fks = await db.execute(sql`
+      select conname from pg_constraint
+      where conrelid = 'portfolios.position_portfolios'::regclass and contype = 'f'
+    `)
+    expect(fks.rows.map((r: any) => r.conname).sort()).toEqual([
+      "position_portfolios_portfolio_id_portfolios_id_fk",
+      "position_portfolios_position_id_positions_id_fk",
+    ])
+  })
+
+  it("lets one position belong to two portfolios and be read from both", async () => {
+    const { db } = await createTestDb()
+    const [a] = await db.insert(portfolios).values({ userId: "u", name: "A", baseCurrency: "USD" }).returning()
+    const [b] = await db.insert(portfolios).values({ userId: "u", name: "B", baseCurrency: "USD" }).returning()
+    const [pos] = await db.insert(positions).values({ userId: "u", symbol: "AAPL" }).returning()
+    await db.insert(positionPortfolios).values([
+      { positionId: pos.id, portfolioId: a.id },
+      { positionId: pos.id, portfolioId: b.id },
+    ])
+    const inA = await db.select().from(positions).where(positionInPortfolio(a.id))
+    const inB = await db.select().from(positions).where(positionInPortfolio(b.id))
+    expect(inA.map((p) => p.id)).toEqual([pos.id])
+    expect(inB.map((p) => p.id)).toEqual([pos.id])
+  })
+
+  it("documents the positions table and every one of its columns", async () => {
+    const { db } = await createTestDb()
+    const table = await db.execute(sql`select obj_description('portfolios.positions'::regclass, 'pg_class') as c`)
+    expect((table.rows[0] as any).c).toBeTruthy()
+    const missing = await db.execute(sql`
+      select column_name from information_schema.columns
+      where table_schema = 'portfolios' and table_name = 'positions'
+        and col_description('portfolios.positions'::regclass, ordinal_position) is null
+    `)
+    expect(missing.rows).toEqual([])
+  })
+
+  it("documents the position_portfolios table and both of its columns", async () => {
+    const { db } = await createTestDb()
+    const table = await db.execute(sql`select obj_description('portfolios.position_portfolios'::regclass, 'pg_class') as c`)
+    expect((table.rows[0] as any).c).toBeTruthy()
+    const missing = await db.execute(sql`
+      select column_name from information_schema.columns
+      where table_schema = 'portfolios' and table_name = 'position_portfolios'
+        and col_description('portfolios.position_portfolios'::regclass, ordinal_position) is null
+    `)
+    expect(missing.rows).toEqual([])
   })
 })

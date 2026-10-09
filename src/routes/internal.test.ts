@@ -3,8 +3,9 @@ import { Hono } from "hono"
 import { eq } from "drizzle-orm"
 import { createInternalRoutes } from "./internal.js"
 import { createImportRoutes } from "./import.js"
-import { makeHarness, type Harness } from "./test-utils.js"
+import { makeHarness, insertPosition, type Harness } from "./test-utils.js"
 import { portfolios, positions, portfolioTransactions, splitEvents } from "../db/schema.js"
+import { positionInPortfolio } from "../db/position-membership.js"
 
 async function boot() {
   const h = await makeHarness()
@@ -72,7 +73,7 @@ async function ptxOf(h: Harness, portfolioId: string) {
 }
 
 async function posOf(h: Harness, portfolioId: string) {
-  const rows = await h.db.select().from(positions).where(eq(positions.portfolioId, portfolioId))
+  const rows = await h.db.select().from(positions).where(positionInPortfolio(portfolioId))
   return rows
 }
 
@@ -224,7 +225,7 @@ describe("POST /internal/apply-split (§23.6)", () => {
       baseCurrency: "USD",
     })
     for (const posId of [user2Pos, user2MsftPos]) {
-      await h.db.insert(positions).values({
+      await insertPosition(h.db, {
         userId: "user-2",
         portfolioId: user2Portfolio,
         id: posId,
@@ -293,13 +294,13 @@ describe("POST /internal/apply-split (§23.6)", () => {
     const [pos] = await h.db
       .update(positions)
       .set({ currentPrice: "150", marketValue: "1500", unrealizedGainLoss: "500", dayChange: "1", dayChangePercent: "2" })
-      .where(eq(positions.portfolioId, portfolioId))
+      .where(positionInPortfolio(portfolioId))
       .returning()
     expect(Number(pos.currentPrice)).toBe(150)
 
     await applySplit(h, { symbol: "AAPL", factor: 2, effectiveDate: "2024-02-01" })
 
-    const [after] = await h.db.select().from(positions).where(eq(positions.portfolioId, portfolioId))
+    const [after] = await h.db.select().from(positions).where(positionInPortfolio(portfolioId))
     expect(Number(after.quantity)).toBe(20)
     expect(Number(after.averageCostBasis)).toBe(50)
     expect(Number(after.currentPrice)).toBe(75)

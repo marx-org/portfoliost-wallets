@@ -10,7 +10,7 @@
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import { and, eq, gte } from "drizzle-orm"
-import { makeHarness } from "../routes/test-utils.js"
+import { makeHarness, insertPosition } from "../routes/test-utils.js"
 import {
   portfolios,
   portfolioTransactions,
@@ -79,7 +79,7 @@ async function seedPosition(
   avg: number,
   ccy = "USD",
 ) {
-  await db.insert(positions).values({
+  await insertPosition(db, {
     userId,
     portfolioId,
     symbol,

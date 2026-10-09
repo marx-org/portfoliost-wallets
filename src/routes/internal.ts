@@ -4,6 +4,7 @@ import { z } from "zod"
 import { effectiveDateToUtc } from "../services/splitFactors.js"
 import { getDb, type DB } from "../db/index.js"
 import { positions, portfolios, portfolioTransactions, splitEvents } from "../db/schema.js"
+import { positionInPortfolio } from "../db/position-membership.js"
 import type { components } from "../generated/api-types"
 
 type ApplySplitResponse = components["schemas"]["ApplySplitResponse"]
@@ -213,7 +214,7 @@ async function restatePositions(
     .where(
       and(
         eq(positions.userId, userId),
-        eq(positions.portfolioId, portfolioId),
+        positionInPortfolio(portfolioId),
         eq(positions.symbol, symbol),
       ),
     )

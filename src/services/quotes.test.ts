@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
-import { makeHarness } from "../routes/test-utils.js"
+import { makeHarness, insertPosition } from "../routes/test-utils.js"
 import { portfolios, positions, valueSnapshots, portfolioTransactions, portfolioCashTransactions } from "../db/schema.js"
+import { positionInPortfolio } from "../db/position-membership.js"
 import { eq } from "drizzle-orm"
 import { refreshQuotes, snapshotPortfolioValue, _clearQuoteCache, isIsoCurrency } from "./quotes.js"
 
@@ -63,20 +64,17 @@ async function seedPortfolioAndPosition(
     })
     .returning()
 
-  const [pos] = await db
-    .insert(positions)
-    .values({
-      userId,
-      portfolioId: pf.id,
-      symbol: "AAPL",
-      quantity: String(opts.qty ?? 10),
-      averageCostBasis: String(opts.avg ?? 150),
-      instrumentCurrency: "USD",
-      isOpen: true,
-      currentPrice: opts.currentPrice !== undefined ? opts.currentPrice : null,
-      priceSource: "manual",
-    })
-    .returning()
+  const pos = await insertPosition(db, {
+    userId,
+    portfolioId: pf.id,
+    symbol: "AAPL",
+    quantity: String(opts.qty ?? 10),
+    averageCostBasis: String(opts.avg ?? 150),
+    instrumentCurrency: "USD",
+    isOpen: true,
+    currentPrice: opts.currentPrice !== undefined ? opts.currentPrice : null,
+    priceSource: "manual",
+  })
 
   return { pf, pos }
 }
@@ -548,7 +546,7 @@ describe("refreshQuotes (D58)", () => {
       .insert(portfolios)
       .values({ userId: user.id, name: "P", baseCurrency: "USD" })
       .returning()
-    await db.insert(positions).values({
+    await insertPosition(db, {
       userId: user.id,
       portfolioId: pf.id,
       symbol: "TSLA",
@@ -638,7 +636,7 @@ describe("snapshotPortfolioValue (H5)", () => {
       .insert(portfolios)
       .values({ userId: user.id, name: "Snap PF 3", baseCurrency: "USD" })
       .returning()
-    await db.insert(positions).values({
+    await insertPosition(db, {
       userId: user.id,
       portfolioId: pf.id,
       symbol: "AAPL",
@@ -663,7 +661,7 @@ describe("snapshotPortfolioValue (H5)", () => {
     expect(snaps).toHaveLength(0)
 
     // …and the quote fields themselves WERE persisted (5 × 220 = 1100).
-    const [posRow] = await db.select().from(positions).where(eq(positions.portfolioId, pf.id))
+    const [posRow] = await db.select().from(positions).where(positionInPortfolio(pf.id))
     expect(Number(posRow.marketValue)).toBeCloseTo(1100)
     expect(posRow.priceSource).toBe("quote")
 

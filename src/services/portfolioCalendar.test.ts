@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
-import { makeHarness } from "../routes/test-utils.js"
-import { portfolios, positions } from "../db/schema.js"
+import { makeHarness, insertPosition, insertPositions } from "../routes/test-utils.js"
+import { portfolios } from "../db/schema.js"
 
 import { getPortfolioCalendar, getPortfolioSymbols, instrumentsBase } from "./portfolioCalendar.js"
 
@@ -41,7 +41,7 @@ describe("getPortfolioSymbols", () => {
   it("returns distinct open symbols with company names, own portfolio only", async () => {
     const h = await makeHarness()
     const [p] = await h.db.insert(portfolios).values({ name: "Growth", userId: h.user.id }).returning()
-    await h.db.insert(positions).values([
+    await insertPositions(h.db, [
       { portfolioId: p.id, userId: h.user.id, symbol: "AAPL", companyName: "Apple Inc.", isOpen: true },
       { portfolioId: p.id, userId: h.user.id, symbol: "MSFT", isOpen: true },
       { portfolioId: p.id, userId: h.user.id, symbol: "CLOSED", isOpen: false },
@@ -59,7 +59,7 @@ describe("getPortfolioCalendar", () => {
   it("fans out per symbol and returns holdings with arrays and instruments currency", async () => {
     const h = await makeHarness()
     const [p] = await h.db.insert(portfolios).values({ name: "Growth", userId: h.user.id }).returning()
-    await h.db.insert(positions).values([
+    await insertPositions(h.db, [
       { portfolioId: p.id, userId: h.user.id, symbol: "AAPL", companyName: "Apple Inc.", isOpen: true },
       { portfolioId: p.id, userId: h.user.id, symbol: "MSFT", isOpen: true },
     ])
@@ -110,7 +110,7 @@ describe("getPortfolioCalendar", () => {
   it("omits a symbol whose calendar fetch fails, keeps the others", async () => {
     const h = await makeHarness()
     const [p] = await h.db.insert(portfolios).values({ name: "Growth", userId: h.user.id }).returning()
-    await h.db.insert(positions).values([
+    await insertPositions(h.db, [
       { portfolioId: p.id, userId: h.user.id, symbol: "AAPL", isOpen: true },
       { portfolioId: p.id, userId: h.user.id, symbol: "MSFT", isOpen: true },
     ])
@@ -143,7 +143,7 @@ describe("getPortfolioCalendar", () => {
     })
     const h = await makeHarness()
     const [p] = await h.db.insert(portfolios).values({ name: "Growth", userId: h.user.id }).returning()
-    await h.db.insert(positions).values({ portfolioId: p.id, userId: h.user.id, symbol: "AAPL", isOpen: true })
+    await insertPosition(h.db, { portfolioId: p.id, userId: h.user.id, symbol: "AAPL", isOpen: true })
     const fetchFn = stubFetch(() => Promise.resolve({ ok: true, json: async () => instrumentCalendar({}) }))
     const holdings = await getPortfolioCalendar(h.db, p.id, h.user.id, "Bearer x")
     expect(holdings).toEqual([])
