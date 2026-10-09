@@ -1976,7 +1976,21 @@ describe("Portfolio dividends (§49)", () => {
         body: JSON.stringify(body),
       })
 
-    // newer, WITH an identity — newest first, so it comes back at index 0
+    // newer, WITH an identity — newest first, so it comes back at index 0.
+    // §116: country is read from the joined position, so establish the holding
+    // and link the dividend to it (the SPA's RecordDividendDialog always passes
+    // positionId).
+    const buyRes = await record({
+      type: "BUY",
+      symbol: "SAP.DE",
+      quantity: 5,
+      price: 2,
+      currency: "EUR",
+      assetType: "ETF",
+      country: "PL",
+      executedAt: "2026-04-01T00:00:00Z",
+    })
+    const buyBody = await buyRes.json()
     await record({
       type: "DIVIDEND",
       symbol: "SAP.DE",
@@ -1984,7 +1998,7 @@ describe("Portfolio dividends (§49)", () => {
       price: 2,
       currency: "EUR",
       assetType: "ETF",
-      country: "PL",
+      positionId: buyBody.position.id,
       executedAt: "2026-05-10T00:00:00Z",
     })
     // older, WITHOUT one

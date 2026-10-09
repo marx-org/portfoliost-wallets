@@ -454,3 +454,39 @@ describe("positions many-to-many membership (#115)", () => {
     expect(missing.rows).toEqual([])
   })
 })
+
+describe("#116 — transactions derive display currency and metadata elsewhere", () => {
+  it("drops the six denormalised columns from transactions", async () => {
+    const { db } = await createTestDb()
+    const rows = await db.execute(sql`
+      select column_name from information_schema.columns
+      where table_schema = 'portfolios' and table_name = 'transactions'
+    `)
+    const names = rows.rows.map((r: any) => r.column_name)
+    for (const gone of ["sector", "industry", "country", "display_currency", "is_gift", "synthesized_opening_lot"]) {
+      expect(names).not.toContain(gone)
+    }
+    // The columns that still carry first-class data must remain.
+    for (const kept of [
+      "transfer_group_id", "quantity", "original_quantity", "price",
+      "converted_total_amount", "converted_price", "exchange_rate",
+    ]) {
+      expect(names).toContain(kept)
+    }
+  })
+
+  it("documents the transactions table and every remaining column", async () => {
+    const { db } = await createTestDb()
+    const table = await db.execute(sql`select obj_description('portfolios.transactions'::regclass, 'pg_class') as c`)
+    const doc = String((table.rows[0] as any).c ?? "")
+    // The table comment must explain the move away from denormalised metadata.
+    expect(table.rows[0].c ?? null).toBeTruthy()
+    expect(table.rows[0].c).toMatch(/position|base currency/i)
+    const missing = await db.execute(sql`
+      select column_name from information_schema.columns
+      where table_schema = 'portfolios' and table_name = 'transactions'
+        and col_description('portfolios.transactions'::regclass, ordinal_position) is null
+    `)
+    expect(missing.rows).toEqual([])
+  })
+})

@@ -1630,10 +1630,12 @@ async function resolveAggregateBase(
     if (!pf) return c.json({ error: "NotFound", message: "Portfolio not found" }, 404)
 
     // §49.3: aggregate the portfolio's REAL DIVIDEND transactions (gross =
-    // quantity × price, amount = net = gross − taxes), newest first.
+    // quantity × price, amount = net = gross − taxes), newest first. Country
+    // for the ticker comes from the joined position (#116), not the row.
     const rows = await database
-      .select()
+      .select({ tx: portfolioTransactions, country: positions.country })
       .from(portfolioTransactions)
+      .leftJoin(positions, eq(portfolioTransactions.positionId, positions.id))
       .where(
         and(
           eq(portfolioTransactions.portfolioId, id),
@@ -1643,7 +1645,7 @@ async function resolveAggregateBase(
       )
       .orderBy(desc(portfolioTransactions.executedAt))
 
-    const items = rows.map((r) => {
+    const items = rows.map(({ tx: r, country }) => {
       const quantity = Number(r.quantity)
       const gross = round2(quantity * Number(r.price))
       const taxes = r.taxes != null ? Number(r.taxes) : null
@@ -1652,10 +1654,10 @@ async function resolveAggregateBase(
       return {
         symbol: r.instrumentSymbol,
         instrumentName: r.instrumentName,
-        // §61.3 — both columns are already on the DIVIDEND row; they feed the
-        // shared identity block (TickerBadge). Null, never guessed.
+        // §61.3 — the dividend feeds the shared identity block (TickerBadge).
+        // Country comes from the joined position; null, never guessed.
         assetType: r.assetType ?? null,
-        country: r.country ?? null,
+        country: country ?? null,
         date: r.executedAt?.toISOString?.() ?? r.executedAt,
         quantity,
         gross,

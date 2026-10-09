@@ -86,7 +86,6 @@ export async function dailyTransferBasis(
       type: portfolioTransactions.type,
       totalAmount: portfolioTransactions.totalAmount,
       convertedTotalAmount: portfolioTransactions.convertedTotalAmount,
-      displayCurrency: portfolioTransactions.displayCurrency,
       currency: portfolioTransactions.currency,
       executedAt: portfolioTransactions.executedAt,
     })
@@ -105,11 +104,17 @@ export async function dailyTransferBasis(
   for (const r of rows) {
     const day = toDateStr(r.executedAt)
     if (!day || day < from || day > to) continue
+    // #116 — `converted_total_amount` is now stored in the owning portfolio's
+    // base currency, so use it directly; only fall back to a live pair rate when
+    // the row has no converted amount. No `display_currency` read.
+    const rowCcy = (r.currency ?? base).toUpperCase()
     let amount: number
-    if (r.convertedTotalAmount != null && r.displayCurrency?.toUpperCase() === base) {
+    if (rowCcy === base) {
+      amount = Number(r.totalAmount ?? 0)
+    } else if (r.convertedTotalAmount != null) {
       amount = Number(r.convertedTotalAmount)
     } else {
-      const toBase = await rateToBase(authToken, (r.currency ?? base).toUpperCase(), base, day, opts)
+      const toBase = await rateToBase(authToken, rowCcy, base, day, opts)
       amount = Number(r.totalAmount ?? 0) * toBase
     }
     const signed = r.type === "TRANSFER_OUT" ? -Math.abs(amount) : Math.abs(amount)

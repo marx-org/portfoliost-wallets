@@ -64,7 +64,6 @@ export const TransactionCreateSchema = z.object({
   notes: z.string().max(2000).nullable().optional(),
   positionId: z.string().uuid().optional(),
   executedAt: z.string().optional(),
-  isGift: z.boolean().optional(),
   /**
    * §87.5 — also create the external cash leg for this trade: a DEPOSIT funding a BUY,
    * a WITHDRAWAL taking out a SELL's proceeds, in the row currency, linked to the
@@ -530,7 +529,10 @@ export function createTransactionRoutes(db?: DB) {
     const isDividend = body.type === "DIVIDEND"
     const netAmount = isDividend ? round2(notional - (taxes ?? 0)) : round2(notional)
 
-    const fx = await resolveFeeFx(c.req.header("Authorization") ?? "", body, txCcy, { notional })
+    const fx = await resolveFeeFx(c.req.header("Authorization") ?? "", body, txCcy, {
+      notional,
+      displayCcy: portfolio.baseCurrency,
+    })
     if (!fx.ok) return c.json({ error: "ValidationError", message: fx.message }, 422)
 
     const executedAt = body.executedAt ? new Date(body.executedAt) : new Date()
@@ -545,8 +547,6 @@ export function createTransactionRoutes(db?: DB) {
           type: body.type,
           instrumentSymbol: symbol,
           instrumentName: body.instrumentName ?? null,
-          sector: body.sector ?? null,
-          country: body.country ?? null,
           quantity: String(body.quantity),
           price: String(body.price),
           originalQuantity: String(body.quantity),
@@ -568,9 +568,6 @@ export function createTransactionRoutes(db?: DB) {
           convertedTotalAmount: String(round2(netAmount * fx.fields.exchangeRate)),
           convertedPrice: String(round2(body.price * fx.fields.exchangeRate)),
           convertedFees: String(round2(fx.feesSettled * fx.fields.exchangeRate)),
-          displayCurrency: "USD",
-          isGift: body.isGift ?? false,
-          synthesizedOpeningLot: false,
           executedAt,
         })
         .returning()
@@ -738,7 +735,10 @@ export function createTransactionRoutes(db?: DB) {
       : round2(notional)
     const notes = body.notes !== undefined ? body.notes : existing.notes
 
-    const fx = await resolveFeeFx(c.req.header("Authorization") ?? "", merged, txCcy, { notional })
+    const fx = await resolveFeeFx(c.req.header("Authorization") ?? "", merged, txCcy, {
+      notional,
+      displayCcy: portfolio.baseCurrency,
+    })
     if (!fx.ok) return c.json({ error: "ValidationError", message: fx.message }, 422)
 
     const result = await database.transaction(async (tx) => {
@@ -1086,10 +1086,10 @@ export function createTransactionRoutes(db?: DB) {
 
     const total = countRow?.count ?? 0
 
-    // LEFT JOIN positions to coalesce sector/country from the live profile
-    // snapshot when the transaction row has them as null (they are only set
-    // at write time if the caller supplies them; the profile refresh only
-    // updates the position row, not old transaction rows).
+    // LEFT JOIN positions so sector/industry/country used for grouping and
+    // ticker display come from the position the row belongs to (#116); the
+    // transaction no longer stores them. Historical rows keep the join because
+    // `position_id` is retained even on closed positions.
     const rows = await database
       .select({ tx: portfolioTransactions, pos: positions })
       .from(portfolioTransactions)
@@ -1104,9 +1104,9 @@ export function createTransactionRoutes(db?: DB) {
       rows.map(({ tx }) => tx.id),
     )
     const items = rows.map(({ tx, pos }) => ({
-      ...serializeTx(tx, labelMap.get(tx.id) ?? []),
-      sector:  tx.sector  ?? pos?.sector  ?? null,
-      country: tx.country ?? pos?.country ?? null,
+      ...serializeTx(tx, labelMap.get(tx.id) ?? [], portfolio.baseCurrency),
+      sector: pos?.sector ?? null,
+      country: pos?.country ?? null,
     }))
 
     return c.json({ items, total, page, limit })
@@ -1212,7 +1212,7 @@ export function createTransactionRoutes(db?: DB) {
         feeExchangeRate: body.feeExchangeRate,
       },
       currency,
-      { notional },
+      { notional, displayCcy: portfolio.baseCurrency },
     )
     if (!fx.ok) return c.json({ error: "ValidationError", message: fx.message }, 422)
 
@@ -1231,8 +1231,6 @@ export function createTransactionRoutes(db?: DB) {
           type: "BUY",
           instrumentSymbol: symbol,
           instrumentName: body.instrumentName ?? null,
-          sector: body.sector ?? null,
-          country: body.country ?? null,
           quantity: String(body.quantity),
           price: String(price),
           originalQuantity: String(body.quantity),
@@ -1252,9 +1250,6 @@ export function createTransactionRoutes(db?: DB) {
           convertedTotalAmount: String(round2(notional * fx.fields.exchangeRate)),
           convertedPrice: String(round2(price * fx.fields.exchangeRate)),
           convertedFees: String(round2(fx.feesSettled * fx.fields.exchangeRate)),
-          displayCurrency: "USD",
-          isGift: false,
-          synthesizedOpeningLot: false,
           executedAt,
         })
         .returning()
@@ -1554,7 +1549,17 @@ const PORTFOLIO_TX_SORT: Record<string, string> = {
   amount: "total_amount",
 }
 
-function serializeTx(r: typeof portfolioTransactions.$inferSelect, labels: Label[] = []) {
+/**
+ * Wire shape for one transaction row. `displayCurrency` is the owning
+ * portfolio's base currency (#116) — the row no longer carries one — so the
+ * caller passes it in; `sector`/`country` are added by the caller from the
+ * joined position.
+ */
+function serializeTx(
+  r: typeof portfolioTransactions.$inferSelect,
+  labels: Label[] = [],
+  displayCurrency: string,
+) {
   return {
     id: r.id,
     portfolioId: r.portfolioId,
@@ -1562,8 +1567,6 @@ function serializeTx(r: typeof portfolioTransactions.$inferSelect, labels: Label
     type: r.type,
     instrumentSymbol: r.instrumentSymbol,
     instrumentName: r.instrumentName,
-    sector: r.sector,
-    country: r.country,
     labels,
     quantity: Number(r.quantity),
     price: Number(r.price),
@@ -1578,7 +1581,7 @@ function serializeTx(r: typeof portfolioTransactions.$inferSelect, labels: Label
     totalAmount: Number(r.totalAmount),
     currency: r.currency,
     instrumentCurrency: r.instrumentCurrency,
-    displayCurrency: r.displayCurrency ?? r.currency,
+    displayCurrency,
     priceCurrency: r.currency,
     assetType: r.assetType,
     exchangeRate: Number(r.exchangeRate),
@@ -1588,8 +1591,6 @@ function serializeTx(r: typeof portfolioTransactions.$inferSelect, labels: Label
     convertedFees: Number(r.convertedFees),
     realizedGainLoss: r.realizedGainLoss != null ? Number(r.realizedGainLoss) : null,
     convertedRealizedGainLoss: r.realizedGainLoss != null ? Number(r.realizedGainLoss) : null,
-    isGift: r.isGift,
-    synthesizedOpeningLot: r.synthesizedOpeningLot,
     executedAt: r.executedAt?.toISOString?.() ?? r.executedAt,
     createdAt: r.createdAt?.toISOString?.() ?? r.createdAt,
   }
@@ -1652,6 +1653,7 @@ export function createCrossPortfolioTransactionsRoute(db?: DB) {
       .select({
         tx: portfolioTransactions,
         portfolioName: portfolios.name,
+        baseCurrency: portfolios.baseCurrency,
         positionRow: positions,
       })
       .from(portfolioTransactions)
@@ -1670,10 +1672,10 @@ export function createCrossPortfolioTransactionsRoute(db?: DB) {
 
     return c.json({
       items: rows.map((r) => ({
-        ...serializeTx(r.tx, labelMap.get(r.tx.id) ?? []),
+        ...serializeTx(r.tx, labelMap.get(r.tx.id) ?? [], r.baseCurrency ?? r.tx.currency),
         portfolioName: r.portfolioName ?? "",
-        sector:  r.tx.sector  ?? r.positionRow?.sector  ?? null,
-        country: r.tx.country ?? r.positionRow?.country ?? null,
+        sector: r.positionRow?.sector ?? null,
+        country: r.positionRow?.country ?? null,
       })),
       total,
       page,

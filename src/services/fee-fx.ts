@@ -30,7 +30,7 @@ export async function resolveFeeFx(
   authToken: string | null,
   body: Record<string, unknown>,
   walletCcy: string,
-  opts: { notional: number; toWalletCcy?: string | null } = { notional: 0 },
+  opts: { notional: number; toWalletCcy?: string | null; displayCcy?: string } = { notional: 0 },
 ): Promise<FeeFxResult> {
   const num = (v: unknown) => (typeof v === "number" ? v : typeof v === "string" && v !== "" ? Number(v) : undefined)
 
@@ -39,20 +39,25 @@ export async function resolveFeeFx(
   const feesType: "fixed" | "pct" = body.fees_type === "pct" || body.feesType === "pct" ? "pct" : "fixed"
   const feeCurrency = String(body.fee_currency ?? body.feeCurrency ?? walletCcy).toUpperCase()
   const upperWallet = walletCcy.toUpperCase()
+  // #116 — conversion target is the owning portfolio base currency (the display
+  // currency), not a hardcoded USD. `walletCcy` stays the transaction currency so
+  // fee settlement is unchanged; only the rate used for the converted* fields
+  // moves to the display currency.
+  const displayCcy = (opts.displayCcy ?? "USD").toUpperCase()
 
-  // main rate (tx ccy -> wallet base currency)
+  // main rate (tx ccy -> display/base currency)
   let exchangeRate: number
   if (rateSource === "manual") {
     const r = num(body.exchangeRate)
     if (!isValidRate(r)) return { ok: false, message: "exchangeRate must be a positive number when rateSource is 'manual'" }
     exchangeRate = r
-  } else if (upperWallet === "USD") {
+  } else if (upperWallet === displayCcy) {
     exchangeRate = 1
   } else {
     // plan §48.3 / D20-D25 degrade path: when the pair cannot be resolved
     // (instruments down, no imported rate) we value 1:1 rather than block
     // cash movements; the next daily import fixes snapshots going forward.
-    exchangeRate = (await resolvedFxRate(authToken, upperWallet, "USD"))?.rate ?? 1
+    exchangeRate = (await resolvedFxRate(authToken, upperWallet, displayCcy))?.rate ?? 1
   }
 
   // fee materialization + settlement

@@ -342,62 +342,100 @@ export const positionPortfolios = portfoliosSchema.table(
  * quantities, cost basis, realized P/L, and (via cashLedger.tradeCashEffects)
  * the portfolio's cash history. Denormalized user_id for direct authorization
  * (D24).
+ *
+ * A transaction carries no presentation metadata of its own (#116): sector,
+ * industry and country for grouping and ticker display are read from the
+ * position it belongs to, and the display currency is the owning portfolio's
+ * base currency. The former position-level fee fields and the always-false
+ * gift/synthesized flags are gone.
  */
 export const portfolioTransactions = portfoliosSchema.table(
   "transactions",
   {
+    /** Transaction primary key. */
     id: uuid("id").primaryKey().default(sql`gen_random_uuid()`),
+    /** Owner of the transaction; the direct authorization boundary (D24). */
     userId: text("user_id").notNull(),
+    /** Owning portfolio; cascades on portfolio delete. */
     portfolioId: uuid("portfolio_id")
       .notNull()
       .references(() => portfolios.id, { onDelete: "cascade" }),
+    /** Position this row built or drew from; null for portfolio-level rows. */
     positionId: uuid("position_id").references(() => positions.id),
+    /** Transaction type; one of the POSITION_TX_TYPES set. */
     type: text("type").notNull(),
     // In-kind transfer bookkeeping. A transfer is several rows — one per source
     // lot drawn FIFO — so `linked_transfer_id` pairs a TRANSFER_OUT with its
     // derived TRANSFER_IN while `transfer_group_id` ties the whole transfer
     // together and makes it one atomic unit.
+    /** Pairs a TRANSFER_OUT with its derived TRANSFER_IN. */
     linkedTransferId: uuid("linked_transfer_id"),
+    /** Ties every row of one in-kind transfer together as one atomic unit. */
     transferGroupId: uuid("transfer_group_id"),
     // The BUY a TRANSFER_OUT drew its quantity and price from. No FK and no
     // cascade on purpose: deleting a source BUY must not silently delete a
     // transfer that already moved real stock between brokers.
+    /** The BUY a TRANSFER_OUT drew its quantity and price from. */
     sourceTransactionId: uuid("source_transaction_id"),
+    /** Instrument ticker symbol, when known. */
     instrumentSymbol: text("instrument_symbol"),
+    /** Instrument display name, when known. */
     instrumentName: text("instrument_name"),
-    sector: text("sector"),
-    industry: text("industry"),
-    country: text("country"),
+    /** Quantity transacted, in instrument units. */
     quantity: numeric("quantity", { precision: 20, scale: 8 }).notNull().default("0"),
+    /** Execution price per unit, in `currency`. */
     price: numeric("price", { precision: 20, scale: 8 }).notNull().default("0"),
+    /** Quantity before a split restatement; frozen so apply-split stays idempotent. */
     originalQuantity: numeric("original_quantity", { precision: 20, scale: 8 }),
+    /** Price before a split restatement; frozen so apply-split stays idempotent. */
     originalPrice: numeric("original_price", { precision: 20, scale: 8 }),
+    /** Execution currency (ISO 4217). */
     currency: char("currency", { length: 3 }).notNull(),
+    /** Instrument quote currency (ISO 4217), when it differs from the execution currency. */
     instrumentCurrency: char("instrument_currency", { length: 3 }),
+    /** Instrument class; defaults to STOCK. */
     assetType: text("asset_type").notNull().default("STOCK"),
+    /** Fee charged on the transaction, in the fee currency. */
     fees: numeric("fees", { precision: 20, scale: 8 }),
+    /** How fees are expressed: fixed amount or percentage. */
     feesType: text("fees_type", { enum: ["fixed", "pct"] }),
+    /** Currency the fee is denominated in, when it differs from the trade currency. */
     feeCurrency: char("fee_currency", { length: 3 }),
+    /** Taxes withheld on the transaction. */
     taxes: numeric("taxes", { precision: 20, scale: 8 }),
+    /** Free-form user notes. */
     notes: text("notes"),
+    /** Fees already settled to cash, used to avoid double-counting on later edits. */
     feesSettled: numeric("fees_settled", { precision: 20, scale: 8 }),
+    /** Total consideration: quantity x price plus fees, signed by transaction type. */
     totalAmount: numeric("total_amount", { precision: 20, scale: 8 }).notNull().default("0"),
+    /** Realized gain/loss booked by a SELL, versus cost basis. */
     realizedGainLoss: numeric("realized_gain_loss", { precision: 20, scale: 8 }),
+    /** Trade-currency to base-currency exchange rate applied at execution. */
     exchangeRate: numeric("exchange_rate", { precision: 20, scale: 10 }),
+    /** Source of the exchange rate: automatic or manual. */
     rateSource: text("rate_source").notNull().default("automatic"),
+    /** Source of the fee exchange rate: automatic or manual. */
     feeRateSource: text("fee_rate_source").notNull().default("automatic"),
+    /** Exchange rate applied to the fee, when the fee currency differs. */
     feeExchangeRate: numeric("fee_exchange_rate", { precision: 20, scale: 10 }),
+    /** Total amount converted to the portfolio base currency. */
     convertedTotalAmount: numeric("converted_total_amount", { precision: 20, scale: 8 }),
+    /** Price converted to the portfolio base currency. */
     convertedPrice: numeric("converted_price", { precision: 20, scale: 8 }),
+    /** Fees converted to the portfolio base currency. */
     convertedFees: numeric("converted_fees", { precision: 20, scale: 8 }),
+    /** Realized gain/loss converted to the portfolio base currency. */
     convertedRealizedGainLoss: numeric("converted_realized_gain_loss", { precision: 20, scale: 8 }),
-    displayCurrency: char("display_currency", { length: 3 }),
-    isGift: boolean("is_gift").notNull().default(false),
-    synthesizedOpeningLot: boolean("synthesized_opening_lot").notNull().default(false),
+    /** External system that produced this row, for idempotent imports. */
     externalSource: text("external_source"),
+    /** External row id within the source system; unique per source when set. */
     externalId: text("external_id"),
+    /** Timestamp the transaction executed. */
     executedAt: timestamp("executed_at", { withTimezone: true }).notNull().defaultNow(),
+    /** Row creation timestamp. */
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    /** Row last-update timestamp. */
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (t) => [

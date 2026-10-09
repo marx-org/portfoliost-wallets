@@ -3736,19 +3736,20 @@ export interface components {
             priceCurrency: string;
             instrumentCurrency: string;
             assetType: string;
-            isGift: boolean;
-            synthesizedOpeningLot: boolean;
             /** Format: date-time */
             executedAt: string;
             /** Format: date-time */
             createdAt: string;
+            /** @description Currency used to display and total the row; the owning portfolio's base currency */
             displayCurrency: string;
             convertedTotalAmount: number;
             convertedPrice: number;
             convertedFees: number;
             convertedRealizedGainLoss?: number | null;
-            sector?: string;
-            country?: string;
+            /** @description Sector of the transaction's position (read from the position, not stored on the row) */
+            sector?: string | null;
+            /** @description Country of the position's instrument, read from the position */
+            country?: string | null;
             /** @description Import provenance tag; NULL for manually-created rows */
             externalSource?: string | null;
             /** @description Importer-supplied dedup key; unique per externalSource */
