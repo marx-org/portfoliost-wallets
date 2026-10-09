@@ -679,13 +679,19 @@ export const positionLabels = portfoliosSchema.table(
   ],
 )
 
-/** Many-to-many: label -> portfolio transaction (D65). */
+/**
+ * Many-to-many join: label to portfolio transaction (D65). Written with replace
+ * semantics (D67/D68): the full label set for a transaction is cleared and
+ * re-inserted in one transaction. Rows cascade on transaction or label delete.
+ */
 export const transactionLabels = portfoliosSchema.table(
   "transaction_labels",
   {
+    /** Portfolio transaction the label attaches to; cascades on transaction delete. */
     transactionId: uuid("transaction_id")
       .notNull()
       .references(() => portfolioTransactions.id, { onDelete: "cascade" }),
+    /** Label being attached; cascades on label delete. */
     labelId: uuid("label_id")
       .notNull()
       .references(() => labels.id, { onDelete: "cascade" }),
