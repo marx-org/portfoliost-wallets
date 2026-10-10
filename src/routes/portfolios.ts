@@ -61,7 +61,6 @@ const round2 = (n: number) => Math.round(n * 100) / 100
  * Named by PORTFOLIO (1:1 with the Konto per §62), which is what this file knows.
  */
 const CASH_LEG_DEFAULT_PORTFOLIOS = new Set([
-  "Equate+",
   "Crypto",
   "NN TFI PPK",
   "NN TFI PPO",
