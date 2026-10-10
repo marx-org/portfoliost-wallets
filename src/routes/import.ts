@@ -31,6 +31,7 @@ import { ISO_CURRENCY } from "../services/currency.js"
 import { notifyTransactionsChanged } from "../services/recalc-queue.js"
 import { transferCloseForDate } from "../services/backfill.js"
 import { resolveServiceToken } from "../services/instruments-fx.js"
+import { rateToBase } from "../services/cashLedger.js"
 import type { components } from "../generated/api-types.js"
 
 type ImportPortfolioBootstrapResponse = components["schemas"]["ImportPortfolioBootstrapResponse"]
@@ -613,6 +614,7 @@ export function createImportRoutes(db?: DB) {
               row,
               ptx,
               portfolioBaseCurrency: portfolio.baseCurrency,
+              authToken: c.req.header("Authorization") ?? "",
             })
             insertedPtx++
             // A transfer also moves the RECEIVER's capital basis, and the
@@ -1404,9 +1406,10 @@ async function insertImportPortfolioTx(
     row: z.infer<typeof ImportTransactionSchema>
     ptx: z.infer<typeof ImportPortfolioTxSchema>
     portfolioBaseCurrency: string
+    authToken: string
   },
 ) {
-  const { source, row, ptx, portfolioBaseCurrency } = input
+  const { source, row, ptx, portfolioBaseCurrency, authToken } = input
   const executedAt = ptx.executedAt ? new Date(ptx.executedAt) : new Date(row.executedAt)
   const symbol = ptx.instrumentSymbol.toUpperCase()
   const txCcy = ptx.currency.toUpperCase()
@@ -1415,7 +1418,14 @@ async function insertImportPortfolioTx(
   // unknown one is a visible gap, a wrong one silently misprices the position.
   const listingCcy = ptx.listingCurrency ? ptx.listingCurrency.toUpperCase() : txCcy
 
-  const rate = ptx.exchangeRate ?? 1
+  const suppliedRate = ptx.exchangeRate ?? 1
+  const baseCurrency = portfolioBaseCurrency.toUpperCase()
+  const rate =
+    txCcy === baseCurrency
+      ? 1
+      : baseCurrency === "PLN"
+        ? suppliedRate
+        : await rateToBase(authToken, txCcy, baseCurrency, executedAt.toISOString().slice(0, 10), { strict: true })
   const cumFor = await loadCumFactor(tx, symbol)
   const importCum = cumFor(executedAt)
   const originalQuantity = ptx.originalQuantity ?? ptx.quantity
