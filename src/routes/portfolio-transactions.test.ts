@@ -2905,7 +2905,7 @@ describe("§87.5: a UI-created cash leg", () => {
     const ibkr = await pf("IBKR")
     const xtbRow = await (await xtb.a.request(`/api/portfolios/${xtb.pfId}`, { headers: xtb.h.headers })).json()
     const ibkrRow = await (await ibkr.a.request(`/api/portfolios/${ibkr.pfId}`, { headers: ibkr.h.headers })).json()
-    expect(xtbRow.cashLegOnTrade).toBe(true)
+    expect(xtbRow.cashLegOnTrade).toBe(false)
     expect(ibkrRow.cashLegOnTrade).toBe(false)
   })
 

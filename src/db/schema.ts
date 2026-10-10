@@ -113,11 +113,8 @@ export const portfolios = portfoliosSchema.table(
      * §87.5 — UI-only. Pre-ticks the transaction form's "also create a cash
      * transaction" box so it reflects what will actually happen.
      *
-     * It does NOT govern the sheet import: that path uses its own hardcoded kontо
-     * list in portfoliost-sheets-sync (`ALWAYS_CASH_LEG`), and an imported AU=0
-     * trade on a portfolio with this flag ON still imports with no cash row. Two
-     * independent mechanisms on purpose — the spreadsheet's col 47 keeps its
-     * meaning for every account the list does not govern.
+     * It does NOT govern the sheet import. Sheets-sync owns import policy and
+     * sends explicit cash legs in its payload; this field is only a UI default.
      *
      * Default `false` so no existing account changes behaviour on deploy.
      */

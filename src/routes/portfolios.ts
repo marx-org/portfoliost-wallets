@@ -46,29 +46,6 @@ const ISO_CURRENCY = /^[A-Za-z]{3}$/
 
 const round2 = (n: number) => Math.round(n * 100) / 100
 
-/**
- * §87.5 — the portfolios whose UI switch starts ON.
- *
- * **This is a DUPLICATE of `ALWAYS_CASH_LEG` in
- * portfoliost-sheets-sync/src/transakcje-mapper.ts**, on purpose rather than by
- * accident: the importer's list lives in a service that has no
- * `@marx2/contracts` dependency, and adding one to share a seven-element set of
- * account names would be a worse trade than a documented copy. Keep the two in
- * step — if a kontо is added to the importer's list it must be added here, or the
- * UI will say "no cash transaction" for an account the importer always funds,
- * which is the exact disagreement this setting exists to prevent.
- *
- * Named by PORTFOLIO (1:1 with the Konto per §62), which is what this file knows.
- */
-const CASH_LEG_DEFAULT_PORTFOLIOS = new Set([
-  "Crypto",
-  "NN TFI PPK",
-  "NN TFI PPO",
-  "Obligacje PKO SA Beata",
-  "Rach. rejestrowy PKO BP",
-  "XTB",
-])
-
 // ── Request schemas ────────────────────────────────────────────────────
 
 export const CreatePortfolioSchema = z.object({
@@ -754,12 +731,9 @@ async function resolveAggregateBase(
           description: parsed.data.description ?? null,
           baseCurrency: defaultBase.toUpperCase(),
           isPublic: parsed.data.isPublic ?? false,
-          // §87.5 — a created portfolio defaults the switch ON for the kontо that
-          // already always get a cash leg from the importer, so the UI cannot
-          // disagree with what an import will do. See CASH_LEG_DEFAULT_PORTFOLIOS.
-          cashLegOnTrade:
-            parsed.data.cashLegOnTrade ??
-            CASH_LEG_DEFAULT_PORTFOLIOS.has(parsed.data.name.trim()),
+          // UI-only preference. Import policy belongs to sheets-sync and is
+          // carried explicitly by the import payload, never inferred here.
+          cashLegOnTrade: parsed.data.cashLegOnTrade ?? false,
           isMarginEnabled: parsed.data.isMarginEnabled ?? false,
         })
         .returning()
