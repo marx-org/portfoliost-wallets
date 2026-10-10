@@ -107,6 +107,14 @@ describe("cashBalances", () => {
     expect(b.get("USD")).toBeCloseTo(-34)
   })
 
+  it("reinvested dividend followed by a buy leaves no cash balance", async () => {
+    await trade({ type: "DIVIDEND", totalAmount: 225.48, currency: "EUR", executedAt: "2024-01-15T10:00:00.000Z" })
+    await trade({ type: "BUY", totalAmount: 225.48, currency: "EUR", executedAt: "2024-01-15T10:01:00.000Z" })
+
+    const b = await cashBalances(h.db, null, portfolioId)
+    expect(b.get("EUR")).toBeCloseTo(0, 8)
+  })
+
   it("isolate: no rows → empty map", async () => {
     const b = await cashBalances(h.db, null, portfolioId)
     expect(b.size).toBe(0)
