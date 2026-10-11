@@ -1053,6 +1053,7 @@ export function createTransactionRoutes(db?: DB) {
     const positionId = c.req.query("positionId")
     const instrumentSymbol = c.req.query("instrumentSymbol")
     const labelsFilter = labelFilterIds(c.req.query("labels"))
+    const search = c.req.query("search")?.trim().toLowerCase()
 
     const conditions: SQL[] = [
       eq(portfolioTransactions.userId, identity.id),
@@ -1064,6 +1065,13 @@ export function createTransactionRoutes(db?: DB) {
       conditions.push(
         sql`upper(${portfolioTransactions.instrumentSymbol}) = upper(${instrumentSymbol})`,
       )
+    }
+    if (search) {
+      const pattern = `%${search}%`
+      conditions.push(sql`(
+        lower(coalesce(${portfolioTransactions.instrumentSymbol}, '')) like ${pattern}
+        or lower(coalesce(${portfolioTransactions.instrumentName}, '')) like ${pattern}
+      )`)
     }
     attachLabelCondition(
       conditions,
@@ -1612,12 +1620,20 @@ export function createCrossPortfolioTransactionsRoute(db?: DB) {
     const sortOrder = (c.req.query("sortOrder") ?? "desc").toLowerCase() === "asc" ? "asc" : "desc"
     const labelsFilter = labelFilterIds(c.req.query("labels"))
     const instrumentSymbol = c.req.query("instrumentSymbol")
+    const search = c.req.query("search")?.trim().toLowerCase()
 
     const conditions: SQL[] = [sql`${portfolioTransactions.userId} = ${identity.id}`]
     if (instrumentSymbol) {
       conditions.push(
         sql`upper(${portfolioTransactions.instrumentSymbol}) = upper(${instrumentSymbol})`,
       )
+    }
+    if (search) {
+      const pattern = `%${search}%`
+      conditions.push(sql`(
+        lower(coalesce(${portfolioTransactions.instrumentSymbol}, '')) like ${pattern}
+        or lower(coalesce(${portfolioTransactions.instrumentName}, '')) like ${pattern}
+      )`)
     }
     attachLabelCondition(
       conditions,

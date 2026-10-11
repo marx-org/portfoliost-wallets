@@ -744,6 +744,35 @@ describe("Portfolio transaction history (§15 Phase D)", () => {
     expect(body.items[0].instrumentSymbol).toBe("AAPL")
   })
 
+  it("GET /:id/transactions — search matches company name or ticker", async () => {
+    const h = await makeHarness()
+    const a = app(h.db)
+    const portfolio = await (
+      await a.request("/api/portfolios", {
+        method: "POST",
+        headers: h.headers,
+        body: JSON.stringify({ name: "P", currency: "USD" }),
+      })
+    ).json()
+
+    await a.request(`/api/portfolios/${portfolio.id}/transactions`, {
+      method: "POST",
+      headers: h.headers,
+      body: JSON.stringify(BUY_BODY),
+    })
+    await a.request(`/api/portfolios/${portfolio.id}/transactions`, {
+      method: "POST",
+      headers: h.headers,
+      body: JSON.stringify({ ...BUY_BODY, symbol: "MSFT", instrumentName: "Microsoft" }),
+    })
+
+    const company = await a.request(`/api/portfolios/${portfolio.id}/transactions?search=apple`, { headers: h.headers })
+    expect((await company.json()).items.map((tx: any) => tx.instrumentSymbol)).toEqual(["AAPL"])
+
+    const ticker = await a.request(`/api/portfolios/${portfolio.id}/transactions?search=msf`, { headers: h.headers })
+    expect((await ticker.json()).items.map((tx: any) => tx.instrumentSymbol)).toEqual(["MSFT"])
+  })
+
   it("GET /:id/transactions — sort by symbol ascending", async () => {
     const h = await makeHarness()
     const a = app(h.db)
@@ -852,6 +881,29 @@ describe("Portfolio transaction history (§15 Phase D)", () => {
     expect(body.items.length).toBe(1)
     expect(body.items[0].instrumentSymbol).toBe("MSFT")
     expect(body.total).toBe(1)
+  })
+
+  it("GET /transactions — search matches company name or ticker", async () => {
+    const h = await makeHarness()
+    const a = app(h.db)
+    const portfolio = await (
+      await a.request("/api/portfolios", {
+        method: "POST",
+        headers: h.headers,
+        body: JSON.stringify({ name: "P", currency: "USD" }),
+      })
+    ).json()
+    await a.request(`/api/portfolios/${portfolio.id}/transactions`, {
+      method: "POST",
+      headers: h.headers,
+      body: JSON.stringify(BUY_BODY),
+    })
+
+    const res = await a.request("/api/portfolios/transactions?search=apple", { headers: h.headers })
+    const body = await res.json()
+    expect(res.status).toBe(200)
+    expect(body.total).toBe(1)
+    expect(body.items[0].instrumentSymbol).toBe("AAPL")
   })
 
   it("GET /:id/transactions/export — returns all txs", async () => {

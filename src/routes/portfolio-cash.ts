@@ -283,6 +283,20 @@ function cashLabelCondition(database: DB, conditions: SQL[], raw: string | undef
   }
 }
 
+function cashSearchCondition(search: string | undefined): SQL | null {
+  if (!search) return null
+  const pattern = `%${search.trim().toLowerCase()}%`
+  return sql`exists (
+    select 1
+    from "portfolios"."transactions" as linked_trade
+    where linked_trade.id = ${portfolioCashTransactions.linkedTradeId}
+      and (
+        lower(coalesce(linked_trade.instrument_symbol, '')) like ${pattern}
+        or lower(coalesce(linked_trade.instrument_name, '')) like ${pattern}
+      )
+  )`
+}
+
 /** Base FX fields as stored from a request (fees are metadata; the balance
  *  replay uses `amount` only). */
 function fxFields(body: Record<string, unknown>, txCcy: string) {
@@ -398,6 +412,8 @@ export function createPortfolioCashRoutes(db?: DB) {
 
     const conditions: SQL[] = [eq(portfolioCashTransactions.portfolioId, portfolioId)]
     cashLabelCondition(database, conditions, c.req.query("labels"))
+    const searchCondition = cashSearchCondition(c.req.query("search"))
+    if (searchCondition) conditions.push(searchCondition)
 
     const [countRow] = await database
       .select({ count: sql<number>`count(*)::int` })
@@ -562,6 +578,8 @@ export function createPortfolioCashRoutes(db?: DB) {
 
     const conditions: SQL[] = [eq(portfolioCashTransactions.userId, identity.id)]
     cashLabelCondition(database, conditions, c.req.query("labels"))
+    const searchCondition = cashSearchCondition(c.req.query("search"))
+    if (searchCondition) conditions.push(searchCondition)
 
     const [countRow] = await database
       .select({ count: sql<number>`count(*)::int` })
