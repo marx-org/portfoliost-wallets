@@ -125,6 +125,26 @@ describe("GET /:id/analytics — benchmarks (D46/D48)", () => {
     expect(b.timeSeries).toHaveLength(5)
   })
 
+  it("keeps the benchmark line moving over a multi-year ALL window", async () => {
+    // pfire-docs#137 — ALL is the window the user saw flat. The backend must
+    // return a moving index across the whole history, not a degenerate one.
+    const { db, user, headers } = await makeHarness("abe-all")
+    const a = app(db)
+    const pf = await seedPortfolio(db, user.id)
+    const days = calendarDays("2022-07-01", "2026-10-10")
+    await seedSnapshots(db, pf.id, days)
+    mockPriceBars({ SPY: { dates: days, closes: days.map((_, i) => 100 + i * 0.05) } }) // 100..~179
+
+    const res = await a.request(`/api/portfolios/${pf.id}/analytics?timeframe=ALL&benchmarks=SPY`, { headers })
+    expect(res.status).toBe(200)
+    const body = await res.json()
+    expect(body.benchmarks).toHaveLength(1)
+    const b = body.benchmarks[0]
+    expect(b.timeSeries).toHaveLength(days.length)
+    expect(b.timeSeries[0].value).toBeCloseTo(100, 1)
+    expect(b.timeSeries[b.timeSeries.length - 1].value).toBeGreaterThan(130)
+  })
+
   it("drops unknown tickers and still returns portfolio series", async () => {
     const { db, user, headers } = await makeHarness("abe-unknown")
     const a = app(db)
