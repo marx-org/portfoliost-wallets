@@ -3,7 +3,7 @@ import { and, eq, inArray } from "drizzle-orm"
 import { z } from "zod"
 import { userIdentityMiddleware } from "../auth.js"
 import { getDb, type DB } from "../db/index.js"
-import { labels, portfolioTransactions } from "../db/schema.js"
+import { labels, portfolioTransactions, portfolios } from "../db/schema.js"
 import {
   assertLabelsOwned,
   serializeLabel,
@@ -31,7 +31,15 @@ export function createTransactionLabelRoutes(db?: DB) {
     }
     const identity = c.get("userIdentity")
     const database = getDbInstance()
+    const portfolioId = c.req.param("id")
     const transactionId = c.req.param("transactionId")
+
+    const [portfolio] = await database
+      .select({ id: portfolios.id, isVirtual: portfolios.isVirtual })
+      .from(portfolios)
+      .where(and(eq(portfolios.id, portfolioId), eq(portfolios.userId, identity.id)))
+    if (!portfolio) return c.json({ error: "NotFound", message: "Portfolio not found" }, 404)
+    if (portfolio.isVirtual) return c.json({ error: "ReadOnlyPortfolio", message: "Virtual portfolios are read-only" }, 409)
 
     // D24: transaction must be owned by the caller (foreign → 404)
     const [tx] = await database

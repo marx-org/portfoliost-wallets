@@ -3200,6 +3200,13 @@ export interface components {
             capitalBasis: number;
             currentValue: number;
             isPublic: boolean;
+            /** @description Portfolio is a read-only view selected by label. */
+            isVirtual?: boolean;
+            /**
+             * Format: uuid
+             * @description Label selecting instruments for a virtual portfolio.
+             */
+            labelId?: string | null;
             cashLegOnTrade?: boolean;
             isMarginEnabled: boolean;
             /** Format: date-time */
@@ -3219,6 +3226,10 @@ export interface components {
             description?: string | null;
             currency?: string;
             isPublic?: boolean;
+            /** @default false */
+            isVirtual: boolean;
+            /** Format: uuid */
+            labelId?: string | null;
             cashLegOnTrade?: boolean;
         };
         /**
@@ -5847,6 +5858,8 @@ export interface operations {
                 labels?: string;
                 /** @description Filter by instrument symbol. Must be in canonical form: bare ticker for US listings (AAPL, SAP), Yahoo venue suffix for others (SAP.DE, SNT.WA). Case-insensitive exact match. */
                 instrumentSymbol?: string;
+                /** @description Case-insensitive partial match against instrument symbol or company name. */
+                search?: string;
             };
             header?: never;
             path?: never;
@@ -6178,6 +6191,8 @@ export interface operations {
                 labels?: string;
                 /** @description Filter by instrument symbol. Must be in canonical form: bare ticker for US listings (AAPL, SAP), Yahoo venue suffix for others (SAP.DE, SNT.WA). Case-insensitive exact match. */
                 instrumentSymbol?: string;
+                /** @description Case-insensitive partial match against instrument symbol or company name. */
+                search?: string;
             };
             header?: never;
             path: {
@@ -6603,6 +6618,8 @@ export interface operations {
                 limit?: number;
                 /** @description Comma-separated label ids; AND filter (entity must have all) */
                 labels?: string;
+                /** @description Case-insensitive partial match against the linked transaction's ticker or company name. */
+                search?: string;
             };
             header?: never;
             path: {
@@ -6710,6 +6727,8 @@ export interface operations {
                 sortOrder?: "asc" | "desc";
                 /** @description Comma-separated label ids; AND filter (entity must have all) */
                 labels?: string;
+                /** @description Case-insensitive partial match against the linked transaction's ticker or company name. */
+                search?: string;
             };
             header?: never;
             path?: never;

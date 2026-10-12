@@ -225,6 +225,13 @@
       "when": 1791556804057,
       "tag": "0031_doc_wallets_cash_tx_labels",
       "breakpoints": true
+    },
+    {
+      "idx": 32,
+      "version": "7",
+      "when": 1791827916699,
+      "tag": "0032_known_madame_web",
+      "breakpoints": true
     }
   ]
 }

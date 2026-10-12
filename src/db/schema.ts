@@ -109,6 +109,12 @@ export const portfolios = portfoliosSchema.table(
     currentValue: numeric("current_value", { precision: 20, scale: 8 }).notNull().default("0"),
     // toggles the auth-exempt public share projection.
     isPublic: boolean("is_public").notNull().default(false),
+    // A virtual portfolio is a read-only view over positions carrying labelId.
+    isVirtual: boolean("is_virtual").notNull().default(false),
+    // The label that selects instruments for a virtual portfolio; casual
+    // portfolios leave it NULL. The FK is nullable so deleting a label can
+    // safely detach it from the virtual view.
+    labelId: uuid("label_id").references(() => labels.id, { onDelete: "set null" }),
     /**
      * §87.5 — UI-only. Pre-ticks the transaction form's "also create a cash
      * transaction" box so it reflects what will actually happen.

@@ -13,7 +13,7 @@ import {
   positionLabels,
   transactionLabels,
 } from "../db/schema.js"
-import { positionInPortfolio } from "../db/position-membership.js"
+import { positionInPortfolio, transactionInPortfolio } from "../db/position-membership.js"
 import { resolveFeeFx } from "../services/fee-fx.js"
 import { capitalBasisInvested } from "../services/transferFlows.js"
 import { fxTo, resolveRates } from "../services/instruments-fx.js"
@@ -494,6 +494,7 @@ export function createTransactionRoutes(db?: DB) {
 
     const portfolio = await loadPortfolio(database, portfolioId, identity.id)
     if (!portfolio) return c.json({ error: "NotFound", message: "Portfolio not found" }, 404)
+    if (portfolio.isVirtual) return c.json({ error: "ReadOnlyPortfolio", message: "Virtual portfolios are read-only" }, 409)
 
     const parsed = TransactionCreateSchema.safeParse(await c.req.json().catch(() => ({})))
     if (!parsed.success) {
@@ -695,6 +696,7 @@ export function createTransactionRoutes(db?: DB) {
 
     const portfolio = await loadPortfolio(database, portfolioId, identity.id)
     if (!portfolio) return c.json({ error: "NotFound", message: "Portfolio not found" }, 404)
+    if (portfolio.isVirtual) return c.json({ error: "ReadOnlyPortfolio", message: "Virtual portfolios are read-only" }, 409)
 
     const parsed = TransactionPatchSchema.safeParse(await c.req.json().catch(() => ({})))
     if (!parsed.success) {
@@ -708,7 +710,7 @@ export function createTransactionRoutes(db?: DB) {
         and(
           eq(portfolioTransactions.id, txId),
           eq(portfolioTransactions.userId, identity.id),
-          eq(portfolioTransactions.portfolioId, portfolioId),
+          transactionInPortfolio(portfolioId),
         ),
       )
       .then((rows) => rows[0])
@@ -799,6 +801,7 @@ export function createTransactionRoutes(db?: DB) {
 
     const portfolio = await loadPortfolio(database, portfolioId, identity.id)
     if (!portfolio) return c.json({ error: "NotFound", message: "Portfolio not found" }, 404)
+    if (portfolio.isVirtual) return c.json({ error: "ReadOnlyPortfolio", message: "Virtual portfolios are read-only" }, 409)
 
     const existing = await database
       .select()
@@ -807,7 +810,7 @@ export function createTransactionRoutes(db?: DB) {
         and(
           eq(portfolioTransactions.id, txId),
           eq(portfolioTransactions.userId, identity.id),
-          eq(portfolioTransactions.portfolioId, portfolioId),
+          transactionInPortfolio(portfolioId),
         ),
       )
       .then((rows) => rows[0])
@@ -892,6 +895,7 @@ export function createTransactionRoutes(db?: DB) {
 
     const portfolio = await loadPortfolio(database, portfolioId, identity.id)
     if (!portfolio) return c.json({ error: "NotFound", message: "Portfolio not found" }, 404)
+    if (portfolio.isVirtual) return c.json({ error: "ReadOnlyPortfolio", message: "Virtual portfolios are read-only" }, 409)
 
     const body = await c.req.json().catch(() => ({}))
 
@@ -981,6 +985,7 @@ export function createTransactionRoutes(db?: DB) {
 
     const portfolio = await loadPortfolio(database, portfolioId, identity.id)
     if (!portfolio) return c.json({ error: "NotFound", message: "Portfolio not found" }, 404)
+    if (portfolio.isVirtual) return c.json({ error: "ReadOnlyPortfolio", message: "Virtual portfolios are read-only" }, 409)
 
     const [pos] = await database
       .select()
@@ -1057,7 +1062,7 @@ export function createTransactionRoutes(db?: DB) {
 
     const conditions: SQL[] = [
       eq(portfolioTransactions.userId, identity.id),
-      eq(portfolioTransactions.portfolioId, portfolioId),
+      transactionInPortfolio(portfolioId),
     ]
     if (typeFilter) conditions.push(eq(portfolioTransactions.type, typeFilter.toUpperCase()))
     if (positionId) conditions.push(eq(portfolioTransactions.positionId, positionId))
@@ -1140,7 +1145,7 @@ export function createTransactionRoutes(db?: DB) {
       .where(
         and(
           eq(portfolioTransactions.userId, identity.id),
-          eq(portfolioTransactions.portfolioId, portfolioId),
+          transactionInPortfolio(portfolioId),
         ),
       )
 
@@ -1152,7 +1157,7 @@ export function createTransactionRoutes(db?: DB) {
       .where(
         and(
           eq(portfolioTransactions.userId, identity.id),
-          eq(portfolioTransactions.portfolioId, portfolioId),
+          transactionInPortfolio(portfolioId),
         ),
       )
       .orderBy(desc(portfolioTransactions.executedAt))
@@ -1192,6 +1197,7 @@ export function createTransactionRoutes(db?: DB) {
 
     const portfolio = await loadPortfolio(database, portfolioId, identity.id)
     if (!portfolio) return c.json({ error: "NotFound", message: "Portfolio not found" }, 404)
+    if (portfolio.isVirtual) return c.json({ error: "ReadOnlyPortfolio", message: "Virtual portfolios are read-only" }, 409)
 
     const parsed = PositionCreateSchema.safeParse(await c.req.json().catch(() => ({})))
     if (!parsed.success) {

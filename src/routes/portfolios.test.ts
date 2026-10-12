@@ -8,6 +8,8 @@ import {
   portfolioCashTransactions,
   portfolioTransactions,
   valueSnapshots,
+  labels,
+  positionLabels,
 } from "../db/schema.js"
 import { sql } from "drizzle-orm"
 import { __resetBackfillRunnerForTests, __backfillRunnerEnqueuedForTests } from "../services/backfill-runner.js"
@@ -35,6 +37,63 @@ describe("Portfolio CRUD (§15 Phase B)", () => {
     expect(body.baseCurrency).toBe("USD")
     expect(body.capitalBasis).toBe(0)
     expect(body.id).toBeDefined()
+  })
+
+  it("POST /api/portfolios — virtual portfolios require and persist an owned label", async () => {
+    const h = await makeHarness()
+    const a = app(h.db)
+    const labelId = "11111111-1111-4111-8111-111111111111"
+    await h.db.insert(labels).values({ id: labelId, userId: "user-1", name: "Growth", color: "#000000" })
+
+    const missing = await a.request("/api/portfolios", {
+      method: "POST",
+      headers: h.headers,
+      body: JSON.stringify({ name: "Missing label", isVirtual: true, baseCurrency: "USD" }),
+    })
+    expect(missing.status).toBe(422)
+
+    const res = await a.request("/api/portfolios", {
+      method: "POST",
+      headers: h.headers,
+      body: JSON.stringify({ name: "Virtual Growth", isVirtual: true, labelId, cashLegOnTrade: true, baseCurrency: "USD" }),
+    })
+    expect(res.status).toBe(201)
+    const body = await res.json()
+    expect(body.isVirtual).toBe(true)
+    expect(body.labelId).toBe(labelId)
+    expect(body.cashLegOnTrade).toBe(false)
+  })
+
+  it("virtual portfolios select labelled positions and existing transactions read-only", async () => {
+    const h = await makeHarness()
+    const a = app(h.db)
+    const labelId = "22222222-2222-4222-8222-222222222222"
+    await h.db.insert(labels).values({ id: labelId, userId: "user-1", name: "Virtual", color: "#000000" })
+    const sourceResponse = await a.request("/api/portfolios", {
+      method: "POST", headers: h.headers, body: JSON.stringify({ name: "Source", baseCurrency: "USD" }),
+    })
+    const source = await sourceResponse.json()
+    const virtualResponse = await a.request("/api/portfolios", {
+      method: "POST", headers: h.headers, body: JSON.stringify({ name: "Virtual", isVirtual: true, labelId, baseCurrency: "USD" }),
+    })
+    const virtual = await virtualResponse.json()
+    const position = await insertPosition(h.db, {
+      userId: h.user.id, portfolioId: source.id, symbol: "AAPL", quantity: "2", averageCostBasis: "100", instrumentCurrency: "USD",
+    })
+    await h.db.insert(positionLabels).values({ positionId: position.id, labelId })
+    await h.db.insert(portfolioTransactions).values({
+      userId: h.user.id, portfolioId: source.id, positionId: position.id, type: "BUY", instrumentSymbol: "AAPL",
+      quantity: "2", price: "100", currency: "USD", totalAmount: "200",
+    })
+
+    const positionsRes = await a.request(`/api/portfolios/${virtual.id}/positions`, { headers: h.headers })
+    expect(positionsRes.status).toBe(200)
+    expect((await positionsRes.json()).map((row: { symbol: string }) => row.symbol)).toEqual(["AAPL"])
+    const transactionsRes = await a.request(`/api/portfolios/${virtual.id}/transactions`, { headers: h.headers })
+    expect(transactionsRes.status).toBe(200)
+    expect((await transactionsRes.json()).total).toBe(1)
+    const write = await a.request(`/api/portfolios/${virtual.id}/transactions`, { method: "POST", headers: h.headers, body: "{}" })
+    expect(write.status).toBe(409)
   })
 
   it("POST /api/portfolios — invalid baseCurrency → 422", async () => {

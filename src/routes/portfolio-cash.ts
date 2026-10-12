@@ -323,6 +323,7 @@ export function createPortfolioCashRoutes(db?: DB) {
     const database = getDb()
     const portfolio = await loadPortfolio(database, c.req.param("id"), identity.id)
     if (!portfolio) return c.json({ error: "NotFound", message: "Portfolio not found" }, 404)
+    if (portfolio.isVirtual) return c.json({ error: "CashUnavailable", message: "Virtual portfolios do not hold cash" }, 404)
     return c.json(await buildPortfolioCash(database, auth(c), portfolio))
   })
 
@@ -332,6 +333,7 @@ export function createPortfolioCashRoutes(db?: DB) {
     const database = getDb()
     const portfolio = await loadPortfolio(database, c.req.param("id"), identity.id)
     if (!portfolio) return c.json({ error: "NotFound", message: "Portfolio not found" }, 404)
+    if (portfolio.isVirtual) return c.json({ error: "CashUnavailable", message: "Virtual portfolios do not hold cash" }, 404)
     const base = portfolio.baseCurrency.toUpperCase()
     const period = c.req.query("period") ?? "ALL"
     const resolution = c.req.query("resolution") ?? "day"
@@ -401,10 +403,11 @@ export function createPortfolioCashRoutes(db?: DB) {
     const database = getDb()
     const portfolioId = c.req.param("id")
     const [owned] = await database
-      .select({ id: portfolios.id })
+      .select({ id: portfolios.id, isVirtual: portfolios.isVirtual })
       .from(portfolios)
       .where(and(eq(portfolios.id, portfolioId), eq(portfolios.userId, identity.id)))
     if (!owned) return c.json({ error: "NotFound", message: "Portfolio not found" }, 404)
+    if (owned.isVirtual) return c.json({ error: "CashUnavailable", message: "Virtual portfolios do not hold cash" }, 404)
 
     const page = Math.max(1, Number(c.req.query("page")) || 1)
     const limit = Math.min(100, Math.max(1, Number(c.req.query("limit")) || 10))
@@ -457,6 +460,7 @@ export function createPortfolioCashRoutes(db?: DB) {
     const database = getDb()
     const portfolio = await loadPortfolio(database, c.req.param("id") ?? "", identity.id)
     if (!portfolio) return c.json({ error: "NotFound", message: "Portfolio not found" }, 404)
+    if (portfolio.isVirtual) return c.json({ error: "ReadOnlyPortfolio", message: "Virtual portfolios are read-only" }, 409)
 
     const body = parsed.data
     const ccy = (body.currency ?? portfolio.baseCurrency).toUpperCase()
@@ -493,6 +497,7 @@ export function createPortfolioCashRoutes(db?: DB) {
     const body = parsed.data
     const from = await loadPortfolio(database, c.req.param("id"), identity.id)
     if (!from) return c.json({ error: "NotFound", message: "Portfolio not found" }, 404)
+    if (from.isVirtual) return c.json({ error: "ReadOnlyPortfolio", message: "Virtual portfolios are read-only" }, 409)
     if (from.id === body.toPortfolioId) {
       return c.json({ error: "BadRequest", message: "Transfer target must differ from the source portfolio" }, 400)
     }
@@ -501,6 +506,7 @@ export function createPortfolioCashRoutes(db?: DB) {
       .from(portfolios)
       .where(and(eq(portfolios.id, body.toPortfolioId), eq(portfolios.userId, identity.id)))
     if (!to) return c.json({ error: "NotFound", message: "Transfer target not found" }, 404)
+    if (to.isVirtual) return c.json({ error: "ReadOnlyPortfolio", message: "Virtual portfolios are read-only" }, 409)
 
     const ccy = body.currency.toUpperCase()
     const toCcy = (to.baseCurrency ?? ccy).toUpperCase()

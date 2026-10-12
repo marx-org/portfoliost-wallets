@@ -16,6 +16,7 @@
  */
 import { and, eq, lt, sql } from "drizzle-orm"
 import type { DB } from "../db/index.js"
+import { transactionInPortfolio } from "../db/position-membership.js"
 import {
   portfolioBackfillMetadata,
   portfolios,
@@ -733,7 +734,7 @@ export async function hasBackfillableHistory(
     .from(portfolioTransactions)
     .where(
       and(
-        eq(portfolioTransactions.portfolioId, portfolioId),
+        transactionInPortfolio(portfolioId),
         sql`${portfolioTransactions.type} in (${positionMovementTypes})`,
       ),
     )
@@ -1006,12 +1007,12 @@ export async function computeSnapshotBatch(
     .from(portfolioTransactions)
     .where(
       and(
-        eq(portfolioTransactions.portfolioId, portfolioId),
+        transactionInPortfolio(portfolioId),
         sql`${portfolioTransactions.type} in (${positionMovementTypes})`,
       ),
     )
   const [pfRow] = await db
-    .select({ baseCurrency: portfolios.baseCurrency })
+    .select({ baseCurrency: portfolios.baseCurrency, isVirtual: portfolios.isVirtual })
     .from(portfolios)
     .where(eq(portfolios.id, portfolioId))
     .limit(1)
@@ -1043,7 +1044,7 @@ export async function computeSnapshotBatch(
     .from(portfolioTransactions)
     .where(
       and(
-        eq(portfolioTransactions.portfolioId, portfolioId),
+        transactionInPortfolio(portfolioId),
         sql`${portfolioTransactions.type} in (${positionMovementTypes})`,
         lt(portfolioTransactions.executedAt, now),
       ),
@@ -1085,7 +1086,7 @@ export async function computeSnapshotBatch(
     .from(portfolioTransactions)
     .where(
       and(
-        eq(portfolioTransactions.portfolioId, portfolioId),
+        transactionInPortfolio(portfolioId),
         eq(portfolioTransactions.type, "EXPIRATION"),
       ),
     )
@@ -1216,7 +1217,10 @@ export async function computeSnapshotBatch(
   const priceSeries = pricingSymbols.length
     ? await fetchPriceSeries(
         pricingSymbols, from, to, authToken, fetchPriceBars, signal,
-        targetCcy, declaredBase, base, transferSymbols,
+        targetCcy,
+        declaredBase,
+        base,
+        pfRow.isVirtual ? new Set(pricingSymbols) : transferSymbols,
       )
     : new Map<string, PriceBarSeries>()
   throwIfAborted(signal)

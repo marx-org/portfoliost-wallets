@@ -10,8 +10,9 @@ import {
   portfolioTransactions,
   shares,
   valueSnapshots,
+  labels,
 } from "../db/schema.js"
-import { positionInPortfolio } from "../db/position-membership.js"
+import { positionInPortfolio, transactionInPortfolio } from "../db/position-membership.js"
 import { preferredBaseCurrency } from "../services/preferences.js"
 import { dominantPriceSource, oldestPriceAsOf, splitPortfolioValue } from "../services/valuation.js"
 import { getPortfolioNews } from "../services/portfolioNews.js"
@@ -56,6 +57,12 @@ export const CreatePortfolioSchema = z.object({
   // §87.5 — UI-only; see the schema.ts note. Never read by the import.
   cashLegOnTrade: z.boolean().optional(),
   isMarginEnabled: z.boolean().optional(),
+  isVirtual: z.boolean().optional(),
+  labelId: z.string().uuid().nullable().optional(),
+}).superRefine((value, ctx) => {
+  if (value.isVirtual && !value.labelId) {
+    ctx.addIssue({ code: "custom", path: ["labelId"], message: "A virtual portfolio requires a label" })
+  }
 })
 
 export const UpdatePortfolioSchema = z.object({
@@ -66,6 +73,7 @@ export const UpdatePortfolioSchema = z.object({
   // §87.5 — UI-only; see the schema.ts note. Never read by the import.
   cashLegOnTrade: z.boolean().optional(),
   isMarginEnabled: z.boolean().optional(),
+  labelId: z.string().uuid().nullable().optional(),
 })
 
 // ── Serializers ────────────────────────────────────────────────────────
@@ -82,6 +90,8 @@ function serializePortfolio(p: typeof portfolios.$inferSelect) {
     capitalBasis: Number(p.totalInvested),
     currentValue: Number(p.currentValue),
     isPublic: p.isPublic,
+    isVirtual: p.isVirtual,
+    labelId: p.labelId,
     // §87.5 — the SPA reads this to pre-tick the form's cash checkbox.
     cashLegOnTrade: p.cashLegOnTrade,
     isMarginEnabled: p.isMarginEnabled,
@@ -107,7 +117,7 @@ async function computeMetrics(db: DB, portfolioId: string) {
       income: sql<string>`coalesce(sum(${portfolioTransactions.totalAmount}) filter (where ${portfolioTransactions.type} = 'DIVIDEND'), 0)`,
     })
     .from(portfolioTransactions)
-    .where(sql`${portfolioTransactions.portfolioId} = ${portfolioId}`)
+    .where(transactionInPortfolio(portfolioId))
 
   const realized = Number(txSums?.realizedGainLoss ?? 0)
   const income = Number(txSums?.income ?? 0)
@@ -218,16 +228,26 @@ export function createPortfolioRoutes(db?: DB) {
     const result = await Promise.all(
       rows.map(async (p) => {
         const metrics = await computeMetrics(database, p.id)
+        let currentValue = Number(p.currentValue)
+        if (p.isVirtual) {
+          const virtualPositions = await database
+            .select()
+            .from(positions)
+            .where(and(eq(positions.userId, identity.id), positionInPortfolio(p.id), eq(positions.isOpen, true)))
+          const toBase = await fxTo(c.req.header("Authorization") ?? "", p.baseCurrency, new Map(), { strict: true })
+          currentValue = (await splitPortfolioValue(toBase, virtualPositions, new Map())).totalValue
+        }
         metrics.capitalBasis = Number(p.totalInvested)
         metrics.totalReturn =
-          Number(p.currentValue) > 0 && metrics.capitalBasis > 0
-            ? ((Number(p.currentValue) - metrics.capitalBasis) / metrics.capitalBasis) * 100
+          currentValue > 0 && metrics.capitalBasis > 0
+            ? ((currentValue - metrics.capitalBasis) / metrics.capitalBasis) * 100
             : 0
-        metrics.totalReturnAmount = Number(p.currentValue) - metrics.capitalBasis
+        metrics.totalReturnAmount = currentValue - metrics.capitalBasis
         metrics.returnBasis = metrics.capitalBasis
 
         return {
-          ...serializePortfolio(p),
+           ...serializePortfolio(p),
+           currentValue,
           metrics,
           positionCount: metrics.positionCount,
           performance: {
@@ -236,7 +256,7 @@ export function createPortfolioRoutes(db?: DB) {
             dailyChange: 0,
             dailyChangePercentage: 0,
           },
-          cash: await buildPortfolioCash(database, c.req.header("Authorization") ?? "", p),
+           ...(p.isVirtual ? {} : { cash: await buildPortfolioCash(database, c.req.header("Authorization") ?? "", p) }),
         }
       }),
     )
@@ -252,7 +272,7 @@ export function createPortfolioRoutes(db?: DB) {
     const rows = await database
       .select()
       .from(portfolios)
-      .where(sql`${portfolios.userId} = ${identity.id}`)
+      .where(eq(portfolios.userId, identity.id))
       .orderBy(sql`${portfolios.createdAt} DESC`)
 
     const result = await Promise.all(
@@ -281,7 +301,7 @@ export function createPortfolioRoutes(db?: DB) {
     const portfolioRows = await database
       .select()
       .from(portfolios)
-      .where(sql`${portfolios.userId} = ${identity.id}`)
+      .where(and(eq(portfolios.userId, identity.id), eq(portfolios.isVirtual, false)))
 
     // plan §48.6e B5 — each portfolio's value/invested is denominated in its
     // own base_currency (each position in its instrument currency). Convert to
@@ -332,13 +352,15 @@ export function createPortfolioRoutes(db?: DB) {
         // loop previously summed positions ONLY, which is precisely why the
         // headline missed the cash balance by exactly the cash balance (§63.3),
         // and it did so while /summary-metrics already included cash.
-        const cashBal = await cashBalances(database, c.req.header("Authorization") ?? "", p.id)
+        const cashBal = p.isVirtual
+          ? new Map<string, number>()
+          : await cashBalances(database, c.req.header("Authorization") ?? "", p.id)
         cashByPortfolio.set(p.id, cashBal)
         // §41/S3 — collected per portfolio rather than accumulated in place: the
         // rows are built by Promise.all, so `+=` across an await is a race. Summed
         // once below, which also saves a second round of FX lookups over every row.
         externalByPortfolio.push(
-          await externalCashInvested(
+           await externalCashInvested(
             database, c.req.header("Authorization") ?? "", p.id, p.baseCurrency ?? aggregateBase,
           ),
         )
@@ -711,6 +733,15 @@ async function resolveAggregateBase(
     const identity = c.get("userIdentity")
     const database = getDbInstance()
 
+    const isVirtual = parsed.data.isVirtual ?? false
+    if (isVirtual) {
+      const [label] = await database
+        .select({ id: labels.id })
+        .from(labels)
+        .where(and(eq(labels.id, parsed.data.labelId!), eq(labels.userId, identity.id)))
+      if (!label) return c.json({ error: "ValidationError", message: "Label not found" }, 422)
+    }
+
     // D21b: explicit baseCurrency wins; otherwise from user prefs
     const forwardedHeaders: Record<string, string> = {}
     for (const k of ["authorization", "x-user-id", "x-user-email"]) {
@@ -733,8 +764,10 @@ async function resolveAggregateBase(
           isPublic: parsed.data.isPublic ?? false,
           // UI-only preference. Import policy belongs to sheets-sync and is
           // carried explicitly by the import payload, never inferred here.
-          cashLegOnTrade: parsed.data.cashLegOnTrade ?? false,
+          cashLegOnTrade: isVirtual ? false : parsed.data.cashLegOnTrade ?? false,
           isMarginEnabled: parsed.data.isMarginEnabled ?? false,
+          isVirtual,
+          labelId: isVirtual ? parsed.data.labelId! : null,
         })
         .returning()
       return c.json(serializePortfolio(created) satisfies Portfolio, 201)
@@ -845,7 +878,7 @@ async function resolveAggregateBase(
     const database = getDbInstance()
 
     const portfolioRows = await database
-      .select({ id: portfolios.id, baseCurrency: portfolios.baseCurrency })
+      .select({ id: portfolios.id, baseCurrency: portfolios.baseCurrency, isVirtual: portfolios.isVirtual })
       .from(portfolios)
       .where(sql`${portfolios.userId} = ${identity.id}`)
 
@@ -1096,7 +1129,7 @@ async function resolveAggregateBase(
       metrics,
       positions: posSummaries,
       positionCount: posSummaries.length,
-      cash: await buildPortfolioCash(database, c.req.header("Authorization") ?? "", p),
+      ...(p.isVirtual ? {} : { cash: await buildPortfolioCash(database, c.req.header("Authorization") ?? "", p) }),
     })
   })
 
@@ -1126,8 +1159,25 @@ async function resolveAggregateBase(
     if (data.description !== undefined) updates.description = data.description
     if (data.baseCurrency !== undefined) updates.baseCurrency = data.baseCurrency.toUpperCase()
     if (data.isPublic !== undefined) updates.isPublic = data.isPublic
-    if (data.cashLegOnTrade !== undefined) updates.cashLegOnTrade = data.cashLegOnTrade
+    if (data.cashLegOnTrade !== undefined) {
+      if (existing.isVirtual && data.cashLegOnTrade) {
+        return c.json({ error: "ValidationError", message: "Virtual portfolios cannot use cash legs" }, 422)
+      }
+      updates.cashLegOnTrade = data.cashLegOnTrade
+    }
     if (data.isMarginEnabled !== undefined) updates.isMarginEnabled = data.isMarginEnabled
+    if (data.labelId !== undefined) {
+      if (!existing.isVirtual) {
+        return c.json({ error: "ValidationError", message: "Only virtual portfolios can have a label" }, 422)
+      }
+      if (!data.labelId) return c.json({ error: "ValidationError", message: "A virtual portfolio requires a label" }, 422)
+      const [label] = await database
+        .select({ id: labels.id })
+        .from(labels)
+        .where(and(eq(labels.id, data.labelId), eq(labels.userId, identity.id)))
+      if (!label) return c.json({ error: "ValidationError", message: "Label not found" }, 422)
+      updates.labelId = data.labelId
+    }
 
     const [updated] = await database
       .update(portfolios)
@@ -1153,23 +1203,23 @@ async function resolveAggregateBase(
       return c.json({ error: "NotFound", message: "portfolio not found" }, 404)
     }
 
-    // D59: guarded delete — 409 while transactions or open positions exist
-    const [txCount] = await database
-      .select({ count: drizzleCount() })
-      .from(portfolioTransactions)
-      .where(sql`${portfolioTransactions.portfolioId} = ${id}`)
-    if (txCount && txCount.count > 0) {
-      return c.json({ error: "Conflict", message: "portfolio has transactions" }, 409)
-    }
+    if (!existing.isVirtual) {
+      // D59: guarded delete — 409 while transactions or open positions exist.
+      const [txCount] = await database
+        .select({ count: drizzleCount() })
+        .from(portfolioTransactions)
+        .where(sql`${portfolioTransactions.portfolioId} = ${id}`)
+      if (txCount && txCount.count > 0) {
+        return c.json({ error: "Conflict", message: "portfolio has transactions" }, 409)
+      }
 
-    const [posCount] = await database
-      .select({ count: drizzleCount() })
-      .from(positions)
-      .where(
-        and(positionInPortfolio(id), eq(positions.isOpen, true)),
-      )
-    if (posCount && posCount.count > 0) {
-      return c.json({ error: "Conflict", message: "portfolio has open positions" }, 409)
+      const [posCount] = await database
+        .select({ count: drizzleCount() })
+        .from(positions)
+        .where(and(positionInPortfolio(id), eq(positions.isOpen, true)))
+      if (posCount && posCount.count > 0) {
+        return c.json({ error: "Conflict", message: "portfolio has open positions" }, 409)
+      }
     }
 
     // #115 — deleting the portfolio drops its memberships via the join-table FK
@@ -1229,7 +1279,9 @@ async function resolveAggregateBase(
         ),
       )
 
-    const cashBal = await cashBalances(database, c.req.header("Authorization") ?? "", portfolioId)
+    const cashBal = portfolio.isVirtual
+      ? new Map<string, number>()
+      : await cashBalances(database, c.req.header("Authorization") ?? "", portfolioId)
     const sumToBase = await fxTo(c.req.header("Authorization") ?? "", portfolio.baseCurrency, new Map(), { strict: true })
     // §68 — this route used to `reduce` marketValue straight into positionValue
     // with NO per-position FX conversion, while the very same response declared
@@ -1273,7 +1325,7 @@ async function resolveAggregateBase(
       .where(
         and(
           eq(portfolioTransactions.userId, identity.id),
-          eq(portfolioTransactions.portfolioId, portfolioId),
+          transactionInPortfolio(portfolioId),
           eq(portfolioTransactions.type, "SELL"),
         ),
       )
@@ -1291,7 +1343,7 @@ async function resolveAggregateBase(
       .where(
         and(
           eq(portfolioTransactions.userId, identity.id),
-          eq(portfolioTransactions.portfolioId, portfolioId),
+          transactionInPortfolio(portfolioId),
         ),
       )
     const cumulativeDividends = Number(divRow?.income ?? 0)
@@ -1300,9 +1352,11 @@ async function resolveAggregateBase(
     // §41/S3 — the card reports BOTH quantities. `capitalBasis` (below) includes
     // in-kind transfers at cost; this does not, and the two answer different
     // questions. It was never reported before, which is how the pair got confused.
-    const externalContributions = await externalCashInvested(
-      database, c.req.header("Authorization") ?? "", portfolioId, portfolio.baseCurrency,
-    )
+    const externalContributions = portfolio.isVirtual
+      ? 0
+      : await externalCashInvested(
+          database, c.req.header("Authorization") ?? "", portfolioId, portfolio.baseCurrency,
+        )
     const simpleReturnPercent = totalInvested > 0
       ? Math.round(((totalValue - totalInvested) / totalInvested * 100) * 100) / 100
       : 0
@@ -1349,12 +1403,11 @@ async function resolveAggregateBase(
 
     // Verify portfolio belongs to user
     const [pf] = await database
-      .select({ id: portfolios.id })
+      .select({ id: portfolios.id, isVirtual: portfolios.isVirtual })
       .from(portfolios)
       .where(and(eq(portfolios.id, id), eq(portfolios.userId, identity.id)))
       .limit(1)
     if (!pf) return c.json({ error: "NotFound", message: "Portfolio not found" }, 404)
-
     // Two modes (2026-09-27) over one shared core (computeSnapshotBatch):
     // default = FULL delete+rebuild (manual recompute after data fixes — no
     // stale rows can survive); ?mode=upsert = ADDITIVE (upsert computed days,
@@ -1401,11 +1454,54 @@ async function resolveAggregateBase(
 
     // Verify portfolio belongs to user
     const [pf] = await database
-      .select({ id: portfolios.id, baseCurrency: portfolios.baseCurrency })
+      .select({ id: portfolios.id, baseCurrency: portfolios.baseCurrency, isVirtual: portfolios.isVirtual })
       .from(portfolios)
       .where(and(eq(portfolios.id, id), eq(portfolios.userId, identity.id)))
       .limit(1)
     if (!pf) return c.json({ error: "NotFound" }, 404)
+
+    const [virtualSnapshotCount] = await database
+      .select({ count: drizzleCount() })
+      .from(valueSnapshots)
+      .where(eq(valueSnapshots.portfolioId, id))
+    if (pf.isVirtual && virtualSnapshotCount.count < 2) {
+      const posRows = await database
+        .select()
+        .from(positions)
+        .where(and(eq(positions.userId, identity.id), positionInPortfolio(id), eq(positions.isOpen, true)))
+      const toBase = await fxTo(c.req.header("Authorization") ?? "", pf.baseCurrency, new Map(), { strict: true })
+      const value = await splitPortfolioValue(toBase, posRows, new Map())
+      const [firstTransaction] = await database
+        .select({ date: sql<string>`min(${portfolioTransactions.executedAt})` })
+        .from(portfolioTransactions)
+        .where(and(eq(portfolioTransactions.userId, identity.id), transactionInPortfolio(id)))
+      const now = new Date()
+      const endDate = now.toISOString()
+      const firstDate = firstTransaction?.date ? new Date(firstTransaction.date) : new Date(now.getTime() - 86_400_000)
+      const startDate = firstDate < now ? firstDate.toISOString() : new Date(now.getTime() - 86_400_000).toISOString()
+      const currentValue = Math.round(value.totalValue * 100) / 100
+      return c.json({
+        timeframe,
+        backfillStatus: "complete",
+        gapSymbols: null,
+        heldGapSymbols: null,
+        fxCoverageHoles: null,
+        performance: {
+          timeSeries: [{ date: startDate, value: currentValue }, { date: endDate, value: currentValue }],
+          totalValue: currentValue,
+          totalInvested: 0,
+          totalReturn: currentValue,
+          totalReturnPercent: 0,
+          monthlyReturns: [],
+          timeWeightedReturn: null,
+          moneyWeightedReturn: null,
+          simpleReturnPercent: null,
+          annualizedReturn: null,
+          annualizedReturnWithheldReason: "insufficient_history",
+        },
+        benchmarks: [],
+      })
+    }
 
     // Check how many snapshot rows exist
     const [{ n }] = await database
@@ -1596,7 +1692,7 @@ async function resolveAggregateBase(
     const id = c.req.param("id")
 
     const [pf] = await database
-      .select({ id: portfolios.id })
+      .select({ id: portfolios.id, isVirtual: portfolios.isVirtual })
       .from(portfolios)
       .where(and(eq(portfolios.id, id), eq(portfolios.userId, identity.id)))
       .limit(1)
@@ -1688,11 +1784,30 @@ async function resolveAggregateBase(
 
     // Verify ownership
     const [pf] = await database
-      .select({ id: portfolios.id })
+      .select({ id: portfolios.id, isVirtual: portfolios.isVirtual })
       .from(portfolios)
       .where(and(eq(portfolios.id, id), eq(portfolios.userId, identity.id)))
       .limit(1)
     if (!pf) return c.json({ error: "NotFound" }, 404)
+    const [virtualSnapshotCount] = await database
+      .select({ count: drizzleCount() })
+      .from(valueSnapshots)
+      .where(eq(valueSnapshots.portfolioId, id))
+    if (pf.isVirtual && virtualSnapshotCount.count < 2) {
+      return c.json({
+        sharpeRatio: 0,
+        sortinoRatio: 0,
+        calmarRatio: 0,
+        volatility: 0,
+        maxDrawdown: 0,
+        winRate: 0,
+        periodReturnPercent: 0,
+        annualizedReturn: null,
+        annualizedReturnWithheldReason: "insufficient_history",
+        moneyWeightedReturn: null,
+        moneyWeightedReturnWithheldReason: "insufficient_history",
+      } satisfies components["schemas"]["PortfolioRiskMetrics"])
+    }
 
     // Fetch snapshot series filtered by timeframe
     const cutoff = timeframeCutoff(timeframe)
