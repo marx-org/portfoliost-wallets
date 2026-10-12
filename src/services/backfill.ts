@@ -457,8 +457,16 @@ export async function buildBenchmarkSeries(
   else if (ctx.calcType === "simple") columns = buildSimple(mirrorValues)
   else columns = buildTwr(mirrorValues, flows)
 
-  const timeSeries = points.map((p, i) => ({ date: p.date, value: columns[i] }))
-  const returnPercent = Math.round((columns[columns.length - 1] - 100) * 100) / 100
+  // A withdrawal can exhaust the synthetic benchmark position even though the
+  // portfolio later remains invested. Do not publish a permanently flat zero
+  // benchmark in that case; fall back to the raw indexed market series, which
+  // is the useful comparison once flow mirroring has no capital left to model.
+  const exhausted = mirrorValues.slice(1).some((value) => value <= 0)
+  const output = exhausted
+    ? points.map((p) => Math.round((p.close / firstClose) * 100 * 100) / 100)
+    : columns
+  const timeSeries = points.map((p, i) => ({ date: p.date, value: output[i] }))
+  const returnPercent = Math.round((output[output.length - 1] - 100) * 100) / 100
 
   // Volatility stays a property of the raw price series (unchanged from D46).
   let volatility = 0

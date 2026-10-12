@@ -145,6 +145,29 @@ describe("GET /:id/analytics — benchmarks (D46/D48)", () => {
     expect(b.timeSeries[b.timeSeries.length - 1].value).toBeGreaterThan(130)
   })
 
+  it("falls back to the raw indexed benchmark after a withdrawal exhausts the mirror", async () => {
+    const { db, user, headers } = await makeHarness("abe-withdrawal")
+    const a = app(db)
+    const pf = await seedPortfolio(db, user.id)
+    const days = calendarDays("2026-07-01", "2026-07-05")
+    await seedSnapshots(db, pf.id, days)
+    await db.insert(portfolioCashTransactions).values({
+      userId: user.id,
+      portfolioId: pf.id,
+      type: "WITHDRAWAL",
+      amount: "-2000",
+      currency: "USD",
+      transactionDate: days[2],
+    })
+    mockPriceBars({ SPY: { dates: days, closes: days.map((_, i) => 100 + i * 10) } })
+
+    const res = await a.request(`/api/portfolios/${pf.id}/analytics?timeframe=ALL&benchmarks=SPY`, { headers })
+    expect(res.status).toBe(200)
+    const b = (await res.json()).benchmarks[0]
+    expect(b.timeSeries.map((p: { value: number }) => p.value)).toEqual([100, 110, 120, 130, 140])
+    expect(b.returnPercent).toBe(40)
+  })
+
   it("drops unknown tickers and still returns portfolio series", async () => {
     const { db, user, headers } = await makeHarness("abe-unknown")
     const a = app(db)
