@@ -64,6 +64,25 @@ describe("Portfolio CRUD (§15 Phase B)", () => {
     expect(body.cashLegOnTrade).toBe(false)
   })
 
+  it("POST /api/portfolios — rejects a virtual portfolio carrying another user's label", async () => {
+    const h = await makeHarness()
+    const a = app(h.db)
+    const foreignLabel = "88888888-8888-4888-8888-888888888888"
+    // Owned by user-2, but the request is authenticated as user-1.
+    await h.db.insert(labels).values({ id: foreignLabel, userId: "user-2", name: "Foreign", color: "#000000" })
+
+    const res = await a.request("/api/portfolios", {
+      method: "POST",
+      headers: h.headers,
+      body: JSON.stringify({ name: "Virtual foreign", isVirtual: true, labelId: foreignLabel, baseCurrency: "USD" }),
+    })
+    expect(res.status).toBe(422)
+
+    // The rejected create inserted nothing.
+    const list = await (await a.request("/api/portfolios", { headers: h.headers })).json()
+    expect(list).toEqual([])
+  })
+
   it("virtual portfolios select labelled positions and existing transactions read-only", async () => {
     const h = await makeHarness()
     const a = app(h.db)
@@ -199,6 +218,86 @@ describe("Portfolio CRUD (§15 Phase B)", () => {
     const body = await relabel.json()
     expect(body.labelId).toBe(second)
     expect(body.isVirtual).toBe(true)
+  })
+
+  it("virtual portfolios keep multiple labels and an empty label independent", async () => {
+    const h = await makeHarness()
+    const a = app(h.db)
+    const labelA = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+    const labelB = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
+    const labelEmpty = "cccccccc-cccc-4ccc-8ccc-cccccccccccc"
+    await h.db.insert(labels).values([
+      { id: labelA, userId: "user-1", name: "A", color: "#000000" },
+      { id: labelB, userId: "user-1", name: "B", color: "#000000" },
+      { id: labelEmpty, userId: "user-1", name: "Empty", color: "#000000" },
+    ])
+
+    const source = await (
+      await a.request("/api/portfolios", {
+        method: "POST", headers: h.headers, body: JSON.stringify({ name: "Source", baseCurrency: "USD" }),
+      })
+    ).json()
+    const virtual = async (name: string, labelId: string) =>
+      (
+        await a.request("/api/portfolios", {
+          method: "POST", headers: h.headers, body: JSON.stringify({ name, isVirtual: true, labelId, baseCurrency: "USD" }),
+        })
+      ).json()
+    const vA = await virtual("Virtual A", labelA)
+    const vB = await virtual("Virtual B", labelB)
+    const vEmpty = await virtual("Virtual Empty", labelEmpty)
+
+    const posA = await insertPosition(h.db, {
+      userId: h.user.id, portfolioId: source.id, symbol: "AAPL", quantity: "2", averageCostBasis: "100", instrumentCurrency: "USD",
+    })
+    const posB = await insertPosition(h.db, {
+      userId: h.user.id, portfolioId: source.id, symbol: "MSFT", quantity: "3", averageCostBasis: "50", instrumentCurrency: "USD",
+    })
+    await h.db.insert(positionLabels).values([
+      { positionId: posA.id, labelId: labelA },
+      { positionId: posB.id, labelId: labelB },
+    ])
+
+    const symbols = async (id: string) =>
+      (await (await a.request(`/api/portfolios/${id}/positions`, { headers: h.headers })).json())
+        .map((row: { symbol: string }) => row.symbol)
+    // Each virtual portfolio sees only its own label — no cross-contamination.
+    expect(await symbols(vA.id)).toEqual(["AAPL"])
+    expect(await symbols(vB.id)).toEqual(["MSFT"])
+    // A label with no instruments is a valid, empty virtual portfolio.
+    expect(await symbols(vEmpty.id)).toEqual([])
+
+    const list = await (await a.request("/api/portfolios", { headers: h.headers })).json()
+    const empty = list.find((p: { id: string }) => p.id === vEmpty.id)
+    expect(empty.isVirtual).toBe(true)
+    expect(empty.positionCount).toBe(0)
+    expect(empty.currentValue).toBe(0)
+
+    // The fields travel through the contract on every read shape: detail and
+    // the lightweight selector as well as the list.
+    const detail = await (await a.request(`/api/portfolios/${vA.id}`, { headers: h.headers })).json()
+    expect(detail.isVirtual).toBe(true)
+    expect(detail.labelId).toBe(labelA)
+    const light = await (await a.request("/api/portfolios/light", { headers: h.headers })).json()
+    const lightA = light.find((p: { id: string }) => p.id === vA.id)
+    expect(lightA.isVirtual).toBe(true)
+    expect(lightA.labelId).toBe(labelA)
+  })
+
+  it("POST /api/portfolios — casual creation is unchanged by the virtual rules", async () => {
+    const h = await makeHarness()
+    const a = app(h.db)
+    const res = await a.request("/api/portfolios", {
+      method: "POST",
+      headers: h.headers,
+      body: JSON.stringify({ name: "Casual", baseCurrency: "USD", cashLegOnTrade: true }),
+    })
+    expect(res.status).toBe(201)
+    const body = await res.json()
+    expect(body.isVirtual).toBe(false)
+    expect(body.labelId).toBeNull()
+    // The cash-leg preference is still honoured for a casual portfolio.
+    expect(body.cashLegOnTrade).toBe(true)
   })
 
   it("POST /api/portfolios — invalid baseCurrency → 422", async () => {
