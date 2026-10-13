@@ -96,6 +96,111 @@ describe("Portfolio CRUD (§15 Phase B)", () => {
     expect(write.status).toBe(409)
   })
 
+  it("PATCH /api/portfolios/:id — virtual portfolio cannot enable the cash leg", async () => {
+    const h = await makeHarness()
+    const a = app(h.db)
+    const labelId = "33333333-3333-4333-8333-333333333333"
+    await h.db.insert(labels).values({ id: labelId, userId: "user-1", name: "Virtual", color: "#000000" })
+    const virtual = await (
+      await a.request("/api/portfolios", {
+        method: "POST",
+        headers: h.headers,
+        body: JSON.stringify({ name: "Virtual", isVirtual: true, labelId, baseCurrency: "USD" }),
+      })
+    ).json()
+
+    const on = await a.request(`/api/portfolios/${virtual.id}`, {
+      method: "PATCH",
+      headers: h.headers,
+      body: JSON.stringify({ cashLegOnTrade: true }),
+    })
+    expect(on.status).toBe(422)
+
+    const off = await a.request(`/api/portfolios/${virtual.id}`, {
+      method: "PATCH",
+      headers: h.headers,
+      body: JSON.stringify({ cashLegOnTrade: false }),
+    })
+    expect(off.status).toBe(200)
+    expect((await off.json()).cashLegOnTrade).toBe(false)
+  })
+
+  it("PATCH /api/portfolios/:id — a label is only valid on a virtual portfolio that owns it", async () => {
+    const h = await makeHarness()
+    const a = app(h.db)
+    const ownLabel = "44444444-4444-4444-8444-444444444444"
+    const foreignLabel = "55555555-5555-4555-8555-555555555555"
+    await h.db.insert(labels).values([
+      { id: ownLabel, userId: "user-1", name: "Own", color: "#000000" },
+      { id: foreignLabel, userId: "user-2", name: "Foreign", color: "#000000" },
+    ])
+
+    const casual = await (
+      await a.request("/api/portfolios", {
+        method: "POST",
+        headers: h.headers,
+        body: JSON.stringify({ name: "Casual", baseCurrency: "USD" }),
+      })
+    ).json()
+    const casualLabel = await a.request(`/api/portfolios/${casual.id}`, {
+      method: "PATCH",
+      headers: h.headers,
+      body: JSON.stringify({ labelId: ownLabel }),
+    })
+    expect(casualLabel.status).toBe(422)
+
+    const virtual = await (
+      await a.request("/api/portfolios", {
+        method: "POST",
+        headers: h.headers,
+        body: JSON.stringify({ name: "Virtual", isVirtual: true, labelId: ownLabel, baseCurrency: "USD" }),
+      })
+    ).json()
+
+    // Clearing a virtual portfolio's label would leave it virtual without one.
+    const cleared = await a.request(`/api/portfolios/${virtual.id}`, {
+      method: "PATCH",
+      headers: h.headers,
+      body: JSON.stringify({ labelId: null }),
+    })
+    expect(cleared.status).toBe(422)
+
+    const foreign = await a.request(`/api/portfolios/${virtual.id}`, {
+      method: "PATCH",
+      headers: h.headers,
+      body: JSON.stringify({ labelId: foreignLabel }),
+    })
+    expect(foreign.status).toBe(422)
+  })
+
+  it("PATCH /api/portfolios/:id — virtual portfolio relabels to another owned label", async () => {
+    const h = await makeHarness()
+    const a = app(h.db)
+    const first = "66666666-6666-4666-8666-666666666666"
+    const second = "77777777-7777-4777-8777-777777777777"
+    await h.db.insert(labels).values([
+      { id: first, userId: "user-1", name: "First", color: "#000000" },
+      { id: second, userId: "user-1", name: "Second", color: "#000000" },
+    ])
+    const virtual = await (
+      await a.request("/api/portfolios", {
+        method: "POST",
+        headers: h.headers,
+        body: JSON.stringify({ name: "Virtual", isVirtual: true, labelId: first, baseCurrency: "USD" }),
+      })
+    ).json()
+
+    const relabel = await a.request(`/api/portfolios/${virtual.id}`, {
+      method: "PATCH",
+      headers: h.headers,
+      body: JSON.stringify({ labelId: second }),
+    })
+    expect(relabel.status).toBe(200)
+    const body = await relabel.json()
+    expect(body.labelId).toBe(second)
+    expect(body.isVirtual).toBe(true)
+  })
+
   it("POST /api/portfolios — invalid baseCurrency → 422", async () => {
     const h = await makeHarness()
     const a = app(h.db)
