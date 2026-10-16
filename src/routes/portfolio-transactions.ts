@@ -23,7 +23,7 @@ import {
   labelFilterIds,
   attachLabelCondition,
 } from "../services/labels.js"
-import { convert } from "@marx2/contracts/fx"
+import { convert } from "@marx-org/contracts/fx"
 import { refreshQuotes } from "../services/quotes.js"
 import { notifyTransactionsChanged } from "../services/recalc-queue.js"
 import type { components } from "../generated/api-types.js"

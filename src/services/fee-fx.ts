@@ -1,4 +1,4 @@
-import { isValidRate, settleFee } from "@marx2/contracts/fx"
+import { isValidRate, settleFee } from "@marx-org/contracts/fx"
 import { resolvedFxRate } from "./instruments-fx.js"
 
 export interface FeeFxFields {

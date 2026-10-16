@@ -1,7 +1,7 @@
 /**
  * plan §48.3 — FX data moved to instruments; wallets reads it over the module
  * boundary (`INSTRUMENTS_URL`, already configured for price-bars). The D27
- * cross-rate is resolved server-side (instruments, via @marx2/contracts/fx);
+ * cross-rate is resolved server-side (instruments, via @marx-org/contracts/fx);
  * this client only fetches the resolved pair rate and applies it. Unconfigured
  * or unreachable instruments degrades 1:1 — the old table-miss behavior.
  */

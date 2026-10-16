@@ -3,7 +3,7 @@ import crypto from "node:crypto"
 import { makeHarness, type Harness } from "../routes/test-utils.js"
 import { portfolios, portfolioTransactions, portfolioCashTransactions } from "../db/schema.js"
 import { mockInstrumentsFx, unmockInstrumentsFx } from "../test-fx-mock.js"
-import { crossRate } from "@marx2/contracts/fx"
+import { crossRate } from "@marx-org/contracts/fx"
 import {
   tradeCashEffects,
   cashBalances,

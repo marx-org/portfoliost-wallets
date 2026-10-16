@@ -1,4 +1,4 @@
-import { createSdk, buildMetricsRoute } from "@marx2/otel"
+import { createSdk, buildMetricsRoute } from "@marx-org/otel"
 import { PrometheusExporter } from "@opentelemetry/exporter-prometheus"
 import { getNodeAutoInstrumentations } from "@opentelemetry/auto-instrumentations-node"
 import { RuntimeNodeInstrumentation } from "@opentelemetry/instrumentation-runtime-node"

@@ -6,7 +6,7 @@ import { createPublicShareRoutes } from "./portfolios.js"
 import { createCrossPortfolioTransactionsRoute } from "./portfolio-transactions.js"
 import { makeHarness, priceOpenPositions } from "./test-utils.js"
 import { mockInstrumentsFx, unmockInstrumentsFx } from "../test-fx-mock.js"
-import { crossRate } from "@marx2/contracts/fx"
+import { crossRate } from "@marx-org/contracts/fx"
 import {
   portfolios,
   positions,
