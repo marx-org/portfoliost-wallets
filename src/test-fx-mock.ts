@@ -3,11 +3,11 @@
  *
  * Seeding a EUR-quoted rate table, it stubs `globalThis.fetch` so the
  * instruments client (`/api/internal/fx-rates`) resolves pair cross-rates
- * through `@marx2/contracts/fx` (D27) — the same math the real service runs.
+ * through `@marx-org/contracts/fx` (D27) — the same math the real service runs.
  * Unresolvable pairs 404 (the old "pair missing from the table" behavior).
  */
 import { vi } from "vitest"
-import { crossRate } from "@marx2/contracts/fx"
+import { crossRate } from "@marx-org/contracts/fx"
 
 export interface FxMockOpts {
   /** EUR-quoted table (EUR is the implicit 1). */

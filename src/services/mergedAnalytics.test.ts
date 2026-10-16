@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
-import { crossRate } from "@marx2/contracts/fx"
+import { crossRate } from "@marx-org/contracts/fx"
 import { makeHarness } from "../routes/test-utils.js"
 import { portfolioCashTransactions, portfolios } from "../db/schema.js"
 import { computeSnapshotBatch, type SnapshotRow as BatchRow } from "./backfill.js"

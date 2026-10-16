@@ -14,7 +14,7 @@ import {
 import { sql } from "drizzle-orm"
 import { __resetBackfillRunnerForTests, __backfillRunnerEnqueuedForTests } from "../services/backfill-runner.js"
 import { mockInstrumentsFx, unmockInstrumentsFx } from "../test-fx-mock.js"
-import { crossRate } from "@marx2/contracts/fx"
+import { crossRate } from "@marx-org/contracts/fx"
 
 function app(db: Parameters<typeof makeHarness>[0] extends string ? never : Parameters<typeof createPortfolioRoutes>[0]) {
   const a = new Hono()

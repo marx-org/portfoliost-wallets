@@ -2928,7 +2928,7 @@ export interface components {
             sumOfCurrentPositions: number;
             sumOfCurrentPositionsValue: number;
         };
-        /** @description Instrument research dividend history (`history`) OR the portfolio's own dividend rows (`totalDividends`/`count`/`items`) — see the exposing endpoint. For portfolio items, gross = quantity × price, taxes is the withholding tax, amount is the NET (gross − taxes) per the example-service convention, and convertedAmount is amount in the display currency. The research `/dividends` endpoint always also sets `currency` + `currencySource` (plan §49.6, currency is never null); the portfolio endpoint does not. */
+        /** @description Instrument research dividend history (`history`) OR the portfolio's own dividend rows (`totalDividends`/`count`/`items`) — see the exposing endpoint. For portfolio items, gross = quantity × price, taxes is the withholding tax, amount is the NET (gross − taxes), and convertedAmount is amount in the display currency. The research `/dividends` endpoint always also sets `currency` + `currencySource` (plan §49.6, currency is never null); the portfolio endpoint does not. */
         DividendsData: {
             history?: {
                 date: string;
@@ -3200,11 +3200,11 @@ export interface components {
             capitalBasis: number;
             currentValue: number;
             isPublic: boolean;
-            /** @description Portfolio is a read-only view selected by label. */
+            /** @description Read-only view over the instruments carrying `labelId`. Always false on a casual portfolio. */
             isVirtual?: boolean;
             /**
              * Format: uuid
-             * @description Label selecting instruments for a virtual portfolio.
+             * @description The label whose instruments a virtual portfolio mirrors. Always set when `isVirtual` is true; null on a casual portfolio.
              */
             labelId?: string | null;
             cashLegOnTrade?: boolean;
@@ -3221,14 +3221,26 @@ export interface components {
             /** @description Portfolio-native cash position (plan §62) */
             cash?: components["schemas"]["PortfolioCash"];
         };
+        /**
+         * @description Body for both POST /portfolios and PATCH /portfolios/{id}.
+         *     Virtual portfolios (`isVirtual: true`) are read-only views over the instruments carrying `labelId` — they have no cash ledger. A virtual request therefore REQUIRES `labelId` (an existing label owned by the caller); a casual portfolio (the default — `isVirtual` false or absent) MUST NOT carry one. A virtual create without a label is rejected 422.
+         *     Update semantics: a virtual portfolio's `cashLegOnTrade` is always false, so PATCH rejects enabling the cash leg on a virtual portfolio (422). PATCH also rejects an update that would leave the virtual/casual state invalid — a `labelId` on a casual portfolio, or clearing a virtual portfolio's `labelId` (both 422).
+         *     OpenAPI 3.0 cannot express a conditional requirement like this without changing the shape every consumer compiles against, so the rule is declared here and enforced server-side by the wallets zod refinement and route guards. `scripts_check_spec.py` asserts these fields stay declared.
+         */
         CreatePortfolioRequest: {
             name: string;
             description?: string | null;
             currency?: string;
             isPublic?: boolean;
-            /** @default false */
+            /**
+             * @description True for a virtual portfolio; see the schema description for the label requirement.
+             * @default false
+             */
             isVirtual: boolean;
-            /** Format: uuid */
+            /**
+             * Format: uuid
+             * @description Required when `isVirtual` is true, forbidden otherwise. Null on a casual portfolio.
+             */
             labelId?: string | null;
             cashLegOnTrade?: boolean;
         };
@@ -3725,7 +3737,7 @@ export interface components {
                 issues?: Record<string, never>[];
             };
         };
-        /** @description A portfolio transaction row. For `type: DIVIDEND` the example-service convention applies (verified against the live API 2026-09-26): `price` is the per-share gross dividend, `quantity × price` is the gross total, `taxes` is the withholding tax, and `totalAmount` is the **net** (gross − taxes). BUY/SELL rows keep `totalAmount = quantity × price + fees`. `TRANSFER_OUT`/`TRANSFER_IN` rows are an in-kind movement of the instrument between portfolios: `price` is the source lot's cost carried over unchanged, `totalAmount` is informational, `realizedGainLoss` is absent because nothing was disposed of, and the row has **no cash effect and is not an external flow**. It must not be read as a trade. */
+        /** @description A portfolio transaction row. For `type: DIVIDEND`, `price` is the per-share gross dividend, `quantity × price` is the gross total, `taxes` is the withholding tax, and `totalAmount` is the **net** (gross − taxes). BUY/SELL rows keep `totalAmount = quantity × price + fees`. `TRANSFER_OUT`/`TRANSFER_IN` rows are an in-kind movement of the instrument between portfolios: `price` is the source lot's cost carried over unchanged, `totalAmount` is informational, `realizedGainLoss` is absent because nothing was disposed of, and the row has **no cash effect and is not an external flow**. It must not be read as a trade. */
         Transaction: components["schemas"]["FeeFxFields"] & {
             /** Format: uuid */
             id: string;

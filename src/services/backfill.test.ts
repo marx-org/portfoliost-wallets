@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
-import { crossRate } from "@marx2/contracts/fx"
+import { crossRate } from "@marx-org/contracts/fx"
 import { makeHarness, insertPosition } from "../routes/test-utils.js"
 import { portfolios, portfolioTransactions, positions, valueSnapshots, portfolioCashTransactions, portfolioBackfillMetadata } from "../db/schema.js"
 import { positionInPortfolio } from "../db/position-membership.js"

@@ -65,7 +65,7 @@ interface PriceBarSeries {
    * rate. This is the only place the reason for a missing bar is knowable: the
    * backfill can see that a date is absent from the response but not whether it
    * was never fetched or was fetched and unconvertible. Null until the
-   * `@marx2/contracts` release carrying the field is out — see the note on
+   * `@marx-org/contracts` release carrying the field is out — see the note on
    * `fxCoverageHoles` for what happens without it. */
   unconvertedDates?: string[] | null
 }

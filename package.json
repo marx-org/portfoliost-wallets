@@ -11,12 +11,12 @@
     "db:generate": "drizzle-kit generate",
     "db:migrate": "drizzle-kit migrate",
     "gen:openapi": "tsx src/gen-openapi.ts",
-    "gen:types": "openapi-typescript node_modules/@marx2/contracts/openapi.yaml -o src/generated/api-types.d.ts"
+    "gen:types": "openapi-typescript node_modules/@marx-org/contracts/openapi.yaml -o src/generated/api-types.d.ts"
   },
   "dependencies": {
     "@hono/node-server": "^2.1.1",
-    "@marx2/contracts": "^1.6.73",
-    "@marx2/otel": "^1.0.2",
+    "@marx-org/contracts": "^1.6.77",
+    "@marx-org/otel": "^1.0.3",
     "@opentelemetry/auto-instrumentations-node": "^0.80.0",
     "@opentelemetry/exporter-prometheus": "^0.222.0",
     "@opentelemetry/instrumentation-runtime-node": "^0.35.0",
