@@ -705,7 +705,8 @@ describe("GET /api/portfolios/merged (§46, §41 follow-up 1)", () => {
       const last = body.performance.timeSeries[1]
       expect(last.value).toBeCloseTo(expected, 6)
       expect(body.performance.totalValue).toBeCloseTo(expected, 6)
-      expect(body.performance.totalInvested).toBeCloseTo(800 * usdToPln + 4000 + 2000, 6)
+      expect(body.performance.capitalBasis).toBeCloseTo(800 * usdToPln + 4000 + 2000, 6)
+      expect(body.performance).not.toHaveProperty("totalInvested")
 
       // and explicitly NOT the answer a hardcoded "USD" target would have produced
       const intoUsd = 1100 + 4400 * crossRate("PLN", "USD", { EUR: 1, USD: 1.08, PLN: 4.3 })! + 2200 * crossRate("PLN", "USD", { EUR: 1, USD: 1.08, PLN: 4.3 })!
@@ -745,6 +746,21 @@ describe("GET /api/portfolios/merged (§46, §41 follow-up 1)", () => {
     expect(body.performance.timeSeries).toHaveLength(2)
     expect(body.backfillStatus).toBe("complete")
     expect(body.benchmarks).toEqual([])
+  })
+
+  it("uses capitalBasis for single-portfolio analytics as well as the merged route", async () => {
+    const h = await makeHarness("analytics-capital-basis")
+    const a = app(h.db)
+    const pf = await seedPfWithSnapshots(h, "Only pf", "USD", [
+      { snapshotDate: "2026-09-01", value: "500", invested: "400" },
+      { snapshotDate: "2026-09-02", value: "600", invested: "400" },
+    ])
+
+    const res = await a.request(`/api/portfolios/${pf.id}/analytics?timeframe=ALL`, { headers: h.headers })
+    expect(res.status).toBe(200)
+    const body = await res.json()
+    expect(body.performance.capitalBasis).toBe(400)
+    expect(body.performance).not.toHaveProperty("totalInvested")
   })
 
   it("returns pending AND the other portfolios' series when one has < 2 snapshots and backfillable history", async () => {

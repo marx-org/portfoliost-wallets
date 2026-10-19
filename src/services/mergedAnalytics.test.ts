@@ -166,13 +166,14 @@ describe("sumSnapshotsByDateForwardFilled (§63 follow-up)", () => {
 })
 
 describe("buildMergedPerformance (§46.1 money totals, §83.2 return columns)", () => {
-  it("derives totalValue/totalInvested/totalReturn from the last point", () => {
+  it("derives totalValue/capitalBasis/totalReturn from the last point", () => {
     const perf = buildMergedPerformance([
       merged("2026-01-01", 1000, 800),
       merged("2026-01-02", 1200, 800),
     ])
     expect(perf.totalValue).toBe(1200)
-    expect(perf.totalInvested).toBe(800)
+    expect(perf.capitalBasis).toBe(800)
+    expect(perf).not.toHaveProperty("totalInvested")
     expect(perf.totalReturn).toBe(400)
     expect(perf.totalReturnPercent).toBeCloseTo(50, 6)
     // the "invested" line (cumulative net money-in) rides along per point
@@ -209,7 +210,7 @@ describe("buildMergedPerformance (§46.1 money totals, §83.2 return columns)", 
   it("empty series → zeros", () => {
     const perf = buildMergedPerformance([])
     expect(perf.totalValue).toBe(0)
-    expect(perf.totalInvested).toBe(0)
+    expect(perf.capitalBasis).toBe(0)
     expect(perf.totalReturn).toBe(0)
     expect(perf.totalReturnPercent).toBe(0)
     expect(perf.timeSeries).toEqual([])
@@ -417,7 +418,7 @@ describe("§83.2: the aggregate TWR ignores money moving in or between portfolio
     // …while the money is still visibly there. "Unchanged return" must not mean
     // "deposit ignored".
     expect(perf(DEPOSIT).totalValue).toBe(1800)
-    expect(perf(DEPOSIT).totalInvested).toBe(1800)
+    expect(perf(DEPOSIT).capitalBasis).toBe(1800)
   })
 
   it("an internal transfer between two of the user's own portfolios leaves it unchanged", () => {

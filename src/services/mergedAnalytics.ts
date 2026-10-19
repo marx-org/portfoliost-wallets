@@ -279,9 +279,9 @@ export function buildMergedPerformance(series: MergedPoint[]) {
 
   const last = series[series.length - 1]
   const totalValue = last?.value ?? 0
-  const totalInvested = last?.invested ?? 0
-  const totalReturn = totalValue - totalInvested
-  const totalReturnPercent = totalInvested > 0 ? (totalReturn / totalInvested) * 100 : 0
+  const capitalBasis = last?.invested ?? 0
+  const totalReturn = totalValue - capitalBasis
+  const totalReturnPercent = capitalBasis > 0 ? (totalReturn / capitalBasis) * 100 : 0
 
   // One point is a level, not a return: there is no prior day to difference, so
   // no return is claimed. The old code hard-nulled these unconditionally, which
@@ -316,7 +316,7 @@ export function buildMergedPerformance(series: MergedPoint[]) {
       carriedValue: p.carriedValue ?? undefined,
     })),
     totalValue,
-    totalInvested,
+    capitalBasis,
     totalReturn,
     totalReturnPercent,
     monthlyReturns: buildMonthlyReturns(
