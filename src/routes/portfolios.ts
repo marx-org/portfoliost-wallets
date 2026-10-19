@@ -1489,7 +1489,7 @@ async function resolveAggregateBase(
         performance: {
           timeSeries: [{ date: startDate, value: currentValue }, { date: endDate, value: currentValue }],
           totalValue: currentValue,
-          totalInvested: 0,
+          capitalBasis: 0,
           totalReturn: currentValue,
           totalReturnPercent: 0,
           monthlyReturns: [],
@@ -1527,7 +1527,7 @@ async function resolveAggregateBase(
       return c.json({
         timeframe,
         backfillStatus: "pending",
-        performance: { timeSeries: [], totalValue: 0, totalInvested: 0, totalReturn: 0, totalReturnPercent: 0, monthlyReturns: [] },
+        performance: { timeSeries: [], totalValue: 0, capitalBasis: 0, totalReturn: 0, totalReturnPercent: 0, monthlyReturns: [] },
         benchmarks: [],
       })
     }
@@ -1576,9 +1576,9 @@ async function resolveAggregateBase(
     const lastRow = rows[rows.length - 1]
     const firstRow = rows[0]
     const totalValue = Number(lastRow?.value ?? 0)
-    const totalInvested = Number(lastRow?.invested ?? 0)
-    const totalReturn = totalValue - totalInvested
-    const totalReturnPercent = totalInvested > 0 ? (totalReturn / totalInvested) * 100 : 0
+    const capitalBasis = Number(lastRow?.invested ?? 0)
+    const totalReturn = totalValue - capitalBasis
+    const totalReturnPercent = capitalBasis > 0 ? (totalReturn / capitalBasis) * 100 : 0
 
     // Monthly returns: month-over-month growth of the flow-adjusted TWR index
     const monthlyReturns = buildMonthlyReturns(rows.map((r) => ({ date: r.snapshotDate, cumulativeTwr: r.cumulativeTwr === null ? null : Number(r.cumulativeTwr) })))
@@ -1663,7 +1663,7 @@ async function resolveAggregateBase(
       performance: {
         timeSeries,
         totalValue,
-        totalInvested,
+        capitalBasis,
         totalReturn,
         totalReturnPercent,
         monthlyReturns,
