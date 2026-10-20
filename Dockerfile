@@ -1,3 +1,5 @@
+# syntax=docker/dockerfile:1
+
 FROM public.ecr.aws/docker/library/node:22-alpine
 
 WORKDIR /app
@@ -7,8 +9,9 @@ ARG APP_VERSION=""
 ENV APP_VERSION=${APP_VERSION}
 
 COPY package.json package-lock.json .npmrc ./
-ARG NODE_AUTH_TOKEN=""
-RUN sed -i "s|\${NODE_AUTH_TOKEN}|${NODE_AUTH_TOKEN}|g" .npmrc && npm ci && rm .npmrc
+RUN --mount=type=secret,id=NODE_AUTH_TOKEN,env=NODE_AUTH_TOKEN \
+    npm ci && \
+    rm -f .npmrc
 
 COPY tsconfig.json ./
 COPY drizzle.config.ts ./
