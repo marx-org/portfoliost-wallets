@@ -1,0 +1,21 @@
+name: Dependabot automation
+
+on:
+  pull_request_target:
+    types: [opened, reopened, synchronize, ready_for_review]
+  pull_request_review:
+    types: [submitted]
+
+permissions:
+  contents: read
+  pull-requests: read
+  checks: read
+
+jobs:
+  dependabot:
+    uses: marx-org/pfire-workflows/.github/workflows/dependabot-automerge.yml@19c638349f725dc2e816f28c7d203d127e0d93ce
+    secrets: inherit
+    permissions:
+      contents: write
+      pull-requests: write
+      checks: read

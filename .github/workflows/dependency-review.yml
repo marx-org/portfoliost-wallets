@@ -1,0 +1,12 @@
+name: Dependency review
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  dependency-review:
+    uses: marx-org/pfire-workflows/.github/workflows/dependency-review-reusable.yml@main
