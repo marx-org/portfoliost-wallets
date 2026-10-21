@@ -9,4 +9,4 @@ permissions:
 
 jobs:
   dependency-review:
-    uses: marx-org/pfire-workflows/.github/workflows/dependency-review-reusable.yml@main
+    uses: marx-org/pfire-workflows/.github/workflows/dependency-review-reusable.yml@fbdef004eedaea7eca60573365396b34f41b4513

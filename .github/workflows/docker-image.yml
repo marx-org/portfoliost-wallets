@@ -8,7 +8,7 @@ on:
 
 jobs:
   image:
-    uses: marx-org/pfire-workflows/.github/workflows/docker-image.yml@52789453b62fae888e467d529b467f443c09490d
+    uses: marx-org/pfire-workflows/.github/workflows/docker-image.yml@fbdef004eedaea7eca60573365396b34f41b4513
     with:
       node_version: '22'
       test_command: npm ci && npm run build && npm run test
