@@ -2,7 +2,12 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import { makeHarness } from "../routes/test-utils.js"
 import { portfolios } from "../db/schema.js"
 import { recalcPortfolioSeries } from "./backfill.js"
-import { notifyTransactionsChanged, __resetRecalcQueueForTests } from "./recalc-queue.js"
+import {
+  notifyTransactionsChanged,
+  __resetRecalcQueueForTests,
+  boundedGraceMs,
+  MAX_GRACE_MS,
+} from "./recalc-queue.js"
 
 // The queue's job is scheduling/coalescing — recalcPortfolioSeries itself is
 // covered by backfill.test.ts, so here it is fully mocked and controlled.
@@ -26,6 +31,13 @@ async function seedPortfolio(db: Awaited<ReturnType<typeof makeHarness>>["db"], 
 }
 
 describe("recalc-queue (background recalc on transaction changes)", () => {
+  it("bounds the configured grace period", () => {
+    expect(boundedGraceMs("999999999")).toBe(3000)
+    expect(boundedGraceMs("60000")).toBe(MAX_GRACE_MS)
+    expect(boundedGraceMs("-1")).toBe(3000)
+    expect(boundedGraceMs("not-a-number")).toBe(3000)
+  })
+
   beforeEach(() => {
     vi.useFakeTimers()
   })

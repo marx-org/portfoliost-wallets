@@ -44,6 +44,21 @@ describe("dev identity resolution (opaque mock tokens)", () => {
     expect(identity.id).toBe("mock-7ca31373-93f")
   })
 
+  it("does not fetch an unapproved auth provider URL", async () => {
+    process.env.AUTH_ME_URL = "http://169.254.169.254/latest/meta-data"
+    const fetchFn = vi.fn()
+    vi.stubGlobal("fetch", fetchFn)
+
+    const res = await app().request("/whoami", {
+      method: "POST",
+      headers: { authorization: "Bearer opaque-token" },
+    })
+
+    expect(res.status).toBe(200)
+    expect((await res.json()).id).toBe("mock-opaque-token")
+    expect(fetchFn).not.toHaveBeenCalled()
+  })
+
   it("401 without any credentials", async () => {
     const res = await app().request("/whoami", { method: "POST" })
     expect(res.status).toBe(401)

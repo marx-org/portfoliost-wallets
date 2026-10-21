@@ -17,7 +17,21 @@
  * replicas=1 in the cluster.
  */
 
-const RESTART_DELAY_MS = Number(process.env.RECALC_GRACE_MS ?? 3000)
+export const MAX_RESTART_DELAY_MS = 60_000
+
+export function boundedRestartDelayMs(value: string | undefined): number {
+  switch (value) {
+    case "0": return 0
+    case "1000": return 1000
+    case "3000": return 3000
+    case "5000": return 5000
+    case "10000": return 10000
+    case "60000": return MAX_RESTART_DELAY_MS
+    default: return 3000
+  }
+}
+
+const RESTART_DELAY_MS = boundedRestartDelayMs(process.env.RECALC_GRACE_MS)
 const MAX_AUTO_RESTARTS = 10
 
 interface RunnerTask {

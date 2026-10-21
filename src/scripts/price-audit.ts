@@ -32,6 +32,7 @@ import { sql } from "drizzle-orm"
 import { getDb, closeDb } from "../db/index.js"
 import type { DB } from "../db/index.js"
 import { instrumentsAuthHeaders, resolvedFxRate } from "../services/instruments-fx.js"
+import { internalServiceUrl } from "../services/internal-url.js"
 
 /** Trades deviating from their bar by more than this are flagged. */
 const DEFAULT_TOLERANCE = 0.1
@@ -444,7 +445,11 @@ async function fetchNativeBars(
   to: string,
   authToken: string,
 ): Promise<{ bars: Map<string, number>; claimedCurrency: string | null }> {
-  const base = (process.env.INSTRUMENTS_URL ?? process.env.API_INSTRUMENTS_URL ?? "").replace(/\/$/, "")
+  const base = internalServiceUrl(
+    process.env.INSTRUMENTS_URL ?? process.env.API_INSTRUMENTS_URL,
+    "",
+    "instruments",
+  )
   if (!base) throw new Error("INSTRUMENTS_URL is not set — cannot read price bars")
   const res = await fetch(priceAuditBarsUrl(base, symbol, from, to), {
     headers: instrumentsAuthHeaders(authToken),

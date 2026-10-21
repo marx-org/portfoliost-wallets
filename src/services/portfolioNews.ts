@@ -12,6 +12,7 @@ import { and, eq, inArray } from "drizzle-orm"
 import type { DB } from "../db/index.js"
 import { positions } from "../db/schema.js"
 import { positionInPortfolio } from "../db/position-membership.js"
+import { internalServiceUrl } from "./internal-url.js"
 
 const DEFAULT_TICKER_LIMIT = 50
 const DEFAULT_FETCH_LIMIT = 50
@@ -26,11 +27,11 @@ export const portfolioNewsFetchLimit = () => envInt("NEWS_FETCH_LIMIT", DEFAULT_
 
 /** Read instruments base URL at call time so tests can mutate env freely. */
 export function instrumentsBase(): string {
-  return (
-    process.env.INSTRUMENTS_URL ??
-    process.env.API_INSTRUMENTS_URL ??
-    ""
-  ).replace(/\/$/, "")
+  return internalServiceUrl(
+    process.env.INSTRUMENTS_URL ?? process.env.API_INSTRUMENTS_URL,
+    "",
+    "instruments",
+  )
 }
 
 export interface PortfolioNewsRow {
