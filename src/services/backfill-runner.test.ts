@@ -3,6 +3,8 @@ import {
   abortActiveBackfill,
   enqueueBackfill,
   __resetBackfillRunnerForTests,
+  boundedRestartDelayMs,
+  MAX_RESTART_DELAY_MS,
 } from "./backfill-runner.js"
 
 const GRACE_MS = Number(process.env.RECALC_GRACE_MS ?? 3000)
@@ -32,6 +34,13 @@ function gatedRun(gate: Promise<void>, onAbort: () => void) {
 }
 
 describe("backfill-runner (serialized recompute passes)", () => {
+  it("bounds the configured restart delay", () => {
+    expect(boundedRestartDelayMs("999999999")).toBe(3000)
+    expect(boundedRestartDelayMs("60000")).toBe(MAX_RESTART_DELAY_MS)
+    expect(boundedRestartDelayMs("-1")).toBe(3000)
+    expect(boundedRestartDelayMs("not-a-number")).toBe(3000)
+  })
+
   it("runs passes one at a time, FIFO across portfolios", async () => {
     const order: string[] = []
     let releaseA: () => void = () => {}

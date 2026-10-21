@@ -1,14 +1,46 @@
-const allowedHosts = new Set(["localhost", "127.0.0.1", "::1", "instruments", "users-auth", "auth-provider", "cachest"])
+export type InternalService = "auth" | "instruments" | "users-auth"
 
-export function internalServiceUrl(value: string | undefined, fallback = ""): string {
+/**
+ * Return only the origin of an approved internal service URL.
+ *
+ * An invalid or unapproved value fails closed by returning an empty string;
+ * callers already treat an unavailable upstream as a degraded response. A
+ * path, query, fragment, or embedded credential is rejected so callers cannot
+ * accidentally append an endpoint to an attacker-controlled base URL.
+ */
+export function internalServiceUrl(
+  value: string | undefined,
+  fallback = "",
+  service: InternalService,
+): string {
   const candidate = value || fallback
   if (!candidate) return ""
-  const url = new URL(candidate)
-  const host = url.hostname.toLowerCase()
-  const allowed = allowedHosts.has(host) || host.endsWith(".svc") || host.endsWith(".svc.cluster.local")
-    || (process.env.NODE_ENV !== "production" && (host.endsWith(".test") || host.endsWith("-test")))
-  if (!["http:", "https:"].includes(url.protocol) || !allowed) {
-    throw new Error("upstream URL is not an approved internal service")
+  const origin = candidate.replace(/\/+$/, "")
+
+  // Return literals rather than the configured string. This is both a strict
+  // allowlist and an explicit CodeQL sanitizer: no attacker-controlled bytes
+  // can reach fetch, even when the value merely resembles an approved URL.
+  switch (service) {
+    case "auth":
+      if (origin === "http://auth-provider:4010") return "http://auth-provider:4010"
+      if (origin === "http://example-service-mock:4010") return "http://example-service-mock:4010"
+      return ""
+    case "instruments":
+      if (origin === "http://instruments:3000") return "http://instruments:3000"
+      if (origin === "http://instruments.test") return "http://instruments.test"
+      if (origin === "http://portfoliost-instruments:3000") {
+        return "http://portfoliost-instruments:3000"
+      }
+      if (origin === "http://portfoliost-instruments.pfire.svc.cluster.local:3000") {
+        return "http://portfoliost-instruments.pfire.svc.cluster.local:3000"
+      }
+      return ""
+    case "users-auth":
+      if (origin === "http://users-auth:3000") return "http://users-auth:3000"
+      if (origin === "http://portfoliost-users-auth:3000") return "http://portfoliost-users-auth:3000"
+      if (origin === "http://portfoliost-users-auth.pfire.svc.cluster.local:3000") {
+        return "http://portfoliost-users-auth.pfire.svc.cluster.local:3000"
+      }
+      return ""
   }
-  return url.origin
 }

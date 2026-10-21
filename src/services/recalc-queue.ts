@@ -26,7 +26,21 @@ import type { DB } from "../db/index.js"
 import { recalcPortfolioSeries } from "./backfill.js"
 import { abortActiveBackfill, enqueueBackfill, __resetBackfillRunnerForTests } from "./backfill-runner.js"
 
-const GRACE_MS = Number(process.env.RECALC_GRACE_MS ?? 3000)
+export const MAX_GRACE_MS = 60_000
+
+export function boundedGraceMs(value: string | undefined): number {
+  switch (value) {
+    case "0": return 0
+    case "1000": return 1000
+    case "3000": return 3000
+    case "5000": return 5000
+    case "10000": return 10000
+    case "60000": return MAX_GRACE_MS
+    default: return 3000
+  }
+}
+
+const GRACE_MS = boundedGraceMs(process.env.RECALC_GRACE_MS)
 
 interface Job {
   token: string

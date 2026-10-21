@@ -1,6 +1,13 @@
 import { ISO_CURRENCY } from "./currency.js"
+import { internalServiceUrl } from "./internal-url.js"
 
-const USERS_AUTH_URL = process.env.USERS_AUTH_URL ?? "http://users-auth:3000"
+function usersAuthUrl(): string {
+  return internalServiceUrl(
+    process.env.USERS_AUTH_URL,
+    "http://users-auth:3000",
+    "users-auth",
+  )
+}
 
 /** The only sanctioned default: a user who has genuinely never chosen a base
  * currency. Never used to paper over a read failure (§66.4). */
@@ -39,7 +46,7 @@ export async function preferredBaseCurrency(
   let res: Response
   let body: { uiPreferences?: { baseCurrency?: string } | string }
   try {
-    res = await fetchImpl(`${USERS_AUTH_URL}/api/users/preferences`, {
+    res = await fetchImpl(`${usersAuthUrl()}/api/users/preferences`, {
       headers: authHeaders,
       signal: AbortSignal.timeout(2000),
     })

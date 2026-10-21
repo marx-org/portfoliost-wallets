@@ -22,6 +22,7 @@ import { capitalBasisInvested } from "./transferFlows.js"
 import { recomputeReturnColumns } from "./returnColumns.js"
 import { enqueueBackfill } from "./backfill-runner.js"
 import { splitPortfolioValue } from "./valuation.js"
+import { internalServiceUrl } from "./internal-url.js"
 
 // ── Types ─────────────────────────────────────────────────────────────────
 
@@ -82,11 +83,11 @@ const STALE_MS = Number(process.env.QUOTE_STALE_MS ?? 15 * 60_000)
 
 /** Read instruments base URL at call time so tests can mutate env freely. */
 function instrumentsBase(): string {
-  return (
-    process.env.INSTRUMENTS_URL ??
-    process.env.API_INSTRUMENTS_URL ??
-    ""
-  ).replace(/\/$/, "")
+  return internalServiceUrl(
+    process.env.INSTRUMENTS_URL ?? process.env.API_INSTRUMENTS_URL,
+    "",
+    "instruments",
+  )
 }
 
 // ── Fetchers ──────────────────────────────────────────────────────────────

@@ -15,6 +15,7 @@ import type { DB } from "../db/index.js"
 import { positions } from "../db/schema.js"
 import { positionInPortfolio } from "../db/position-membership.js"
 import type { components } from "../generated/api-types.js"
+import { internalServiceUrl } from "./internal-url.js"
 
 export type CalendarHolding = components["schemas"]["CalendarHolding"]
 
@@ -30,11 +31,11 @@ export const portfolioCalendarSymbolLimit = () =>
 
 /** Read instruments base URL at call time so tests can mutate env freely. */
 export function instrumentsBase(): string {
-  return (
-    process.env.INSTRUMENTS_URL ??
-    process.env.API_INSTRUMENTS_URL ??
-    ""
-  ).replace(/\/$/, "")
+  return internalServiceUrl(
+    process.env.INSTRUMENTS_URL ?? process.env.API_INSTRUMENTS_URL,
+    "",
+    "instruments",
+  )
 }
 
 export interface PortfolioSymbol {

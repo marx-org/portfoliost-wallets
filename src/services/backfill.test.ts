@@ -16,6 +16,8 @@ import {
   recalcPortfolioHistory,
   recalcPortfolioSeries,
   transferCloseForDate,
+  boundedPriceFetchConcurrency,
+  MAX_PRICE_FETCH_CONCURRENCY,
 } from "./backfill.js"
 import { snapshotPortfolioValue, __resetQuoteCachesForTests } from "./quotes.js"
 import { __resetBackfillRunnerForTests } from "./backfill-runner.js"
@@ -53,6 +55,14 @@ function mockPriceBars(
     }),
   )
 }
+
+describe("backfill resource limits", () => {
+  it("bounds per-pass price fetch concurrency", () => {
+    expect(boundedPriceFetchConcurrency("999999999")).toBe(MAX_PRICE_FETCH_CONCURRENCY)
+    expect(boundedPriceFetchConcurrency("0")).toBe(1)
+    expect(boundedPriceFetchConcurrency("not-a-number")).toBe(4)
+  })
+})
 
 // ── helpers ────────────────────────────────────────────────────────────
 

@@ -249,7 +249,16 @@ const HOLES_BRACKET_DAYS = 7
  * of concurrent passes and pegged the node's CPU (2026-09-19 incident). The
  * global runner serializes passes; this caps the per-pass fan-out.
  */
-const PRICE_FETCH_CONCURRENCY = Math.max(1, Number(process.env.RECALC_PRICE_CONCURRENCY ?? 4))
+export const MAX_PRICE_FETCH_CONCURRENCY = 32
+
+export function boundedPriceFetchConcurrency(value: string | undefined): number {
+  const requested = Number(value)
+  return Number.isFinite(requested)
+    ? Math.min(Math.max(Math.floor(requested), 1), MAX_PRICE_FETCH_CONCURRENCY)
+    : 4
+}
+
+const PRICE_FETCH_CONCURRENCY = boundedPriceFetchConcurrency(process.env.RECALC_PRICE_CONCURRENCY)
 
 /** ISO-4217 shape, so a junk `instrument_currency` is not declared as a base. */
 const KNOWN_CURRENCY = /^[A-Z]{3}$/

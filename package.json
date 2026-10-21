@@ -13,6 +13,11 @@
     "gen:openapi": "tsx src/gen-openapi.ts",
     "gen:types": "openapi-typescript node_modules/@marx-org/contracts/openapi.yaml -o src/generated/api-types.d.ts"
   },
+  "overrides": {
+    "@esbuild-kit/core-utils": {
+      "esbuild": "^0.25.0"
+    }
+  },
   "dependencies": {
     "@hono/node-server": "^2.1.5",
     "@marx-org/contracts": "^1.6.77",

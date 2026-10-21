@@ -1,5 +1,6 @@
 import { Context, Next } from "hono"
 import * as jose from "jose"
+import { internalServiceUrl } from "./services/internal-url.js"
 
 export interface UserIdentity {
   id: string
@@ -100,7 +101,7 @@ export async function userIdentityMiddleware(c: Context, next: Next) {
   const authHeader = c.req.header("Authorization")
   if (authHeader?.startsWith("Bearer ")) {
     const token = authHeader.slice(7)
-    const meUrl = process.env.AUTH_ME_URL
+    const meUrl = internalServiceUrl(process.env.AUTH_ME_URL, "", "auth")
     if (meUrl) {
       try {
         const res = await fetch(`${meUrl}/api/auth/me`, {

@@ -5,13 +5,19 @@
  * this client only fetches the resolved pair rate and applies it. Unconfigured
  * or unreachable instruments degrades 1:1 — the old table-miss behavior.
  */
+import { internalServiceUrl } from "./internal-url.js"
+
 export interface FxRateResult {
   rate: number
   asOf: string
 }
 
 export function instrumentsBase(): string {
-  return (process.env.INSTRUMENTS_URL ?? process.env.API_INSTRUMENTS_URL ?? "").replace(/\/$/, "")
+  return internalServiceUrl(
+    process.env.INSTRUMENTS_URL ?? process.env.API_INSTRUMENTS_URL,
+    "",
+    "instruments",
+  )
 }
 
 /**
