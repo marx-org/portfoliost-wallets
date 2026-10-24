@@ -26,6 +26,7 @@ import {
 import { convert } from "@marx-org/contracts/fx"
 import { refreshQuotes } from "../services/quotes.js"
 import { notifyTransactionsChanged } from "../services/recalc-queue.js"
+import { positionMembershipKey, realizedGainLossByMembership } from "../services/realizedGainLoss.js"
 import type { components } from "../generated/api-types.js"
 
 type Label = components["schemas"]["Label"]
@@ -364,6 +365,7 @@ export function positionWire(
   totalValue: number,
   fxRates: Map<string, number | null> = new Map(),
   labels: Label[] = [],
+  realizedGainLoss = 0,
 ) {
   const avg   = Number(p.averageCostBasis)
   const qty   = Number(p.quantity)
@@ -407,7 +409,7 @@ export function positionWire(
     convertedCurrentPrice:      toDisplay(price),
     convertedMarketValue:       toDisplay(mv),
     convertedUnrealizedGainLoss: toDisplay(ugl),
-    realizedGainLoss: 0,
+    realizedGainLoss,
     sector: p.sector,
     industry: p.industry,
     country: p.country,
@@ -607,8 +609,9 @@ export function createTransactionRoutes(db?: DB) {
 
         await tx
           .update(portfolioTransactions)
-          .set({ realizedGainLoss: String(realizedGainLoss) })
+          .set({ positionId: position.id, realizedGainLoss: String(realizedGainLoss) })
           .where(eq(portfolioTransactions.id, inserted.id))
+        inserted.positionId = position.id
       }
 
       // §87.5 — the external cash leg, in the SAME transaction as the trade so a
@@ -973,7 +976,17 @@ export function createTransactionRoutes(db?: DB) {
 
     const totalValue = await openPositionsValue(database, identity.id, portfolioId)
     const fxRates = await resolveRates(c.req.header("Authorization") ?? "", portfolio.baseCurrency, [updated.instrumentCurrency])
-    return c.json(positionWire(updated, portfolio, totalValue, fxRates))
+    const realizedByMembership = await realizedGainLossByMembership(database, identity.id, [portfolioId])
+    return c.json(
+      positionWire(
+        updated,
+        portfolio,
+        totalValue,
+        fxRates,
+        [],
+        realizedByMembership.get(positionMembershipKey(portfolioId, updated.id)) ?? 0,
+      ),
+    )
   })
 
   // DELETE /:id/positions/:positionId — destructively remove the position and
@@ -1344,9 +1357,20 @@ export function createTransactionRoutes(db?: DB) {
       .where(eq(positions.id, result.position.id))
     const totalValue = await openPositionsValue(database, identity.id, portfolioId)
     const fxRates = await resolveRates(c.req.header("Authorization") ?? "", portfolio.baseCurrency, [fresh.instrumentCurrency])
+    const realizedByMembership = await realizedGainLossByMembership(database, identity.id, [portfolioId])
 
     notifyTransactionsChanged(database, portfolioId, c.req.header("Authorization") ?? "")
-    return c.json(positionWire(fresh, portfolio, totalValue, fxRates), 201)
+    return c.json(
+      positionWire(
+        fresh,
+        portfolio,
+        totalValue,
+        fxRates,
+        [],
+        realizedByMembership.get(positionMembershipKey(portfolioId, fresh.id)) ?? 0,
+      ),
+      201,
+    )
   })
 
   // ── E1: GET /:id/positions — full position list (example-service wire shape) ──
@@ -1385,6 +1409,7 @@ export function createTransactionRoutes(db?: DB) {
       .where(and(...conditions))
 
     const totalValue = await openPositionsValue(database, identity.id, portfolioId)
+    const realizedByMembership = await realizedGainLossByMembership(database, identity.id, [portfolioId])
     const fxRates = await resolveRates(c.req.header("Authorization") ?? "", portfolio.baseCurrency, posRows.map((p) => p.instrumentCurrency))
     const labelMap = await labelsForPositions(
       database,
@@ -1393,7 +1418,14 @@ export function createTransactionRoutes(db?: DB) {
 
     return c.json(
       posRows.map((p) =>
-        positionWire(p, portfolio, totalValue, fxRates, labelMap.get(p.id) ?? []),
+        positionWire(
+          p,
+          portfolio,
+          totalValue,
+          fxRates,
+          labelMap.get(p.id) ?? [],
+          realizedByMembership.get(positionMembershipKey(portfolioId, p.id)) ?? 0,
+        ),
       ),
     )
   })

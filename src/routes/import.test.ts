@@ -346,6 +346,7 @@ describe("POST /api/import/transactions (§23.4)", () => {
       .from(portfolioTransactions)
       .where(and(eq(portfolioTransactions.type, "SELL"), eq(portfolioTransactions.portfolioId, portfolioId)))
     expect(Number(sellTx.realizedGainLoss)).toBe(80)
+    expect(sellTx.positionId).toBe(pos.id)
 
     const [portfolio] = await h.db.select().from(portfolios).where(eq(portfolios.id, portfolioId))
     expect(Number(portfolio.totalInvested)).toBe(1000) // = the 1000 deposit (net external flow)
@@ -563,6 +564,7 @@ describe("POST /api/import/transactions (§23.4)", () => {
       .from(portfolioTransactions)
       .where(and(eq(portfolioTransactions.type, "EXPIRATION"), eq(portfolioTransactions.portfolioId, portfolioId)))
     expect(expTx).toHaveLength(1)
+    expect(expTx[0].positionId).toBe(option?.id)
     expect(Number(expTx[0].totalAmount)).toBe(0)
     // the expiry realizes −premium × qty (the short lot's P/L)
     expect(Number(expTx[0].realizedGainLoss)).toBe(-50)
