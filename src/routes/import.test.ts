@@ -352,6 +352,47 @@ describe("POST /api/import/transactions (§23.4)", () => {
     expect(Number(portfolio.totalInvested)).toBe(1000) // = the 1000 deposit (net external flow)
   })
 
+  it("reuses one stock Position across imported close/rebuy lifecycles", async () => {
+    const h = await boot()
+    const { portfolioId } = await seedPortfolio(h)
+
+    const res = await postTransactions(h, [
+      {
+        externalId: "cycle-buy-1",
+        portfolioName: "Transakcje",
+        executedAt: "2024-01-15T10:00:00.000Z",
+        portfolioTx: { portfolioId, type: "BUY", instrumentSymbol: "AAPL", quantity: 10, price: 100, currency: "USD" },
+      },
+      {
+        externalId: "cycle-sell-1",
+        portfolioName: "Transakcje",
+        executedAt: "2024-02-15T10:00:00.000Z",
+        portfolioTx: { portfolioId, type: "SELL", instrumentSymbol: "AAPL", quantity: 10, price: 120, currency: "USD" },
+      },
+      {
+        externalId: "cycle-buy-2",
+        portfolioName: "Transakcje",
+        executedAt: "2024-03-15T10:00:00.000Z",
+        portfolioTx: { portfolioId, type: "BUY", instrumentSymbol: "AAPL", quantity: 2, price: 130, currency: "USD" },
+      },
+    ])
+    expect(res.status).toBe(200)
+    expect((await res.json()).errors).toEqual([])
+
+    const positionRows = await h.db.select().from(positions).where(positionInPortfolio(portfolioId))
+    expect(positionRows).toHaveLength(1)
+    expect(positionRows[0]).toMatchObject({ isOpen: true, closedAt: null })
+    expect(Number(positionRows[0].quantity)).toBe(2)
+    expect(Number(positionRows[0].averageCostBasis)).toBe(130)
+
+    const tradeRows = await h.db
+      .select()
+      .from(portfolioTransactions)
+      .where(eq(portfolioTransactions.portfolioId, portfolioId))
+    expect(new Set(tradeRows.map((trade) => trade.positionId))).toEqual(new Set([positionRows[0].id]))
+    expect(Number(tradeRows.find((trade) => trade.type === "SELL")?.realizedGainLoss)).toBe(200)
+  })
+
   it("persists catalog sector/industry/country and keeps stored values on later buys (plan §28.5)", async () => {
     const h = await boot()
     const { portfolioId } = await seedPortfolio(h)

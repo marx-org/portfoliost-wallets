@@ -27,6 +27,11 @@ import { convert } from "@marx-org/contracts/fx"
 import { refreshQuotes } from "../services/quotes.js"
 import { notifyTransactionsChanged } from "../services/recalc-queue.js"
 import { positionMembershipKey, realizedGainLossByMembership } from "../services/realizedGainLoss.js"
+import {
+  groupPositionMembershipRows,
+  realizedGainLossForPositionGroup,
+  samePositionInstrument,
+} from "../services/positionGroups.js"
 import type { components } from "../generated/api-types.js"
 
 type Label = components["schemas"]["Label"]
@@ -172,7 +177,7 @@ async function upsertPositionOnBuy(
   }
 
   if (!pos) {
-    const [existing] = await tx
+    const matching = await tx
       .select()
       .from(positions)
       .where(
@@ -183,13 +188,42 @@ async function upsertPositionOnBuy(
           eq(positions.isOpen, true),
         ),
       )
-    pos = existing
+    pos = matching.find((candidate) => samePositionInstrument(candidate, { ...body, symbol }))
+  }
+
+  let lifecycleOpenedAt = body.openedAt
+  if (!pos) {
+    // A full close ends a lifecycle, not the stock's membership in the
+    // portfolio. Reopen the canonical closed stock row instead of inserting a
+    // second row for the same instrument. The Holdings read path also collapses
+    // legacy duplicates created before this invariant was enforced.
+    const closed = await tx
+      .select()
+      .from(positions)
+      .where(
+        and(
+          eq(positions.userId, userId),
+          positionInPortfolio(portfolioId),
+          eq(positions.symbol, symbol),
+          eq(positions.isOpen, false),
+        ),
+      )
+    const compatible = closed.filter((candidate) => samePositionInstrument(candidate, { ...body, symbol }))
+    pos = compatible[0]
+    if (pos) {
+      const firstOpenedAt = Math.min(
+        ...compatible.map((candidate) => candidate.openedAt.getTime()),
+        lifecycleOpenedAt?.getTime() ?? Number.POSITIVE_INFINITY,
+      )
+      lifecycleOpenedAt = new Date(firstOpenedAt)
+    }
   }
 
   const costOfTrade = body.quantity * body.price
 
   if (pos) {
-    const oldQty = Number(pos.quantity)
+    const reopening = !pos.isOpen
+    const oldQty = reopening ? 0 : Number(pos.quantity)
     const oldCost = Number(pos.averageCostBasis)
     const newQty = oldQty + body.quantity
     const newAvgCost = round2((oldQty * oldCost + costOfTrade) / newQty)
@@ -205,6 +239,19 @@ async function upsertPositionOnBuy(
         sector: body.sector ?? pos.sector,
         industry: body.industry ?? pos.industry,
         country: body.country ?? pos.country,
+        ...(reopening
+          ? {
+              isOpen: true,
+              closedAt: null,
+              openedAt: lifecycleOpenedAt ?? pos.openedAt,
+              currentPrice: null,
+              priceAsOf: null,
+              marketValue: null,
+              unrealizedGainLoss: null,
+              dayChange: null,
+              dayChangePercent: null,
+            }
+          : {}),
         updatedAt: new Date(),
       })
       .where(eq(positions.id, pos.id))
@@ -584,6 +631,7 @@ export function createTransactionRoutes(db?: DB) {
           ...body,
           symbol,
           feesSettled: fx.feesSettled,
+          openedAt: executedAt,
         })
         // back-link positionId on the transaction
         if (position) {
@@ -1389,44 +1437,46 @@ export function createTransactionRoutes(db?: DB) {
     // prices nothing. Do not reintroduce the call here — §76.1's route tests
     // assert value_snapshots/current_value/price_as_of are unchanged by a GET.
     const labelsFilter = labelFilterIds(c.req.query("labels"))
-    const conditions: SQL[] = [
-      eq(positions.userId, identity.id),
-      positionInPortfolio(portfolioId),
-    ]
-    attachLabelCondition(
-      conditions,
-      positions.id,
-      positionLabels.positionId,
-      positionLabels.labelId,
-      positionLabels,
-      database,
-      labelsFilter,
-    )
-
     const posRows = await database
       .select()
       .from(positions)
-      .where(and(...conditions))
+      .where(and(eq(positions.userId, identity.id), positionInPortfolio(portfolioId)))
+    const groups = groupPositionMembershipRows(
+      posRows.map((position) => ({ position, portfolioId })),
+    )
 
     const totalValue = await openPositionsValue(database, identity.id, portfolioId)
     const realizedByMembership = await realizedGainLossByMembership(database, identity.id, [portfolioId])
-    const fxRates = await resolveRates(c.req.header("Authorization") ?? "", portfolio.baseCurrency, posRows.map((p) => p.instrumentCurrency))
     const labelMap = await labelsForPositions(
       database,
       posRows.map((p) => p.id),
     )
+    const visibleGroups = groups.filter((group) =>
+      labelsFilter.length === 0 || group.members.some((member) => {
+        const memberLabels = labelMap.get(member.id) ?? []
+        return labelsFilter.every((labelId) => memberLabels.some((label) => label.id === labelId))
+      }),
+    )
+    const fxRates = await resolveRates(
+      c.req.header("Authorization") ?? "",
+      portfolio.baseCurrency,
+      visibleGroups.map((group) => group.position.instrumentCurrency),
+    )
 
     return c.json(
-      posRows.map((p) =>
-        positionWire(
-          p,
+      visibleGroups.map((group) => {
+        const groupLabels = new Map(
+          group.members.flatMap((member) => labelMap.get(member.id) ?? []).map((label) => [label.id, label]),
+        )
+        return positionWire(
+          group.position,
           portfolio,
           totalValue,
           fxRates,
-          labelMap.get(p.id) ?? [],
-          realizedByMembership.get(positionMembershipKey(portfolioId, p.id)) ?? 0,
-        ),
-      ),
+          [...groupLabels.values()].sort((a, b) => a.name.localeCompare(b.name)),
+          realizedGainLossForPositionGroup(portfolioId, group.members, realizedByMembership),
+        )
+      }),
     )
   })
 

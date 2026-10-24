@@ -36,7 +36,8 @@ import {
   positionWire,
 } from "./portfolio-transactions.js"
 import { labelsForPositions } from "../services/labels.js"
-import { positionMembershipKey, realizedGainLossByMembership } from "../services/realizedGainLoss.js"
+import { realizedGainLossByMembership } from "../services/realizedGainLoss.js"
+import { groupPositionMembershipRows, realizedGainLossForPositionGroup } from "../services/positionGroups.js"
 import type { components } from "../generated/api-types.js"
 
 type Portfolio = components["schemas"]["Portfolio"]
@@ -808,21 +809,20 @@ async function resolveAggregateBase(
       .innerJoin(positionPortfolios, eq(positionPortfolios.positionId, positions.id))
       .innerJoin(portfolios, eq(portfolios.id, positionPortfolios.portfolioId))
       .where(eq(positions.userId, identity.id))
-      // The performers cards sort on P/L; ordering here means the SPA does not
-      // have to, and the response is already in display order.
-      .orderBy(sql`${positions.unrealizedGainLoss} DESC NULLS LAST`)
+
+    const groups = groupPositionMembershipRows(rows)
 
     const totalsByPortfolio = await openPositionsValueByPortfolio(database, identity.id)
     const realizedByMembership = await realizedGainLossByMembership(
       database,
       identity.id,
-      rows.map((row) => row.portfolioId),
+      groups.map((row) => row.portfolioId),
     )
     // One rate table per DISTINCT portfolio base among these rows — `resolveRates`
     // resolves INTO a single target, and a position belongs to exactly one
     // portfolio, so a row must be converted at its own portfolio's rate or its
     // `converted*` fields answer a question nobody asked.
-    const bases = [...new Set(rows.map((r) => (r.baseCurrency ?? "USD").toUpperCase()))]
+    const bases = [...new Set(groups.map((r) => (r.baseCurrency ?? "USD").toUpperCase()))]
     const authToken = c.req.header("Authorization") ?? ""
     const fxByBase = new Map<string, Map<string, number | null>>()
     for (const base of bases) {
@@ -831,7 +831,7 @@ async function resolveAggregateBase(
         await resolveRates(
           authToken,
           base,
-          rows.filter((r) => (r.baseCurrency ?? "USD").toUpperCase() === base).map((r) => r.position.instrumentCurrency),
+          groups.filter((r) => (r.baseCurrency ?? "USD").toUpperCase() === base).map((r) => r.position.instrumentCurrency),
         ),
       )
     }
@@ -840,8 +840,11 @@ async function resolveAggregateBase(
       rows.map((r) => r.position.id),
     )
 
-    const wire = rows.map((r) => {
+    const wire = groups.map((r) => {
       const base = (r.baseCurrency ?? "USD").toUpperCase()
+      const groupLabels = new Map(
+        r.members.flatMap((member) => labelMap.get(member.id) ?? []).map((label) => [label.id, label]),
+      )
       return {
         ...positionWire(
           r.position,
@@ -853,11 +856,15 @@ async function resolveAggregateBase(
           // account into one currency here would put `displayCurrency` in
           // conflict with the portfolio the row belongs to.
           fxByBase.get(base) ?? new Map<string, number | null>(),
-          labelMap.get(r.position.id) ?? [],
-          realizedByMembership.get(positionMembershipKey(r.portfolioId, r.position.id)) ?? 0,
+          [...groupLabels.values()].sort((a, b) => a.name.localeCompare(b.name)),
+          realizedGainLossForPositionGroup(r.portfolioId, r.members, realizedByMembership),
         ),
         portfolioName: r.portfolioName,
       }
+    }).sort((a, b) => {
+      if (a.unrealizedGainLoss == null) return b.unrealizedGainLoss == null ? 0 : 1
+      if (b.unrealizedGainLoss == null) return -1
+      return b.unrealizedGainLoss - a.unrealizedGainLoss
     })
 
     return c.json({ positions: wire })
@@ -1100,7 +1107,10 @@ async function resolveAggregateBase(
       .from(positions)
       .where(positionInPortfolio(id))
 
-    const posSummaries = posRows.map((pos) => ({
+    const positionGroups = groupPositionMembershipRows(
+      posRows.map((position) => ({ position, portfolioId: id })),
+    )
+    const posSummaries = positionGroups.map(({ position: pos }) => ({
       id: pos.id,
       portfolioId: id,
       symbol: pos.symbol,

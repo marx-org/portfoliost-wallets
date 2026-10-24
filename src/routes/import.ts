@@ -32,6 +32,7 @@ import { notifyTransactionsChanged } from "../services/recalc-queue.js"
 import { transferCloseForDate } from "../services/backfill.js"
 import { resolveServiceToken } from "../services/instruments-fx.js"
 import { rateToBase } from "../services/cashLedger.js"
+import { samePositionInstrument } from "../services/positionGroups.js"
 import type { components } from "../generated/api-types.js"
 
 type ImportPortfolioBootstrapResponse = components["schemas"]["ImportPortfolioBootstrapResponse"]
@@ -221,13 +222,15 @@ async function upsertImportPositionOnBuy(
     direction?: "LONG" | "SHORT" | null
     optionType?: "CALL" | "PUT" | null
     contractSize?: number | null
+    strikePrice?: number | null
+    expirationDate?: string | null
     sector?: string | null
     industry?: string | null
     country?: string | null
   },
 ) {
   const symbol = body.symbol.toUpperCase()
-  const [existing] = await tx
+  const candidates = await tx
     .select()
     .from(positions)
     .where(
@@ -235,15 +238,19 @@ async function upsertImportPositionOnBuy(
         eq(positions.userId, userId),
         positionInPortfolio(portfolioId),
         eq(positions.symbol, symbol),
-        eq(positions.isOpen, true),
         body.direction
           ? eq(positions.direction, body.direction)
           : sql`${positions.direction} is null or ${positions.direction} = 'LONG'`,
       ),
     )
+  const compatible = candidates.filter((candidate) => samePositionInstrument(candidate, { ...body, symbol }))
+  const existing = compatible.find((candidate) => candidate.isOpen)
+    ?? compatible.filter((candidate) => !candidate.isOpen)
+      .sort((a, b) => a.openedAt.getTime() - b.openedAt.getTime())[0]
 
   if (existing) {
-    const oldQty = Number(existing.quantity)
+    const reopening = !existing.isOpen
+    const oldQty = reopening ? 0 : Number(existing.quantity)
     const oldCost = Number(existing.averageCostBasis)
     const newQty = oldQty + body.quantity
     const newAvgCost = round2((oldQty * oldCost + body.quantity * body.price) / newQty)
@@ -261,9 +268,25 @@ async function upsertImportPositionOnBuy(
         companyName: body.instrumentName ?? existing.companyName,
         instrumentCurrency: body.listingCurrency?.toUpperCase() ?? body.currency,
         assetType: body.assetType ?? existing.assetType,
+        contractSize: body.contractSize != null ? String(body.contractSize) : existing.contractSize,
+        optionType: body.optionType ?? existing.optionType,
+        strikePrice: body.strikePrice != null ? String(body.strikePrice) : existing.strikePrice,
+        expirationDate: body.expirationDate ?? existing.expirationDate,
         sector: body.sector ?? existing.sector,
         industry: body.industry ?? existing.industry,
         country: body.country ?? existing.country,
+        ...(reopening
+          ? {
+              isOpen: true,
+              closedAt: null,
+              currentPrice: null,
+              priceAsOf: null,
+              marketValue: null,
+              unrealizedGainLoss: null,
+              dayChange: null,
+              dayChangePercent: null,
+            }
+          : {}),
         updatedAt: new Date(),
       })
       .where(eq(positions.id, existing.id))
@@ -283,6 +306,8 @@ async function upsertImportPositionOnBuy(
       assetType: body.assetType,
       contractSize: body.contractSize != null ? String(body.contractSize) : null,
       direction: body.direction ?? null,
+      strikePrice: body.strikePrice != null ? String(body.strikePrice) : null,
+      expirationDate: body.expirationDate ?? null,
       optionType: body.optionType ?? null,
       sector: body.sector ?? "Other",
       industry: body.industry ?? "Other",
