@@ -210,6 +210,61 @@ describe("Portfolio transactions (§15 Phase C)", () => {
     expect(holding.unrealizedGainLoss).toBe(12.34)
   })
 
+  it("reuses the stock Position after a full close and accumulates realized P/L", async () => {
+    const h = await makeHarness()
+    const a = app(h.db)
+    const portfolio = await (
+      await a.request("/api/portfolios", {
+        method: "POST",
+        headers: h.headers,
+        body: JSON.stringify({ name: "P", currency: "USD" }),
+      })
+    ).json()
+
+    const firstBuy = await a.request(`/api/portfolios/${portfolio.id}/transactions`, {
+      method: "POST",
+      headers: h.headers,
+      body: JSON.stringify({ ...BUY_BODY, executedAt: "2024-01-01T00:00:00.000Z" }),
+    })
+    const initialPositionId = (await firstBuy.json()).position.id
+    const close = await a.request(`/api/portfolios/${portfolio.id}/transactions`, {
+      method: "POST",
+      headers: h.headers,
+      body: JSON.stringify({
+        ...SELL_BODY,
+        quantity: BUY_BODY.quantity,
+        executedAt: "2024-02-01T00:00:00.000Z",
+      }),
+    })
+    expect(close.status).toBe(201)
+
+    const rebuy = await a.request(`/api/portfolios/${portfolio.id}/transactions`, {
+      method: "POST",
+      headers: h.headers,
+      body: JSON.stringify({
+        ...BUY_BODY,
+        quantity: 2,
+        price: 180,
+        executedAt: "2024-03-01T00:00:00.000Z",
+      }),
+    })
+    expect(rebuy.status).toBe(201)
+    const rebuyBody = await rebuy.json()
+    expect(rebuyBody.position.id).toBe(initialPositionId)
+
+    const positionRows = await h.db.select().from(positions).where(positionInPortfolio(portfolio.id))
+    expect(positionRows).toHaveLength(1)
+    expect(positionRows[0]).toMatchObject({ id: initialPositionId, isOpen: true, closedAt: null })
+    expect(Number(positionRows[0].quantity)).toBe(2)
+    expect(positionRows[0].openedAt.toISOString()).toBe("2024-01-01T00:00:00.000Z")
+
+    const response = await a.request(`/api/portfolios/${portfolio.id}/positions`, { headers: h.headers })
+    const body = await response.json()
+    expect(body).toHaveLength(1)
+    expect(body[0]).toMatchObject({ id: initialPositionId, isOpen: true, realizedGainLoss: 197.5 })
+    expect(body[0].unrealizedGainLoss).toBeNull()
+  })
+
   it("full close retains per-portfolio and consolidated rows without changing open-only valuation", async () => {
     const h = await makeHarness()
     const a = app(h.db)
@@ -324,19 +379,35 @@ describe("Portfolio transactions (§15 Phase C)", () => {
     const portfolio = await portfolioRes.json()
 
     const openedAt = new Date("2024-01-01T00:00:00.000Z")
-    const [unambiguous] = await h.db
+    const [firstLifecycle] = await h.db
+      .insert(positions)
+      .values({
+        userId: h.user.id,
+        symbol: "AAPL",
+        quantity: "0",
+        averageCostBasis: "100",
+        instrumentCurrency: "USD",
+        isOpen: false,
+        openedAt,
+        closedAt: new Date("2024-01-10T00:00:00.000Z"),
+      })
+      .returning()
+    const [currentLifecycle] = await h.db
       .insert(positions)
       .values({
         userId: h.user.id,
         symbol: "AAPL",
         quantity: "5",
-        averageCostBasis: "100",
+        averageCostBasis: "110",
         instrumentCurrency: "USD",
         isOpen: true,
-        openedAt,
+        openedAt: new Date("2024-01-15T00:00:00.000Z"),
       })
       .returning()
-    await h.db.insert(positionPortfolios).values({ positionId: unambiguous.id, portfolioId: portfolio.id })
+    await h.db.insert(positionPortfolios).values([
+      { positionId: firstLifecycle.id, portfolioId: portfolio.id },
+      { positionId: currentLifecycle.id, portfolioId: portfolio.id },
+    ])
 
     const overlapStart = new Date("2024-01-15T00:00:00.000Z")
     const [overlapA, overlapB] = await h.db
@@ -395,7 +466,7 @@ describe("Portfolio transactions (§15 Phase C)", () => {
       {
         userId: h.user.id,
         portfolioId: portfolio.id,
-        positionId: unambiguous.id,
+        positionId: firstLifecycle.id,
         type: "EXPIRATION",
         instrumentSymbol: "AAPL",
         quantity: "1",
@@ -404,13 +475,39 @@ describe("Portfolio transactions (§15 Phase C)", () => {
         realizedGainLoss: "2.5",
         executedAt,
       },
+      {
+        userId: h.user.id,
+        portfolioId: portfolio.id,
+        positionId: currentLifecycle.id,
+        type: "SELL",
+        instrumentSymbol: "AAPL",
+        quantity: "1",
+        price: "115",
+        currency: "USD",
+        realizedGainLoss: "5",
+        executedAt,
+      },
     ])
 
     const response = await a.request(`/api/portfolios/${portfolio.id}/positions`, { headers: h.headers })
     const body = await response.json()
-    expect(body.find((position: { id: string }) => position.id === unambiguous.id).realizedGainLoss).toBe(42.5)
-    expect(body.find((position: { id: string }) => position.id === overlapA.id).realizedGainLoss).toBe(0)
-    expect(body.find((position: { id: string }) => position.id === overlapB.id).realizedGainLoss).toBe(0)
+    expect(body).toHaveLength(2)
+    const aapl = body.find((position: { symbol: string }) => position.symbol === "AAPL")
+    expect(aapl.id).toBe(currentLifecycle.id)
+    expect(aapl.quantity).toBe(5)
+    expect(aapl.realizedGainLoss).toBe(47.5)
+    const msft = body.find((position: { symbol: string }) => position.symbol === "MSFT")
+    expect(msft.realizedGainLoss).toBe(0)
+
+    const detailResponse = await a.request(`/api/portfolios/${portfolio.id}`, { headers: h.headers })
+    const detail = await detailResponse.json()
+    expect(detail.positions).toHaveLength(2)
+    expect(detail.positions.find((position: { symbol: string }) => position.symbol === "AAPL").quantity).toBe(5)
+
+    const consolidatedResponse = await a.request("/api/portfolios/positions", { headers: h.headers })
+    const consolidated = (await consolidatedResponse.json()).positions
+    expect(consolidated).toHaveLength(2)
+    expect(consolidated.find((position: { symbol: string }) => position.symbol === "AAPL").realizedGainLoss).toBe(47.5)
   })
 
   it("POST /:id/transactions — SELL more than owned → 422", async () => {
@@ -2909,8 +3006,9 @@ describe("GET /api/portfolios/positions (§83.5)", () => {
     })
     expect(sell.status).toBe(201)
 
-    // Model a shared position membership with stale historical valuation. It
-    // must render once for each portfolio but never contribute to current totals.
+    // Model a shared closed lifecycle with stale historical valuation. The
+    // pension already has an open AAPL lifecycle, so its membership must collapse
+    // to that one stock row and exclude the closed row from current valuation.
     await h.db.insert(positionPortfolios).values({ positionId: closedPosition.id, portfolioId: pension.id })
     await h.db.update(positions).set({ marketValue: "1000" }).where(eq(positions.id, closedPosition.id))
     const [openPosition] = await h.db
@@ -2922,12 +3020,18 @@ describe("GET /api/portfolios/positions (§83.5)", () => {
     const res = await a.request("/api/portfolios/positions", { headers: h.headers })
     expect(res.status).toBe(200)
     const { positions: rows } = await res.json()
-    expect(rows).toHaveLength(3)
-    const closedRows = rows.filter((row: { id: string }) => row.id === closedPosition.id)
-    expect(closedRows).toHaveLength(2)
-    expect(closedRows.map((row: { portfolioName: string }) => row.portfolioName).sort()).toEqual(["Broker", "Pension"])
-    expect(closedRows.map((row: { portfolioId: string }) => row.portfolioId).sort()).toEqual([broker.id, pension.id].sort())
-    expect(closedRows.every((row: { isOpen: boolean; closedAt: string | null }) => !row.isOpen && row.closedAt)).toBe(true)
+    expect(rows).toHaveLength(2)
+    const brokerRow = rows.find((row: { portfolioId: string }) => row.portfolioId === broker.id)
+    expect(brokerRow).toMatchObject({ id: closedPosition.id, portfolioName: "Broker", isOpen: false })
+    expect(brokerRow.closedAt).toBeTruthy()
+    const pensionRow = rows.find((row: { portfolioId: string }) => row.portfolioId === pension.id)
+    expect(pensionRow).toMatchObject({
+      id: openPosition.id,
+      portfolioName: "Pension",
+      isOpen: true,
+      quantity: 5,
+      marketValue: 200,
+    })
     expect(new Set(rows.map((row: { id: string }) => row.id)).size).toBe(2)
 
     const totals = await openPositionsValueByPortfolio(h.db, "user-1")
