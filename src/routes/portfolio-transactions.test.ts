@@ -1507,6 +1507,7 @@ describe("Position CRUD (§15 D4.2–D4.8)", () => {
         quantity: 1,
         price: 550,
         assetType: "OPTION",
+        direction: "SHORT",
         contractSize: 100,
         optionType: "CALL",
         strikePrice: 320,
@@ -1516,10 +1517,22 @@ describe("Position CRUD (§15 D4.2–D4.8)", () => {
     expect(res.status).toBe(201)
     const p = await res.json()
     expect(p.assetType).toBe("OPTION")
+    expect(p.direction).toBe("SHORT")
     expect(p.contractSize).toBe(100)
     expect(p.optionType).toBe("CALL")
     expect(p.strikePrice).toBe(320)
     expect(p.expirationDate).toBe("2026-09-19")
+
+    const positionsRes = await a.request(`/api/portfolios/${portfolio.id}/positions`, { headers: h.headers })
+    const [listed] = await positionsRes.json()
+    expect(listed).toMatchObject({
+      assetType: "OPTION",
+      direction: "SHORT",
+      optionType: "CALL",
+      contractSize: 100,
+      strikePrice: 320,
+      expirationDate: "2026-09-19",
+    })
   })
 
   it("POST /:id/positions — missing price+averageCostBasis → 422", async () => {

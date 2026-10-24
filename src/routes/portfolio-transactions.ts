@@ -35,6 +35,10 @@ import {
 import type { components } from "../generated/api-types.js"
 
 type Label = components["schemas"]["Label"]
+type PositionDerivativeMetadata = Pick<
+  components["schemas"]["Position"],
+  "direction" | "optionType" | "strikePrice" | "expirationDate"
+>
 
 const scale8 = (n: number) => n.toFixed(8)
 const round2 = (n: number) => Math.round(n * 100) / 100
@@ -433,6 +437,13 @@ export function positionWire(
     return rate != null ? round2(nativeValue * rate) : null
   }
 
+  const derivativeMetadata = {
+    direction: serializePositionDirection(p.direction),
+    optionType: serializePositionOptionType(p.optionType),
+    strikePrice: p.strikePrice != null ? Number(p.strikePrice) : null,
+    expirationDate: p.expirationDate,
+  } satisfies PositionDerivativeMetadata
+
   return {
     id: p.id,
     portfolioId: portfolio.id,
@@ -440,10 +451,7 @@ export function positionWire(
     companyName: p.companyName,
     assetType: p.assetType,
     contractSize: p.contractSize != null ? Number(p.contractSize) : null,
-    direction: p.direction,
-    optionType: p.optionType,
-    strikePrice: p.strikePrice != null ? Number(p.strikePrice) : null,
-    expirationDate: p.expirationDate,
+    ...derivativeMetadata,
     purchaseCurrency: p.purchaseCurrency,
     instrumentCurrency: instrCcy,
     quantity: qty,
@@ -485,6 +493,18 @@ export function positionWire(
     // required — see openapi.yaml `Position.portfolioName`).
     portfolioName: undefined,
   }
+}
+
+function serializePositionDirection(value: string | null): PositionDerivativeMetadata["direction"] {
+  if (value == null) return null
+  if (value === "LONG" || value === "SHORT") return value
+  throw new Error(`Unsupported Position.direction value: ${value}`)
+}
+
+function serializePositionOptionType(value: string | null): PositionDerivativeMetadata["optionType"] {
+  if (value == null) return null
+  if (value === "CALL" || value === "PUT") return value
+  throw new Error(`Unsupported Position.optionType value: ${value}`)
 }
 
 /**
