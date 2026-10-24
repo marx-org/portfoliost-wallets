@@ -783,8 +783,9 @@ async function resolveAggregateBase(
     }
   })
 
-  // GET /api/portfolios/positions — every OPEN position across every portfolio
-  // of the identity (§83.5), each carrying its portfolio's name.
+  // GET /api/portfolios/positions — every position across every portfolio of
+  // the identity, open or closed, with one row per portfolio membership and
+  // its portfolio context.
   //
   // NOT `/held-stocks`: that aggregates BY SYMBOL across portfolios, drops P/L
   // entirely and hardcodes `changePercent: 0`. The cumulative Performance tab
@@ -805,7 +806,7 @@ async function resolveAggregateBase(
       .from(positions)
       .innerJoin(positionPortfolios, eq(positionPortfolios.positionId, positions.id))
       .innerJoin(portfolios, eq(portfolios.id, positionPortfolios.portfolioId))
-      .where(and(eq(positions.userId, identity.id), eq(positions.isOpen, true)))
+      .where(eq(positions.userId, identity.id))
       // The performers cards sort on P/L; ordering here means the SPA does not
       // have to, and the response is already in display order.
       .orderBy(sql`${positions.unrealizedGainLoss} DESC NULLS LAST`)

@@ -3,13 +3,14 @@ import { Hono } from "hono"
 import { createPortfolioRoutes } from "./portfolios.js"
 import { createPortfolioCashRoutes } from "./portfolio-cash.js"
 import { createPublicShareRoutes } from "./portfolios.js"
-import { createCrossPortfolioTransactionsRoute } from "./portfolio-transactions.js"
+import { createCrossPortfolioTransactionsRoute, openPositionsValueByPortfolio } from "./portfolio-transactions.js"
 import { makeHarness, priceOpenPositions } from "./test-utils.js"
 import { mockInstrumentsFx, unmockInstrumentsFx } from "../test-fx-mock.js"
 import { crossRate } from "@marx-org/contracts/fx"
 import {
   portfolios,
   positions,
+  positionPortfolios,
   portfolioTransactions,
   portfolioCashTransactions,
   valueSnapshots,
@@ -212,13 +213,17 @@ describe("Portfolio transactions (§15 Phase C)", () => {
     await a.request(`/api/portfolios/${portfolio.id}/transactions`, {
       method: "POST",
       headers: h.headers,
-      body: JSON.stringify({ ...SELL_BODY, quantity: 10 }),
+      body: JSON.stringify({ ...SELL_BODY, quantity: 10, executedAt: "2024-03-04T12:30:00.000Z" }),
     })
 
     const detail = await a.request(`/api/portfolios/${portfolio.id}`, { headers: h.headers })
     const body = await detail.json()
     expect(body.positions.length).toBe(1)
     expect(body.positions[0].isOpen).toBe(false)
+    const [closed] = await h.db.select().from(positions).where(positionInPortfolio(portfolio.id))
+    expect(closed).toBeTruthy()
+    expect(closed.closedAt?.toISOString()).toBe("2024-03-04T12:30:00.000Z")
+    expect(await h.db.select().from(positionPortfolios).where(eq(positionPortfolios.positionId, closed.id))).toHaveLength(1)
   })
 
   it("POST /:id/transactions — SELL more than owned → 422", async () => {
@@ -534,6 +539,7 @@ describe("Portfolio transactions (§15 Phase C)", () => {
     const txRes = await a.request(`/api/portfolios/${portfolio.id}/transactions`, { headers: h.headers })
     const txBody = await txRes.json()
     expect(txBody.items.length).toBe(0)
+    expect(await h.db.select().from(positions).where(eq(positions.id, detailBody.positions[0].id))).toHaveLength(0)
 
     const listRes = await a.request(`/api/portfolios/${portfolio.id}/positions`, { headers: h.headers })
     expect(await listRes.json()).toEqual([])
@@ -2621,8 +2627,8 @@ describe("§76.1 — GET read paths are pure (no writes)", () => {
 })
 
 /**
- * §83.5 — `GET /api/portfolios/positions`: every open position across every
- * portfolio, labelled with the portfolio it came from.
+ * §83.5 — `GET /api/portfolios/positions`: every position across every
+ * portfolio, labelled with the portfolio membership it came from.
  *
  * The scoping assertion is the load-bearing one. This route takes NO id, so
  * "another user's positions never appear" is the only thing standing between it
@@ -2698,6 +2704,48 @@ describe("GET /api/portfolios/positions (§83.5)", () => {
     const pnl = body.positions.map((p: { unrealizedGainLoss: number }) => p.unrealizedGainLoss)
     expect(pnl).toEqual([1500, 1000, 0])
     expect(body.positions[0].symbol).toBe("MSFT")
+  })
+
+  it("returns closed rows per membership without adding them to open totals", async () => {
+    const h = await makeHarness()
+    const a = app(h.db)
+    const broker = await makePf(h, "Broker")
+    const pension = await makePf(h, "Pension")
+    await buy(h, broker.id, "AAPL", 10, 100)
+    await buy(h, pension.id, "AAPL", 5, 120)
+
+    const [closedPosition] = await h.db.select().from(positions).where(positionInPortfolio(broker.id))
+    const sell = await a.request(`/api/portfolios/${broker.id}/transactions`, {
+      method: "POST",
+      headers: h.headers,
+      body: JSON.stringify({ ...SELL_BODY, quantity: 10, executedAt: "2024-03-04T12:30:00.000Z" }),
+    })
+    expect(sell.status).toBe(201)
+
+    // Model a shared position membership with stale historical valuation. It
+    // must render once for each portfolio but never contribute to current totals.
+    await h.db.insert(positionPortfolios).values({ positionId: closedPosition.id, portfolioId: pension.id })
+    await h.db.update(positions).set({ marketValue: "1000" }).where(eq(positions.id, closedPosition.id))
+    const [openPosition] = await h.db
+      .select()
+      .from(positions)
+      .where(positionInPortfolio(pension.id))
+    await h.db.update(positions).set({ marketValue: "200" }).where(eq(positions.id, openPosition.id))
+
+    const res = await a.request("/api/portfolios/positions", { headers: h.headers })
+    expect(res.status).toBe(200)
+    const { positions: rows } = await res.json()
+    expect(rows).toHaveLength(3)
+    const closedRows = rows.filter((row: { id: string }) => row.id === closedPosition.id)
+    expect(closedRows).toHaveLength(2)
+    expect(closedRows.map((row: { portfolioName: string }) => row.portfolioName).sort()).toEqual(["Broker", "Pension"])
+    expect(closedRows.map((row: { portfolioId: string }) => row.portfolioId).sort()).toEqual([broker.id, pension.id].sort())
+    expect(closedRows.every((row: { isOpen: boolean; closedAt: string | null }) => !row.isOpen && row.closedAt)).toBe(true)
+    expect(new Set(rows.map((row: { id: string }) => row.id)).size).toBe(2)
+
+    const totals = await openPositionsValueByPortfolio(h.db, "user-1")
+    expect(totals.get(broker.id) ?? 0).toBe(0)
+    expect(totals.get(pension.id)).toBe(200)
   })
 
   it("never returns another identity's positions", async () => {

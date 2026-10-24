@@ -249,6 +249,7 @@ async function processSell(
     currency: string
     positionId?: string
     feesSettled: number
+    executedAt: Date
   },
 ) {
   const symbol = body.symbol.toUpperCase()
@@ -301,7 +302,7 @@ async function processSell(
   }
   if (newQty < 1e-9) {
     updateData.isOpen = false
-    updateData.closedAt = new Date()
+    updateData.closedAt = body.executedAt
   }
 
   const [updated] = await tx
@@ -598,6 +599,7 @@ export function createTransactionRoutes(db?: DB) {
           currency: txCcy,
           positionId: body.positionId,
           feesSettled: fx.feesSettled,
+          executedAt,
         })
         if ("error" in sellResult) return { error: sellResult.error }
         position = sellResult.position
@@ -974,9 +976,10 @@ export function createTransactionRoutes(db?: DB) {
     return c.json(positionWire(updated, portfolio, totalValue, fxRates))
   })
 
-  // DELETE /:id/positions/:positionId — remove position + its transactions
-  // (cash effect is derived by replay, plan §62), mock parity:
-  // returns the closed position
+  // DELETE /:id/positions/:positionId — destructively remove the position and
+  // its transactions (cash effect is derived by replay, plan §62). The closed
+  // response is a compatibility snapshot only; normal SELL closure retains the
+  // position row and its history.
   routes.delete("/:id/positions/:positionId", async (c) => {
     const identity = c.get("userIdentity")
     const database = getDb()!
