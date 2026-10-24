@@ -20,7 +20,7 @@
   },
   "dependencies": {
     "@hono/node-server": "^2.1.5",
-    "@marx-org/contracts": "^1.6.77",
+    "@marx-org/contracts": "^1.6.79",
     "@marx-org/otel": "^1.0.3",
     "@opentelemetry/auto-instrumentations-node": "^0.81.2",
     "@opentelemetry/exporter-prometheus": "^0.223.0",

@@ -1028,10 +1028,10 @@ export interface paths {
             cookie?: never;
         };
         /**
-         * Open positions across all portfolios
-         * @description Every OPEN position the identity holds, across every one of its portfolios, each carrying `portfolioName`.
+         * Open and closed positions across all portfolios
+         * @description Every position/portfolio membership across all of the identity's portfolios, including both open and closed positions. A position shared across portfolios appears once per membership, carrying that row's `portfolioId` and `portfolioName`; rows are not aggregated by symbol.
          *     Distinct from `/portfolios/held-stocks`, which aggregates BY SYMBOL and so cannot answer "which portfolio is this row from" — the question the cumulative Performance tab's performer cards exist to answer, since the same ticker can be held in two portfolios with very different results. Unlike `/portfolios/{id}/positions` it needs no id, and it deliberately returns no portfolio-specific derived state.
-         *     `portfolioName` is null on the per-portfolio route, which keeps satisfying the same `Position` schema unchanged.
+         *     `isOpen` distinguishes currently held positions from retained closed history, and `closedAt` records when a position was fully closed (null while it remains open). `portfolioName` is null on the per-portfolio route, which keeps satisfying the same `Position` schema unchanged.
          */
         get: operations["getAllPositions"];
         put?: never;
@@ -3448,12 +3448,32 @@ export interface components {
         Position: {
             /** Format: uuid */
             id: string;
-            /** Format: uuid */
+            /**
+             * Format: uuid
+             * @description Portfolio membership represented by this row; a position shared across portfolios appears once per membership.
+             */
             portfolioId: string;
             symbol: string;
             companyName: string;
             assetType: string;
             contractSize?: number | null;
+            /**
+             * @description Position direction; SHORT identifies a short derivative position.
+             * @enum {string|null}
+             */
+            direction?: "LONG" | "SHORT" | null;
+            /**
+             * @description Derivative option type; null for non-option positions.
+             * @enum {string|null}
+             */
+            optionType?: "CALL" | "PUT" | null;
+            /** @description Option strike price in instrument currency, when known. */
+            strikePrice?: number | null;
+            /**
+             * Format: date
+             * @description Option expiration date, when known.
+             */
+            expirationDate?: string | null;
             purchaseCurrency: string;
             instrumentCurrency: string;
             quantity: number;
@@ -3466,9 +3486,14 @@ export interface components {
             sector: string;
             industry: string;
             country: string;
+            /** @description True when the position is currently held; false when it is closed and retained as history. */
             isOpen: boolean;
             /** Format: date-time */
             openedAt: string;
+            /**
+             * Format: date-time
+             * @description Timestamp when the position was fully closed; null while the position is open.
+             */
             closedAt?: string | null;
             currentPrice: number;
             priceSource: string;
@@ -3488,6 +3513,7 @@ export interface components {
                 [key: string]: unknown;
             };
             displayCurrency: string;
+            /** @description Portfolio name for consolidated rows; null on the per-portfolio route, where the route already supplies this context. */
             portfolioName?: string | null;
             logo?: string | null;
             labels?: components["schemas"]["Label"][];
