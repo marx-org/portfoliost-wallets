@@ -193,7 +193,7 @@ describe("Portfolio transactions (§15 Phase C)", () => {
     expect(body.positions[0].isOpen).toBe(true)
   })
 
-  it("POST /:id/transactions — SELL all closes position", async () => {
+  it("full close retains per-portfolio and consolidated rows without changing open-only valuation", async () => {
     const h = await makeHarness()
     const a = app(h.db)
 
@@ -224,6 +224,62 @@ describe("Portfolio transactions (§15 Phase C)", () => {
     expect(closed).toBeTruthy()
     expect(closed.closedAt?.toISOString()).toBe("2024-03-04T12:30:00.000Z")
     expect(await h.db.select().from(positionPortfolios).where(eq(positionPortfolios.positionId, closed.id))).toHaveLength(1)
+
+    // Keep a non-zero stale quote on the closed row so a totals regression
+    // cannot pass just because a zero-quantity position happens to value at 0.
+    await h.db.update(positions).set({ marketValue: "500" }).where(eq(positions.id, closed.id))
+
+    // Add one live holding to make the open-only denominator observable.
+    const openBuy = await a.request(`/api/portfolios/${portfolio.id}/transactions`, {
+      method: "POST",
+      headers: h.headers,
+      body: JSON.stringify({ ...BUY_BODY, symbol: "MSFT", instrumentName: "Microsoft Corporation", quantity: 1, price: 100, fees: 0 }),
+    })
+    expect(openBuy.status).toBe(201)
+    await priceOpenPositions(h.db, portfolio.id, 100)
+
+    // Share the retained position with another portfolio: the consolidated
+    // route must return one owner-context row for each membership.
+    const secondPortfolioRes = await a.request("/api/portfolios", {
+      method: "POST",
+      headers: h.headers,
+      body: JSON.stringify({ name: "P2", currency: "USD" }),
+    })
+    expect(secondPortfolioRes.status).toBe(201)
+    const secondPortfolio = await secondPortfolioRes.json()
+    await h.db.insert(positionPortfolios).values({ positionId: closed.id, portfolioId: secondPortfolio.id })
+
+    const portfolioPositionsRes = await a.request(`/api/portfolios/${portfolio.id}/positions`, { headers: h.headers })
+    expect(portfolioPositionsRes.status).toBe(200)
+    const portfolioPositions = await portfolioPositionsRes.json()
+    expect(portfolioPositions).toHaveLength(2)
+    const closedPortfolioRow = portfolioPositions.find((position: { id: string }) => position.id === closed.id)
+    expect(closedPortfolioRow).toMatchObject({
+      id: closed.id,
+      portfolioId: portfolio.id,
+      isOpen: false,
+      closedAt: "2024-03-04T12:30:00.000Z",
+    })
+    const openPortfolioRow = portfolioPositions.find((position: { symbol: string }) => position.symbol === "MSFT")
+    expect(openPortfolioRow.percentOfPortfolio).toBe(100)
+
+    const consolidatedRes = await a.request("/api/portfolios/positions", { headers: h.headers })
+    expect(consolidatedRes.status).toBe(200)
+    const consolidatedBody = await consolidatedRes.json()
+    const consolidated = consolidatedBody.positions
+    expect(Array.isArray(consolidated)).toBe(true)
+    const closedMembershipRows = consolidated.filter((position: { id: string }) => position.id === closed.id)
+    expect(closedMembershipRows).toHaveLength(2)
+    expect(closedMembershipRows.map((position: { portfolioId: string }) => position.portfolioId).sort()).toEqual(
+      [portfolio.id, secondPortfolio.id].sort(),
+    )
+    expect(closedMembershipRows.map((position: { portfolioName: string }) => position.portfolioName).sort()).toEqual(["P", "P2"])
+    expect(closedMembershipRows.every((position: { isOpen: boolean; closedAt: string }) =>
+      !position.isOpen && position.closedAt === "2024-03-04T12:30:00.000Z",
+    )).toBe(true)
+    const openConsolidatedRow = consolidated.find((position: { symbol: string }) => position.symbol === "MSFT")
+    expect(openConsolidatedRow).toMatchObject({ portfolioId: portfolio.id, portfolioName: "P", isOpen: true })
+    expect(openConsolidatedRow.percentOfPortfolio).toBe(100)
   })
 
   it("POST /:id/transactions — SELL more than owned → 422", async () => {
