@@ -36,6 +36,7 @@ import {
   positionWire,
 } from "./portfolio-transactions.js"
 import { labelsForPositions } from "../services/labels.js"
+import { positionMembershipKey, realizedGainLossByMembership } from "../services/realizedGainLoss.js"
 import type { components } from "../generated/api-types.js"
 
 type Portfolio = components["schemas"]["Portfolio"]
@@ -812,6 +813,11 @@ async function resolveAggregateBase(
       .orderBy(sql`${positions.unrealizedGainLoss} DESC NULLS LAST`)
 
     const totalsByPortfolio = await openPositionsValueByPortfolio(database, identity.id)
+    const realizedByMembership = await realizedGainLossByMembership(
+      database,
+      identity.id,
+      rows.map((row) => row.portfolioId),
+    )
     // One rate table per DISTINCT portfolio base among these rows — `resolveRates`
     // resolves INTO a single target, and a position belongs to exactly one
     // portfolio, so a row must be converted at its own portfolio's rate or its
@@ -848,6 +854,7 @@ async function resolveAggregateBase(
           // conflict with the portfolio the row belongs to.
           fxByBase.get(base) ?? new Map<string, number | null>(),
           labelMap.get(r.position.id) ?? [],
+          realizedByMembership.get(positionMembershipKey(r.portfolioId, r.position.id)) ?? 0,
         ),
         portfolioName: r.portfolioName,
       }

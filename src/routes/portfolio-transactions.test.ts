@@ -191,6 +191,23 @@ describe("Portfolio transactions (§15 Phase C)", () => {
     expect(body.positions.length).toBe(1)
     expect(Number(body.positions[0].quantity)).toBe(5)
     expect(body.positions[0].isOpen).toBe(true)
+
+    const [storedSell] = await h.db
+      .select()
+      .from(portfolioTransactions)
+      .where(eq(portfolioTransactions.id, sellBody.id))
+    expect(storedSell.positionId).toBe(body.positions[0].id)
+
+    // Realized P/L is a separate historical amount; current unrealized P/L is
+    // left as the quote-derived position value.
+    await h.db
+      .update(positions)
+      .set({ unrealizedGainLoss: "12.34" })
+      .where(eq(positions.id, body.positions[0].id))
+    const positionsRes = await a.request(`/api/portfolios/${portfolio.id}/positions`, { headers: h.headers })
+    const [holding] = await positionsRes.json()
+    expect(holding.realizedGainLoss).toBeCloseTo(97.5, 2)
+    expect(holding.unrealizedGainLoss).toBe(12.34)
   })
 
   it("full close retains per-portfolio and consolidated rows without changing open-only valuation", async () => {
@@ -248,6 +265,17 @@ describe("Portfolio transactions (§15 Phase C)", () => {
     expect(secondPortfolioRes.status).toBe(201)
     const secondPortfolio = await secondPortfolioRes.json()
     await h.db.insert(positionPortfolios).values({ positionId: closed.id, portfolioId: secondPortfolio.id })
+    await h.db.insert(portfolioTransactions).values({
+      userId: h.user.id,
+      portfolioId: secondPortfolio.id,
+      positionId: closed.id,
+      type: "EXPIRATION",
+      instrumentSymbol: closed.symbol,
+      quantity: "1",
+      price: "0",
+      currency: "USD",
+      realizedGainLoss: "31.25",
+    })
 
     const portfolioPositionsRes = await a.request(`/api/portfolios/${portfolio.id}/positions`, { headers: h.headers })
     expect(portfolioPositionsRes.status).toBe(200)
@@ -259,6 +287,7 @@ describe("Portfolio transactions (§15 Phase C)", () => {
       portfolioId: portfolio.id,
       isOpen: false,
       closedAt: "2024-03-04T12:30:00.000Z",
+      realizedGainLoss: 197.5,
     })
     const openPortfolioRow = portfolioPositions.find((position: { symbol: string }) => position.symbol === "MSFT")
     expect(openPortfolioRow.percentOfPortfolio).toBe(100)
@@ -274,12 +303,114 @@ describe("Portfolio transactions (§15 Phase C)", () => {
       [portfolio.id, secondPortfolio.id].sort(),
     )
     expect(closedMembershipRows.map((position: { portfolioName: string }) => position.portfolioName).sort()).toEqual(["P", "P2"])
+    expect(closedMembershipRows.map((position: { portfolioId: string; realizedGainLoss: number }) => [position.portfolioId, position.realizedGainLoss]))
+      .toEqual(expect.arrayContaining([[portfolio.id, 197.5], [secondPortfolio.id, 31.25]]))
     expect(closedMembershipRows.every((position: { isOpen: boolean; closedAt: string }) =>
       !position.isOpen && position.closedAt === "2024-03-04T12:30:00.000Z",
     )).toBe(true)
     const openConsolidatedRow = consolidated.find((position: { symbol: string }) => position.symbol === "MSFT")
     expect(openConsolidatedRow).toMatchObject({ portfolioId: portfolio.id, portfolioName: "P", isOpen: true })
     expect(openConsolidatedRow.percentOfPortfolio).toBe(100)
+  })
+
+  it("attributes legacy realized transactions only to one matching position lifecycle", async () => {
+    const h = await makeHarness()
+    const a = app(h.db)
+    const portfolioRes = await a.request("/api/portfolios", {
+      method: "POST",
+      headers: h.headers,
+      body: JSON.stringify({ name: "P", currency: "USD" }),
+    })
+    const portfolio = await portfolioRes.json()
+
+    const openedAt = new Date("2024-01-01T00:00:00.000Z")
+    const [unambiguous] = await h.db
+      .insert(positions)
+      .values({
+        userId: h.user.id,
+        symbol: "AAPL",
+        quantity: "5",
+        averageCostBasis: "100",
+        instrumentCurrency: "USD",
+        isOpen: true,
+        openedAt,
+      })
+      .returning()
+    await h.db.insert(positionPortfolios).values({ positionId: unambiguous.id, portfolioId: portfolio.id })
+
+    const overlapStart = new Date("2024-01-15T00:00:00.000Z")
+    const [overlapA, overlapB] = await h.db
+      .insert(positions)
+      .values([
+        {
+          userId: h.user.id,
+          symbol: "MSFT",
+          quantity: "0",
+          averageCostBasis: "100",
+          instrumentCurrency: "USD",
+          isOpen: false,
+          openedAt,
+          closedAt: new Date("2024-03-01T00:00:00.000Z"),
+        },
+        {
+          userId: h.user.id,
+          symbol: "MSFT",
+          quantity: "2",
+          averageCostBasis: "110",
+          instrumentCurrency: "USD",
+          isOpen: true,
+          openedAt: overlapStart,
+        },
+      ])
+      .returning()
+    await h.db.insert(positionPortfolios).values([
+      { positionId: overlapA.id, portfolioId: portfolio.id },
+      { positionId: overlapB.id, portfolioId: portfolio.id },
+    ])
+
+    const executedAt = new Date("2024-02-01T12:00:00.000Z")
+    await h.db.insert(portfolioTransactions).values([
+      {
+        userId: h.user.id,
+        portfolioId: portfolio.id,
+        type: "SELL",
+        instrumentSymbol: "AAPL",
+        quantity: "1",
+        price: "140",
+        currency: "USD",
+        realizedGainLoss: "40",
+        executedAt,
+      },
+      {
+        userId: h.user.id,
+        portfolioId: portfolio.id,
+        type: "EXPIRATION",
+        instrumentSymbol: "MSFT",
+        quantity: "1",
+        price: "0",
+        currency: "USD",
+        realizedGainLoss: "99",
+        executedAt,
+      },
+      {
+        userId: h.user.id,
+        portfolioId: portfolio.id,
+        positionId: unambiguous.id,
+        type: "EXPIRATION",
+        instrumentSymbol: "AAPL",
+        quantity: "1",
+        price: "0",
+        currency: "USD",
+        realizedGainLoss: "2.5",
+        executedAt,
+      },
+    ])
+
+    const response = await a.request(`/api/portfolios/${portfolio.id}/positions`, { headers: h.headers })
+    const body = await response.json()
+    expect(body.find((position: { id: string }) => position.id === unambiguous.id).realizedGainLoss).toBe(42.5)
+    expect(body.find((position: { id: string }) => position.id === overlapA.id).realizedGainLoss).toBe(0)
+    expect(body.find((position: { id: string }) => position.id === overlapB.id).realizedGainLoss).toBe(0)
   })
 
   it("POST /:id/transactions — SELL more than owned → 422", async () => {
