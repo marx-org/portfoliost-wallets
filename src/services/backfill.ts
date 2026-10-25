@@ -384,9 +384,9 @@ export async function transferCloseForDate(
  * Context for cash-flow-mirrored benchmark overlay (D50).
  *
  * The benchmark no longer projects a pure price index: instead it mirrors the
- * portfolio's actual deployment schedule into the benchmark instrument, so a
- * BUY of $X in the portfolio "buys" $X of the benchmark at that day's close and
- * a SELL of $Y "sells" $Y (fractional shares allowed, clamped ≥ 0).
+ * portfolio's external cash deployment schedule into the benchmark instrument,
+ * so a deposit of $X "buys" $X of the benchmark at that day's close and a
+ * withdrawal of $Y "sells" $Y (fractional shares allowed, clamped ≥ 0).
  */
 export interface BenchmarkBuildContext {
   db: DB
@@ -399,7 +399,7 @@ export interface BenchmarkBuildContext {
    */
   portfolioId?: string
   baseCurrency: string
-  /** daily net cash flow (BUY − SELL) in base currency, keyed by YYYY-MM-DD */
+  /** daily net external cash flow in base currency, keyed by YYYY-MM-DD */
   flows: Map<string, number>
   /** portfolio invested capital at the window start (seeds the mirror) */
   seedInvested: number
@@ -409,7 +409,10 @@ export interface BenchmarkBuildContext {
 export interface BenchmarkReturn {
   symbol: string
   name: string
+  /** Flow-adjusted return index used by yearly/excess calculations. */
   timeSeries: Array<{ date: string; value: number }>
+  /** Absolute synthetic benchmark value in the portfolio base currency. */
+  absoluteTimeSeries: Array<{ date: string; value: number }>
   returnPercent: number
   volatility: number
 }
@@ -469,14 +472,18 @@ export async function buildBenchmarkSeries(
 
   // A withdrawal can exhaust the synthetic benchmark position even though the
   // portfolio later remains invested. Do not publish a permanently flat zero
-  // benchmark in that case; fall back to the raw indexed market series, which
-  // is the useful comparison once flow mirroring has no capital left to model.
+  // indexed benchmark in that case; fall back to the raw indexed market series,
+  // which is the useful return comparison once flow mirroring has no capital
+  // left to model. The absolute series remains the real mirror, including the
+  // zero after the synthetic position was exhausted, so the value chart still
+  // reflects the portfolio's withdrawal schedule.
   const exhausted = mirrorValues.slice(1).some((value) => value <= 0)
-  const output = exhausted
+  const indexedOutput = exhausted
     ? points.map((p) => Math.round((p.close / firstClose) * 100 * 100) / 100)
     : columns
-  const timeSeries = points.map((p, i) => ({ date: p.date, value: output[i] }))
-  const returnPercent = Math.round((output[output.length - 1] - 100) * 100) / 100
+  const timeSeries = points.map((p, i) => ({ date: p.date, value: indexedOutput[i] }))
+  const absoluteTimeSeries = points.map((p, i) => ({ date: p.date, value: mirrorValues[i] }))
+  const returnPercent = Math.round((indexedOutput[indexedOutput.length - 1] - 100) * 100) / 100
 
   // Volatility stays a property of the raw price series (unchanged from D46).
   let volatility = 0
@@ -493,7 +500,7 @@ export async function buildBenchmarkSeries(
     }
   }
 
-  return { symbol, name, timeSeries, returnPercent, volatility }
+  return { symbol, name, timeSeries, absoluteTimeSeries, returnPercent, volatility }
 }
 
 // ── helpers ───────────────────────────────────────────────────────────────

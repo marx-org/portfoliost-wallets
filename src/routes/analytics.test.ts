@@ -121,8 +121,35 @@ describe("GET /:id/analytics — benchmarks (D46/D48)", () => {
     expect(b.symbol).toBe("SPY")
     expect(b.timeSeries[0].value).toBe(100)               // normalized start
     expect(b.timeSeries[b.timeSeries.length - 1].value).toBe(140) // 140/100×100
+    expect(b.absoluteTimeSeries.map((p: { value: number }) => p.value)).toEqual([900, 990, 1080, 1170, 1260])
     expect(b.returnPercent).toBe(40)                       // (140/100−1)×100
     expect(b.timeSeries).toHaveLength(5)
+  })
+
+  it("returns the absolute mirror with a visible mid-period deposit step", async () => {
+    const { db, user, headers } = await makeHarness("abe-absolute-deposit")
+    const a = app(db)
+    const pf = await seedPortfolio(db, user.id)
+    const days = calendarDays("2026-07-01", "2026-07-03")
+    await seedSnapshots(db, pf.id, days)
+    await db.insert(portfolioCashTransactions).values({
+      userId: user.id,
+      portfolioId: pf.id,
+      type: "DEPOSIT",
+      amount: "1000",
+      currency: "USD",
+      transactionDate: days[1],
+    })
+    mockPriceBars({ SPY: { dates: days, closes: [100, 100, 100] } })
+
+    const res = await a.request(`/api/portfolios/${pf.id}/analytics?timeframe=1Y&benchmarks=SPY`, { headers })
+    expect(res.status).toBe(200)
+    const b = (await res.json()).benchmarks[0]
+
+    // TWR correctly stays flat because the price is flat, while the absolute
+    // synthetic investment visibly receives the deposit on the second day.
+    expect(b.timeSeries.map((p: { value: number }) => p.value)).toEqual([100, 100, 100])
+    expect(b.absoluteTimeSeries.map((p: { value: number }) => p.value)).toEqual([900, 1900, 1900])
   })
 
   it("keeps the benchmark line moving over a multi-year ALL window", async () => {
@@ -165,6 +192,7 @@ describe("GET /:id/analytics — benchmarks (D46/D48)", () => {
     expect(res.status).toBe(200)
     const b = (await res.json()).benchmarks[0]
     expect(b.timeSeries.map((p: { value: number }) => p.value)).toEqual([100, 110, 120, 130, 140])
+    expect(b.absoluteTimeSeries.map((p: { value: number }) => p.value)).toEqual([900, 990, 0, 0, 0])
     expect(b.returnPercent).toBe(40)
   })
 
@@ -350,6 +378,8 @@ describe("GET /:id/analytics — benchmarks (D46/D48)", () => {
     const b = body.benchmarks[0]
     expect(b.timeSeries[0].value).toBe(100)
     expect(b.timeSeries[b.timeSeries.length - 1].value).toBeCloseTo(133.74, 1)
+    expect(b.absoluteTimeSeries[3].value).toBeCloseTo(2670, 4)
+    expect(b.absoluteTimeSeries[4].value).toBeCloseTo(2875.38, 2)
     expect(b.returnPercent).toBeCloseTo(33.74, 1)
   })
 
