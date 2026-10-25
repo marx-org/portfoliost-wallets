@@ -121,7 +121,7 @@ describe("GET /:id/analytics — benchmarks (D46/D48)", () => {
     expect(b.symbol).toBe("SPY")
     expect(b.timeSeries[0].value).toBe(100)               // normalized start
     expect(b.timeSeries[b.timeSeries.length - 1].value).toBe(140) // 140/100×100
-    expect(b.absoluteTimeSeries.map((p: { value: number }) => p.value)).toEqual([900, 990, 1080, 1170, 1260])
+    expect(b.absoluteTimeSeries.map((p: { value: number }) => p.value)).toEqual([1000, 1100, 1200, 1300, 1400])
     expect(b.returnPercent).toBe(40)                       // (140/100−1)×100
     expect(b.timeSeries).toHaveLength(5)
   })
@@ -149,7 +149,7 @@ describe("GET /:id/analytics — benchmarks (D46/D48)", () => {
     // TWR correctly stays flat because the price is flat, while the absolute
     // synthetic investment visibly receives the deposit on the second day.
     expect(b.timeSeries.map((p: { value: number }) => p.value)).toEqual([100, 100, 100])
-    expect(b.absoluteTimeSeries.map((p: { value: number }) => p.value)).toEqual([900, 1900, 1900])
+    expect(b.absoluteTimeSeries.map((p: { value: number }) => p.value)).toEqual([1000, 2000, 2000])
   })
 
   it("keeps the benchmark line moving over a multi-year ALL window", async () => {
@@ -192,7 +192,7 @@ describe("GET /:id/analytics — benchmarks (D46/D48)", () => {
     expect(res.status).toBe(200)
     const b = (await res.json()).benchmarks[0]
     expect(b.timeSeries.map((p: { value: number }) => p.value)).toEqual([100, 110, 120, 130, 140])
-    expect(b.absoluteTimeSeries.map((p: { value: number }) => p.value)).toEqual([900, 990, 0, 0, 0])
+    expect(b.absoluteTimeSeries.map((p: { value: number }) => p.value)).toEqual([1000, 1100, 0, 0, 0])
     expect(b.returnPercent).toBe(40)
   })
 
@@ -365,7 +365,9 @@ describe("GET /:id/analytics — benchmarks (D46/D48)", () => {
     const pf = await seedPortfolio(db, user.id)
     const days = calendarDays("2026-07-01", "2026-07-05")
     await seedSnapshots(db, pf.id, days)
-    // A $1500 BUY on 2026-07-04 (SPY close 130) — seeded with invested=900.
+    // A $1500 BUY on 2026-07-04 (SPY close 130) — the visible portfolio value
+    // starts at 1000 while invested capital is 900, proving the benchmark uses
+    // the chart's common starting value rather than the invested line.
     await seedBuy(db, user.id, pf.id, 10, 150, "2026-07-04", 1500)
     mockPriceBars({ SPY: { dates: days, closes: days.map((_, i) => 100 + i * 10) } }) // 100..140
 
@@ -377,10 +379,10 @@ describe("GET /:id/analytics — benchmarks (D46/D48)", () => {
     // indexed TWR line because capital was deployed at 130, not at 100.
     const b = body.benchmarks[0]
     expect(b.timeSeries[0].value).toBe(100)
-    expect(b.timeSeries[b.timeSeries.length - 1].value).toBeCloseTo(133.74, 1)
-    expect(b.absoluteTimeSeries[3].value).toBeCloseTo(2670, 4)
-    expect(b.absoluteTimeSeries[4].value).toBeCloseTo(2875.38, 2)
-    expect(b.returnPercent).toBeCloseTo(33.74, 1)
+    expect(b.timeSeries[b.timeSeries.length - 1].value).toBeCloseTo(134.02, 1)
+    expect(b.absoluteTimeSeries[3].value).toBeCloseTo(2800, 4)
+    expect(b.absoluteTimeSeries[4].value).toBeCloseTo(3015.38, 2)
+    expect(b.returnPercent).toBeCloseTo(34.02, 1)
   })
 
   it("returns portfolio series unaffected by benchmark mirroring", async () => {
