@@ -3582,7 +3582,13 @@ export interface components {
             benchmarks?: {
                 symbol?: string;
                 name?: string;
+                /** @description Flow-adjusted return index for statistics, starting at 100. This is not the absolute benchmark value plotted on the performance chart. */
                 timeSeries?: {
+                    date?: string;
+                    value?: number;
+                }[];
+                /** @description Absolute flow-mirrored benchmark value in the portfolio base currency. This is the series plotted beside the absolute portfolio and invested values; deposits and withdrawals are visible as value steps. */
+                absoluteTimeSeries?: {
                     date?: string;
                     value?: number;
                 }[];

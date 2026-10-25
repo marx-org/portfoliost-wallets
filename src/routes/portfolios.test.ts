@@ -898,6 +898,7 @@ describe("GET /api/portfolios/merged (§46, §41 follow-up 1)", () => {
       // 100 → 100 → 110. The mirror BOUGHT on the 2nd, so the deposit day is flat;
       // a value-ratio mirror would print 200 there and report +120% overall.
       expect(line).toEqual([100, 100, 110])
+      expect(body.benchmarks[0].absoluteTimeSeries.map((p: { value: number }) => p.value)).toEqual([1000, 2000, 2200])
       expect(body.benchmarks[0].returnPercent).toBe(10)
     })
 
@@ -930,6 +931,7 @@ describe("GET /api/portfolios/merged (§46, §41 follow-up 1)", () => {
       const body = await res.json()
       expect(body.benchmarks[0].returnPercent).toBe(10)
       expect(body.benchmarks[0].timeSeries.map((p: { value: number }) => p.value)).toEqual([100, 100, 110])
+      expect(body.benchmarks[0].absoluteTimeSeries.map((p: { value: number }) => p.value)).toEqual([1000, 1000, 1100])
     })
 
     it("drops unknown tickers, and stays [] with no benchmarks param", async () => {

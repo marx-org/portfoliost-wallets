@@ -1032,7 +1032,14 @@ async function resolveAggregateBase(
       // Unknown tickers are dropped, exactly as `/:id/analytics` does.
       benchmarks = built
         .filter((s): s is NonNullable<typeof s> => s !== null)
-        .map((s) => ({ symbol: s.symbol, name: s.name, timeSeries: s.timeSeries, returnPercent: s.returnPercent, volatility: s.volatility }))
+        .map((s) => ({
+          symbol: s.symbol,
+          name: s.name,
+          timeSeries: s.timeSeries,
+          absoluteTimeSeries: s.absoluteTimeSeries,
+          returnPercent: s.returnPercent,
+          volatility: s.volatility,
+        }))
     }
 
     return c.json({
@@ -1656,7 +1663,14 @@ async function resolveAggregateBase(
       )
       benchmarks = series
         .filter((s): s is NonNullable<typeof s> => s !== null)
-        .map((s) => ({ symbol: s.symbol, name: s.name, timeSeries: s.timeSeries, returnPercent: s.returnPercent, volatility: s.volatility }))
+        .map((s) => ({
+          symbol: s.symbol,
+          name: s.name,
+          timeSeries: s.timeSeries,
+          absoluteTimeSeries: s.absoluteTimeSeries,
+          returnPercent: s.returnPercent,
+          volatility: s.volatility,
+        }))
     }
 
     // §63.8 — held positions the latest backfill pass had no price bar for.
