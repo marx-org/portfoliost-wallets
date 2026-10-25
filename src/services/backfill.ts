@@ -401,8 +401,8 @@ export interface BenchmarkBuildContext {
   baseCurrency: string
   /** daily net external cash flow in base currency, keyed by YYYY-MM-DD */
   flows: Map<string, number>
-  /** portfolio invested capital at the window start (seeds the mirror) */
-  seedInvested: number
+  /** portfolio value at the visible window start (seeds the mirror) */
+  seedValue: number
   calcType: "moneyWeighted" | "timeWeighted" | "simple"
 }
 
@@ -449,7 +449,7 @@ export async function buildBenchmarkSeries(
   // Build the mirrored value series as units × close, where units (fractional)
   // grow/shrink by the day's net cash flow valued at that day's close.
   const firstClose = points[0].close
-  let units = ctx.seedInvested > 0 ? ctx.seedInvested / firstClose : 0
+  let units = ctx.seedValue > 0 ? ctx.seedValue / firstClose : 0
   const mirrorValues: number[] = []
   const flows: number[] = []
   for (let i = 0; i < points.length; i++) {

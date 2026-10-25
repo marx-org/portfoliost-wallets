@@ -989,7 +989,7 @@ async function resolveAggregateBase(
     // base, and the SAME aggregate money the user actually put in.
     //
     //   flows          = Σ external flows across ALL of the user's portfolios
-    //   seedInvested   = the aggregate `invested` at the window start
+    //   seedValue     = the aggregate portfolio value at the window start
     //
     // Both legs of a transfer between two of the user's own portfolios are
     // external-only-excluded per portfolio (§62.4/D50), so neither reaches this
@@ -1024,7 +1024,7 @@ async function resolveAggregateBase(
             db: database,
             baseCurrency: mergedBase,
             flows,
-            seedInvested: firstPoint.invested,
+            seedValue: firstPoint.value,
             calcType,
           }),
         ),
@@ -1642,7 +1642,7 @@ async function resolveAggregateBase(
       const to = lastRow.snapshotDate
       const baseCurrency = pf.baseCurrency
       const flows = await dailyExternalFlows(database, c.req.header("Authorization") ?? "", id, from, to, baseCurrency)
-      const seedInvested = Number(firstRow.invested ?? 0)
+      const seedValue = Number(firstRow.value ?? 0)
       const calcType = (["moneyWeighted", "timeWeighted", "simple"] as const).includes(
         benchmarkCalcType as "moneyWeighted" | "timeWeighted" | "simple",
       )
@@ -1656,7 +1656,7 @@ async function resolveAggregateBase(
             portfolioId: id,
             baseCurrency,
             flows,
-            seedInvested,
+            seedValue,
             calcType,
           }),
         ),
