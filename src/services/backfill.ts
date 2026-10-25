@@ -384,9 +384,9 @@ export async function transferCloseForDate(
  * Context for cash-flow-mirrored benchmark overlay (D50).
  *
  * The benchmark no longer projects a pure price index: instead it mirrors the
- * portfolio's actual deployment schedule into the benchmark instrument, so a
- * BUY of $X in the portfolio "buys" $X of the benchmark at that day's close and
- * a SELL of $Y "sells" $Y (fractional shares allowed, clamped ≥ 0).
+ * portfolio's external cash deployment schedule into the benchmark instrument,
+ * so a deposit of $X "buys" $X of the benchmark at that day's close and a
+ * withdrawal of $Y "sells" $Y (fractional shares allowed, clamped ≥ 0).
  */
 export interface BenchmarkBuildContext {
   db: DB
@@ -399,7 +399,7 @@ export interface BenchmarkBuildContext {
    */
   portfolioId?: string
   baseCurrency: string
-  /** daily net cash flow (BUY − SELL) in base currency, keyed by YYYY-MM-DD */
+  /** daily net external cash flow in base currency, keyed by YYYY-MM-DD */
   flows: Map<string, number>
   /** portfolio invested capital at the window start (seeds the mirror) */
   seedInvested: number
