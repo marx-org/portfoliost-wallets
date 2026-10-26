@@ -589,6 +589,11 @@ export async function getBackfillStatus(
   return (rows[0]?.status as "pending" | "complete" | "failed") ?? "none"
 }
 
+/** Persist the pending marker before a newly-created portfolio can be read. */
+export function markBackfillPending(db: DB, portfolioId: string): Promise<void> {
+  return setBackfillStatus(db, portfolioId, "pending")
+}
+
 /**
  * §63.8 — the held symbols the latest backfill pass had no price bar for (null
  * when every held symbol was priced). Surfaced by `GET /:id/analytics` so the

@@ -2,8 +2,16 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import { Hono } from "hono"
 import { createPortfolioRoutes, timeframeCutoff } from "./portfolios.js"
-import { makeHarness } from "./test-utils.js"
-import { portfolios, portfolioTransactions, valueSnapshots, portfolioCashTransactions, portfolioBackfillMetadata } from "../db/schema.js"
+import { insertPosition, makeHarness } from "./test-utils.js"
+import {
+  portfolios,
+  portfolioTransactions,
+  valueSnapshots,
+  portfolioCashTransactions,
+  portfolioBackfillMetadata,
+  labels,
+  positionLabels,
+} from "../db/schema.js"
 import { calendarDays } from "../services/backfill.js"
 
 function app(db: Parameters<typeof createPortfolioRoutes>[0]) {
@@ -399,6 +407,52 @@ describe("GET /:id/analytics — benchmarks (D46/D48)", () => {
     const body = await res.json()
     expect(body.performance.timeSeries).toHaveLength(4)
     expect(body.benchmarks).toHaveLength(1)
+  })
+
+  it("reports pending rather than a flat placeholder while virtual history is being built", async () => {
+    const { db, user, headers } = await makeHarness("analytics-virtual-pending")
+    const a = app(db)
+    const source = await seedPortfolio(db, user.id)
+    const [label] = await db
+      .insert(labels)
+      .values({ userId: user.id, name: "Pending history", color: "#000000" })
+      .returning()
+    const [virtual] = await db
+      .insert(portfolios)
+      .values({ userId: user.id, name: "Virtual pending", baseCurrency: "USD", isVirtual: true, labelId: label.id })
+      .returning()
+    const position = await insertPosition(db, {
+      userId: user.id,
+      portfolioId: source.id,
+      symbol: "SPY",
+      quantity: "2",
+      averageCostBasis: "100",
+      instrumentCurrency: "USD",
+      isOpen: true,
+    })
+    await db.insert(positionLabels).values({ positionId: position.id, labelId: label.id })
+    const executedAt = new Date()
+    executedAt.setUTCDate(executedAt.getUTCDate() - 3)
+    await db.insert(portfolioTransactions).values({
+      userId: user.id,
+      portfolioId: source.id,
+      positionId: position.id,
+      type: "BUY",
+      instrumentSymbol: "SPY",
+      quantity: "2",
+      price: "100",
+      currency: "USD",
+      instrumentCurrency: "USD",
+      totalAmount: "200",
+      executedAt,
+    })
+    await db.insert(portfolioBackfillMetadata).values({ portfolioId: virtual.id, status: "pending" })
+
+    const res = await a.request(`/api/portfolios/${virtual.id}/analytics?timeframe=ALL`, { headers })
+    expect(res.status).toBe(200)
+    const body = await res.json()
+    expect(body.backfillStatus).toBe("pending")
+    expect(body.performance.timeSeries).toEqual([])
   })
 
   it("computes monthly returns as flow-adjusted TWR month-over-month (D50)", async () => {
