@@ -17,7 +17,7 @@ import { preferredBaseCurrency } from "../services/preferences.js"
 import { dominantPriceSource, oldestPriceAsOf, splitPortfolioValue } from "../services/valuation.js"
 import { getPortfolioNews } from "../services/portfolioNews.js"
 import { getPortfolioCalendar } from "../services/portfolioCalendar.js"
-import { getGapSymbols, buildBenchmarkSeries, forcePortfolioRecalc, hasBackfillableHistory, recalcPortfolioSeries } from "../services/backfill.js"
+import { getBackfillStatus, getGapSymbols, buildBenchmarkSeries, forcePortfolioRecalc, hasBackfillableHistory, markBackfillPending, recalcPortfolioSeries } from "../services/backfill.js"
 import { enqueueBackfill } from "../services/backfill-runner.js"
 import { cashBalances, dailyExternalFlows, externalCashInvested } from "../services/cashLedger.js"
 import { debugEnabled, debugLog } from "../services/debug.js"
@@ -772,6 +772,18 @@ async function resolveAggregateBase(
           labelId: isVirtual ? parsed.data.labelId! : null,
         })
         .returning()
+      if (isVirtual && await hasBackfillableHistory(database, created.id)) {
+        const token = c.req.header("Authorization") ?? ""
+        // The virtual view makes existing backfillable, label-scoped activity
+        // visible under a new portfolio id. Build its historical series instead
+        // of leaving analytics flat until manual recompute.
+        // Persist pending before the worker's first await so a concurrent chart
+        // read can see that this pass is already scheduled.
+        await markBackfillPending(database, created.id)
+        void enqueueBackfill(created.id, (signal) =>
+          recalcPortfolioSeries(database, created.id, token, new Date(), signal),
+        ).catch(() => undefined)
+      }
       return c.json(serializePortfolio(created) satisfies Portfolio, 201)
     } catch (err) {
       // uq_portfolios_user_name (import bootstrap natural key) — duplicate name
@@ -1485,11 +1497,23 @@ async function resolveAggregateBase(
       .limit(1)
     if (!pf) return c.json({ error: "NotFound" }, 404)
 
-    const [virtualSnapshotCount] = await database
+    const [snapshotCount] = await database
       .select({ count: drizzleCount() })
       .from(valueSnapshots)
       .where(eq(valueSnapshots.portfolioId, id))
-    if (pf.isVirtual && virtualSnapshotCount.count < 2) {
+    if (pf.isVirtual && snapshotCount.count < 2 && (await getBackfillStatus(database, id)) === "pending") {
+      // A virtual history pass is queued by creation or explicit recompute, not
+      // by this GET. Report pending so the Performance-tab poller waits for its
+      // multi-point series instead of accepting a flat fallback as done.
+      return c.json({
+        timeframe,
+        backfillStatus: "pending",
+        performance: { timeSeries: [], totalValue: 0, capitalBasis: 0, totalReturn: 0, totalReturnPercent: 0, monthlyReturns: [] },
+        benchmarks: [],
+      })
+    }
+
+    if (pf.isVirtual && snapshotCount.count < 2) {
       const posRows = await database
         .select()
         .from(positions)
@@ -1528,27 +1552,10 @@ async function resolveAggregateBase(
       })
     }
 
-    // Check how many snapshot rows exist
-    const [{ n }] = await database
-      .select({ n: drizzleCount() })
-      .from(valueSnapshots)
-      .where(eq(valueSnapshots.portfolioId, id))
-
-    if (n < 2 && (await hasBackfillableHistory(database, id))) {
-      // §72.7 — this fired a backfill from a GET too; removed for the same reason
-      // as the dashboard, and with the same consequence. `enqueueBackfill` keys
-      // its queue by portfolioId and REPLACES a queued pass's run function, so
-      // opening a portfolio's CHART mid-rebuild would downgrade the import's
-      // `recalcPortfolioHistory` (which ends with a pricing pass, §72.6) to a
-      // plain `runBackfill` (which does not) — the exact shape that left 51
-      // positions unpriced on 2026-09-28. Fixing only the dashboard was not
-      // enough: this route is a GET too, and it is the one a user hits when they
-      // click into a portfolio while the rebuild is still running.
-      //
-      // The pending DETECTION stays — reporting "still rebuilding" is a read, and
-      // the chart needs it to render an empty state rather than a wrong series.
-      // A portfolio whose history is genuinely empty is repaired by
-      // POST /:id/recompute, which is where asking for a rebuild belongs.
+    if (snapshotCount.count < 2 && (await hasBackfillableHistory(database, id))) {
+      // §72.7 — this detects an in-progress backfill but does not enqueue one
+      // from a GET. `enqueueBackfill` keys by portfolioId and replaces a queued
+      // run, so a chart read must not downgrade a mutation/import full recalc.
       return c.json({
         timeframe,
         backfillStatus: "pending",

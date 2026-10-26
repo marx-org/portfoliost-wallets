@@ -10,10 +10,12 @@ import {
   portfolioTransactions,
   valueSnapshots,
   portfolioCashTransactions,
+  labels,
+  positionLabels,
 } from "../db/schema.js"
 import { eq, and } from "drizzle-orm"
 import { getBackfillStatus } from "../services/backfill.js"
-import { __resetBackfillRunnerForTests } from "../services/backfill-runner.js"
+import { __backfillRunnerEnqueuedForTests, __resetBackfillRunnerForTests } from "../services/backfill-runner.js"
 import { __resetQuoteCachesForTests } from "../services/quotes.js"
 
 type Harness = Awaited<ReturnType<typeof makeHarness>>
@@ -296,4 +298,112 @@ describe("POST /api/portfolios/:id/recompute (plan §27.2)", () => {
     // and it did NOT delete the stale 2000 row (additive).
     expect(byDate.get("2000-01-01")).toBe(9999)
   })
+
+  it("creates virtual history from existing labelled activity without manual recompute", async () => {
+    const h = await makeHarness("recalc-created-virtual")
+    const a = app(h.db)
+    const source = await seedPortfolio(h.db, h.user.id)
+    const [label] = await h.db
+      .insert(labels)
+      .values({ userId: h.user.id, name: "Backfill on create", color: "#000000" })
+      .returning()
+    const position = await insertPosition(h.db, {
+      userId: h.user.id,
+      portfolioId: source.id,
+      symbol: "AAPL",
+      quantity: "10",
+      averageCostBasis: "100",
+      instrumentCurrency: "USD",
+      isOpen: true,
+      currentPrice: null,
+      priceSource: "manual",
+    })
+    await h.db.insert(positionLabels).values({ positionId: position.id, labelId: label.id })
+
+    const day = (daysAgo: number) => {
+      const date = new Date()
+      date.setUTCHours(0, 0, 0, 0)
+      date.setUTCDate(date.getUTCDate() - daysAgo)
+      return date.toISOString().slice(0, 10)
+    }
+    const tradeDate = day(3)
+    await h.db.insert(portfolioTransactions).values({
+      userId: h.user.id,
+      portfolioId: source.id,
+      positionId: position.id,
+      type: "BUY",
+      instrumentSymbol: "AAPL",
+      quantity: "10",
+      price: "100",
+      currency: "USD",
+      instrumentCurrency: "USD",
+      totalAmount: "1000",
+      executedAt: new Date(`${tradeDate}T12:00:00Z`),
+    })
+
+    mockPriceBars({
+      AAPL: {
+        dates: [day(3), day(2), day(1), day(0)],
+        closes: [100, 110, 120, 130],
+      },
+    })
+    const barsFetch = vi.mocked(globalThis.fetch).getMockImplementation()!
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockImplementation((url: string, init?: RequestInit) => {
+        const requestUrl = String(url)
+        if (requestUrl.includes("/price-bars")) return barsFetch(requestUrl, init)
+        if (requestUrl.includes("/quote")) {
+          return Promise.resolve({
+            ok: true,
+            status: 200,
+            json: async () => ({ symbol: "AAPL", currentPrice: 130, change: 0, percentChange: 0, currency: "USD" }),
+          })
+        }
+        if (requestUrl.includes("/profile")) {
+          return Promise.resolve({
+            ok: true,
+            status: 200,
+            json: async () => ({
+              ticker: "AAPL", name: "Apple Inc.", country: "US",
+              finnhubIndustry: "Technology", currency: "USD", currencySource: "provider",
+            }),
+          })
+        }
+        return barsFetch(requestUrl, init)
+      }),
+    )
+
+    const created = await a.request("/api/portfolios", {
+      method: "POST",
+      headers: h.headers,
+      body: JSON.stringify({ name: "Casual Growth", baseCurrency: "USD" }),
+    })
+    expect(created.status).toBe(201)
+    expect(__backfillRunnerEnqueuedForTests()).toBe(false)
+
+    const virtualResponse = await a.request("/api/portfolios", {
+      method: "POST",
+      headers: h.headers,
+      body: JSON.stringify({ name: "Virtual Growth", isVirtual: true, labelId: label.id, baseCurrency: "USD" }),
+    })
+    expect(virtualResponse.status).toBe(201)
+    const virtual = await virtualResponse.json() as { id: string }
+
+    expect(await waitForComplete(h.db, virtual.id)).toBe("complete")
+    const snapshots = await h.db
+      .select()
+      .from(valueSnapshots)
+      .where(eq(valueSnapshots.portfolioId, virtual.id))
+      .orderBy(valueSnapshots.snapshotDate)
+    expect(snapshots.length).toBeGreaterThanOrEqual(2)
+    expect(new Set(snapshots.map((row) => Number(row.value))).size).toBeGreaterThan(1)
+
+    const analyticsRes = await a.request(`/api/portfolios/${virtual.id}/analytics?timeframe=ALL`, { headers: h.headers })
+    expect(analyticsRes.status).toBe(200)
+    const analytics = await analyticsRes.json()
+    expect(analytics.backfillStatus).toBe("complete")
+    expect(analytics.performance.timeSeries.length).toBeGreaterThanOrEqual(2)
+    expect(new Set(analytics.performance.timeSeries.map((row: { value: number }) => row.value)).size).toBeGreaterThan(1)
+  }, 15_000)
 })
