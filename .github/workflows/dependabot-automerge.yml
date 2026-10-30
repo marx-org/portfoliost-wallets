@@ -13,7 +13,7 @@ permissions:
 
 jobs:
   dependabot:
-    uses: marx-org/pfire-workflows/.github/workflows/dependabot-automerge.yml@fbdef004eedaea7eca60573365396b34f41b4513
+    uses: marx-org/pfire-workflows/.github/workflows/dependabot-automerge.yml@f06ee147e41e051c4a6a108e81823073ec57e350
     secrets: inherit
     permissions:
       contents: write
