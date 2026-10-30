@@ -8,7 +8,7 @@ on:
 
 jobs:
   image:
-    uses: marx-org/pfire-workflows/.github/workflows/docker-image.yml@fbdef004eedaea7eca60573365396b34f41b4513
+    uses: marx-org/pfire-workflows/.github/workflows/docker-image.yml@f06ee147e41e051c4a6a108e81823073ec57e350
     with:
       node_version: '22'
       test_command: node --test scripts/npm-auth.check.mjs && npm ci && npm run build && npm run test
