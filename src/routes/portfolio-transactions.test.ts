@@ -3057,14 +3057,26 @@ describe("GET /api/portfolios/positions (§83.5)", () => {
     const minePf = await makePf(mine, "Mine")
     await buy(mine, minePf.id, "AAPL", 1, 100)
 
-    const other = await makeHarness("user-other")
+    // Both identities must share a database: separate databases cannot expose
+    // a missing ownership filter and replay the same migrations twice.
+    const other = {
+      ...mine,
+      headers: { "X-User-Id": "user-other", "X-User-Email": "user-other@test.dev" },
+      user: { id: "user-other", email: "user-other@test.dev" },
+    }
     const otherPf = await makePf(other, "Theirs")
     await buy(other, otherPf.id, "TSLA", 1, 900)
+
+    expect(await mine.db.select().from(positions)).toHaveLength(2)
 
     const res = await app(mine.db).request("/api/portfolios/positions", { headers: mine.headers })
     expect(res.status).toBe(200)
     const body = await res.json()
     expect(body.positions.map((p: { portfolioName: string }) => p.portfolioName)).toEqual(["Mine"])
+
+    const otherRes = await app(other.db).request("/api/portfolios/positions", { headers: other.headers })
+    expect(otherRes.status).toBe(200)
+    expect((await otherRes.json()).positions.map((p: { portfolioName: string }) => p.portfolioName)).toEqual(["Theirs"])
   })
 
   it("is not captured by GET /:id", async () => {
