@@ -9,7 +9,8 @@ ARG APP_VERSION=""
 ENV APP_VERSION=${APP_VERSION}
 
 COPY package.json package-lock.json .npmrc ./
-RUN --mount=type=secret,id=NODE_AUTH_TOKEN,env=NODE_AUTH_TOKEN \
+RUN --mount=type=secret,id=NODE_AUTH_TOKEN,env=NODE_AUTH_TOKEN,required=true \
+    printf '%s\n' '//npm.pkg.github.com/:_authToken=${NODE_AUTH_TOKEN}' >> .npmrc && \
     npm ci && \
     rm -f .npmrc
 

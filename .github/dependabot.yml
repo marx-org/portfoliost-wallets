@@ -1,4 +1,6 @@
 version: 2
+# GitHub Packages uses Dependabot's automatic token and the package Read grants.
+# Keep credentials out of this file and the repository's registry-only .npmrc.
 updates:
   - package-ecosystem: "npm"
     directory: "/"

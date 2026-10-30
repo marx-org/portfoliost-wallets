@@ -11,7 +11,7 @@ jobs:
     uses: marx-org/pfire-workflows/.github/workflows/docker-image.yml@fbdef004eedaea7eca60573365396b34f41b4513
     with:
       node_version: '22'
-      test_command: npm ci && npm run build && npm run test
+      test_command: node --test scripts/npm-auth.check.mjs && npm ci && npm run build && npm run test
     secrets: inherit
     permissions:
       contents: write
