@@ -9,6 +9,7 @@ import {
   portfolioCashTransactions,
   portfolioTransactions,
 } from "../db/schema.js"
+import { mockInstrumentsFx, unmockInstrumentsFx } from "../test-fx-mock.js"
 
 async function boot(userId = "user-1") {
   const h = await makeHarness(userId)
@@ -16,9 +17,9 @@ async function boot(userId = "user-1") {
   return { ...h, app }
 }
 
-async function makePf(h: Harness, name = "P1", baseCurrency = "PLN") {
+async function makePf(h: Harness, name = "P1", baseCurrency = "PLN", cashBaseCurrencyOnly = false) {
   const id = crypto.randomUUID()
-  await h.db.insert(portfolios).values({ userId: "user-1", id, name, baseCurrency })
+  await h.db.insert(portfolios).values({ userId: "user-1", id, name, baseCurrency, cashBaseCurrencyOnly })
   return id
 }
 
@@ -48,6 +49,44 @@ describe("GET /:id/cash (62.3)", () => {
     expect(body.baseCurrency).toBe("PLN")
     expect(body.balances).toEqual([{ currency: "PLN", balance: 100 }])
     expect(body.total).toBe(100)
+  })
+
+  it("cash-base-only current cash and balance history agree after dated FX replay", async () => {
+    mockInstrumentsFx({ table: { USD: 1.08, PLN: 4.3 }, asOf: "2024-12-31" })
+    try {
+      const h = await boot()
+      const pf = await makePf(h, "PLN only", "PLN", true)
+      await h.db.insert(portfolioTransactions).values({
+        userId: "user-1",
+        portfolioId: pf,
+        type: "BUY",
+        instrumentSymbol: "AAPL",
+        quantity: "1",
+        price: "100",
+        totalAmount: "100",
+        currency: "USD",
+        executedAt: new Date("2024-01-01T10:00:00.000Z"),
+      })
+      await h.db.insert(portfolioCashTransactions).values({
+        userId: "user-1",
+        portfolioId: pf,
+        type: "DEPOSIT",
+        amount: "50",
+        currency: "USD",
+        transactionDate: "2024-01-02",
+      })
+
+      const current = await (await h.app.request(`/api/portfolios/${pf}/cash`, { headers: h.headers })).json()
+      expect(current.balances).toHaveLength(1)
+      expect(current.balances[0].currency).toBe("PLN")
+
+      const history = await (
+        await h.app.request(`/api/portfolios/${pf}/cash/balance-history?period=ALL`, { headers: h.headers })
+      ).json()
+      expect(history.data.at(-1).balance).toBeCloseTo(current.balances[0].balance, 6)
+    } finally {
+      unmockInstrumentsFx()
+    }
   })
 
   it("404 for another user's portfolio", async () => {
@@ -85,6 +124,21 @@ describe("POST deposits / withdrawals (62.3)", () => {
     const res = await h.app.request(`/api/portfolios/${pf}/cash`, { headers: h.headers })
     const balances = await res.json()
     expect(balances.balances.find((b: any) => b.currency === "USD").balance).toBe(60)
+  })
+
+  it("cash-base-only portfolios accept base-currency cash and reject foreign deposits or withdrawals", async () => {
+    const h = await boot()
+    const pf = await makePf(h, "PLN only", "PLN", true)
+
+    const deposit = await post(h, `/api/portfolios/${pf}/cash/deposits`, { amount: 100, currency: "USD" })
+    const withdrawal = await post(h, `/api/portfolios/${pf}/cash/withdrawals`, { amount: 10, currency: "EUR" })
+    expect(deposit.status).toBe(422)
+    expect(withdrawal.status).toBe(422)
+
+    const valid = await post(h, `/api/portfolios/${pf}/cash/deposits`, { amount: 50, currency: "PLN" })
+    expect(valid.status).toBe(201)
+    const cash = await (await h.app.request(`/api/portfolios/${pf}/cash`, { headers: h.headers })).json()
+    expect(cash.balances).toEqual([{ currency: "PLN", balance: 50 }])
   })
 
   it("withdrawal clamps to negative even if a positive value is sent", async () => {
@@ -171,11 +225,41 @@ describe("POST transfers (62.3)", () => {
       const cr = rows.find((r) => Number(r.amount) > 0)!
       expect(Number(d.amount)).toBe(-100)
       expect(Number(cr.amount)).toBe(430) // 100 × 4.3
+      expect(cr.currency).toBe("PLN") // the destination leg uses the destination base currency
       expect(Number(d.targetAmount)).toBe(430) // debit leg stores the credit leg it created
       expect(Number(cr.targetAmount)).toBe(-100) // credit leg stores the debit it paired with
     } finally {
       unmockInstrumentsFx()
     }
+  })
+
+  it("cash-base-only transfer requires source base currency and credits in the destination base", async () => {
+    const h = await boot()
+    const src = await makePf(h, "PLN only", "PLN", true)
+    const dst = await makePf(h, "USD only", "USD", true)
+
+    const rejected = await post(h, `/api/portfolios/${src}/cash/transfers`, {
+      amount: 100,
+      currency: "EUR",
+      toPortfolioId: dst,
+    })
+    expect(rejected.status).toBe(422)
+
+    const accepted = await post(h, `/api/portfolios/${src}/cash/transfers`, {
+      amount: 100,
+      currency: "PLN",
+      toPortfolioId: dst,
+      targetFxRate: 0.25,
+    })
+    expect(accepted.status).toBe(201)
+    const rows = await h.db.select().from(portfolioCashTransactions).where(eq(portfolioCashTransactions.type, "TRANSFER"))
+    const debit = rows.find((r) => Number(r.amount) < 0)!
+    const credit = rows.find((r) => Number(r.amount) > 0)!
+    expect(debit.currency).toBe("PLN")
+    expect(credit.currency).toBe("USD")
+    expect(Number(credit.amount)).toBe(25)
+    const cash = await (await h.app.request(`/api/portfolios/${dst}/cash`, { headers: h.headers })).json()
+    expect(cash.balances).toEqual([{ currency: "USD", balance: 25 }])
   })
 
   it("rejects a transfer to the source portfolio with 400", async () => {
@@ -338,6 +422,39 @@ describe("PATCH / DELETE / labels on a cash row (62.3)", () => {
     expect(body.currency).toBe("EUR")
     expect(Number(body.fees)).toBe(5)
     expect(body.feeCurrency).toBe("EUR")
+  })
+
+  it("PATCH rejects non-base currencies and refuses to edit legacy foreign cash rows", async () => {
+    const h = await boot()
+    const pf = await makePf(h, "PLN only", "PLN", true)
+    const [row] = await h.db
+      .insert(portfolioCashTransactions)
+      .values({ userId: "user-1", portfolioId: pf, type: "DEPOSIT", amount: "100", currency: "PLN" })
+      .returning()
+
+    const foreign = await h.app.request(`/api/portfolios/cash/transactions/${row.id}`, {
+      method: "PATCH",
+      headers: { ...h.headers, "content-type": "application/json" },
+      body: JSON.stringify({ currency: "USD" }),
+    })
+    expect(foreign.status).toBe(422)
+    const base = await h.app.request(`/api/portfolios/cash/transactions/${row.id}`, {
+      method: "PATCH",
+      headers: { ...h.headers, "content-type": "application/json" },
+      body: JSON.stringify({ currency: "PLN", amount: 125 }),
+    })
+    expect(base.status).toBe(200)
+
+    const [legacy] = await h.db
+      .insert(portfolioCashTransactions)
+      .values({ userId: "user-1", portfolioId: pf, type: "DEPOSIT", amount: "10", currency: "EUR" })
+      .returning()
+    const legacyEdit = await h.app.request(`/api/portfolios/cash/transactions/${legacy.id}`, {
+      method: "PATCH",
+      headers: { ...h.headers, "content-type": "application/json" },
+      body: JSON.stringify({ amount: 20 }),
+    })
+    expect(legacyEdit.status).toBe(422)
   })
 
   it("PATCH a zero amount → 422 (the non-zero constraint)", async () => {

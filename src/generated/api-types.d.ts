@@ -3197,6 +3197,8 @@ export interface components {
             name: string;
             description?: string | null;
             baseCurrency?: string;
+            /** @description Whether this portfolio holds cash only in baseCurrency. When true, cash effects from trades and external cash rows are converted using event-date FX. Investment and trade currencies remain unrestricted. */
+            cashBaseCurrencyOnly: boolean;
             capitalBasis: number;
             currentValue: number;
             isPublic: boolean;
@@ -3232,6 +3234,8 @@ export interface components {
             description?: string | null;
             currency?: string;
             isPublic?: boolean;
+            /** @description Cash-only currency policy. When true, cash is held in baseCurrency; investment and trade currencies remain unrestricted. Optional for backward compatibility: omitted on create defaults to false and omitted on update preserves the current value. */
+            cashBaseCurrencyOnly?: boolean;
             /**
              * @description True for a virtual portfolio; see the schema description for the label requirement.
              * @default false
@@ -3950,6 +3954,8 @@ export interface components {
             name: string;
             currency: string;
             baseCurrency?: string;
+            /** @description Cash-only currency policy for the imported portfolio. When true, cash is held in baseCurrency; investment and trade currencies remain unrestricted. Importers must send the explicit policy value. */
+            cashBaseCurrencyOnly: boolean;
         };
         ImportPortfolioBootstrapResponse: {
             /** Format: uuid */

@@ -73,6 +73,7 @@ export const ImportPortfolioBootstrapRequestSchema = ExternalSourceSchema.extend
   name: z.string().min(1),
   currency: z.string().regex(ISO_CURRENCY, "currency must be an ISO 4217 code"),
   baseCurrency: z.string().regex(ISO_CURRENCY).optional(),
+  cashBaseCurrencyOnly: z.boolean(),
 }).strict()
 
 export const ImportLabelBootstrapRequestSchema = ExternalSourceSchema.extend({
@@ -448,10 +449,10 @@ function syncRunToContract(r: typeof syncRuns.$inferSelect): SyncRun {
 }
 
 /**
- * Import bootstrap (§23.3). Idempotently ensures wallets/portfolios exist,
- * matched on the unique (userId, name) natural key. `external_source` is set
- * on INSERT only — re-bootstrapping an existing row never re-tags it, so the
- * wipe endpoint (23.5) only ever removes what this importer created.
+ * Import bootstrap (§23.3). Idempotently ensures portfolios exist, matched on
+ * the unique (userId, name) natural key. Import-owned metadata can be refreshed
+ * only when the existing row already carries the same external_source; a
+ * manual portfolio or another import's name collision is never claimed.
  */
 export function createImportRoutes(db?: DB) {
   const routes = new Hono()
@@ -483,18 +484,45 @@ export function createImportRoutes(db?: DB) {
         userId: identity.id,
         name: parsed.data.name,
         baseCurrency,
+        cashBaseCurrencyOnly: parsed.data.cashBaseCurrencyOnly,
         externalSource: parsed.data.externalSource,
       })
       .onConflictDoNothing({ target: [portfolios.userId, portfolios.name] })
       .returning()
 
-    const [row] = inserted
-      ? [inserted]
-      : await database
-          .select()
-          .from(portfolios)
-          .where(and(eq(portfolios.userId, identity.id), eq(portfolios.name, parsed.data.name)))
-          .limit(1)
+    let row = inserted
+    if (!row) {
+      const [existing] = await database
+        .select()
+        .from(portfolios)
+        .where(and(eq(portfolios.userId, identity.id), eq(portfolios.name, parsed.data.name)))
+        .limit(1)
+      if (!existing || existing.externalSource !== parsed.data.externalSource) {
+        return c.json(
+          { error: "Conflict", message: `Portfolio name "${parsed.data.name}" is not owned by this import source` },
+          409,
+        )
+      }
+
+      const [updated] = await database
+        .update(portfolios)
+        .set({ baseCurrency, cashBaseCurrencyOnly: parsed.data.cashBaseCurrencyOnly, updatedAt: new Date() })
+        .where(
+          and(
+            eq(portfolios.id, existing.id),
+            eq(portfolios.userId, identity.id),
+            eq(portfolios.externalSource, parsed.data.externalSource),
+          ),
+        )
+        .returning()
+      if (!updated) {
+        return c.json(
+          { error: "Conflict", message: `Portfolio name "${parsed.data.name}" is no longer owned by this import source` },
+          409,
+        )
+      }
+      row = updated
+    }
 
     return c.json({
       id: row.id,

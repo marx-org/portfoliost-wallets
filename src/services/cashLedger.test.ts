@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import crypto from "node:crypto"
+import { eq } from "drizzle-orm"
 import { makeHarness, type Harness } from "../routes/test-utils.js"
 import { portfolios, portfolioTransactions, portfolioCashTransactions } from "../db/schema.js"
 import { mockInstrumentsFx, unmockInstrumentsFx } from "../test-fx-mock.js"
@@ -126,6 +127,54 @@ describe("cashBalances", () => {
 
     const b = await cashBalances(h.db, null, portfolioId, "2024-03-31")
     expect(b.get("USD")).toBeCloseTo(100)
+  })
+
+  it("cash-base-only replay converts every leg at event-date FX and returns only base cash", async () => {
+    const tablesByDate = {
+      "2024-01-01": { USD: 1.25, PLN: 5 },
+      "2024-01-02": { USD: 1.2, PLN: 5.4 },
+      "2024-01-03": { USD: 0.9, PLN: 5.4 },
+    }
+    mockInstrumentsFx({ table: tablesByDate["2024-01-03"], tablesByDate })
+    await h.db.update(portfolios).set({ cashBaseCurrencyOnly: true }).where(eq(portfolios.id, portfolioId))
+    await trade({
+      type: "BUY",
+      totalAmount: 100,
+      feesSettled: 5,
+      currency: "USD",
+      feeCurrency: "EUR",
+      executedAt: "2024-01-01T10:00:00.000Z",
+    })
+    await ext({ type: "DEPOSIT", amount: 50, currency: "USD", transactionDate: "2024-01-02" })
+
+    const current = await cashBalances(h.db, null, portfolioId)
+    expect([...current.keys()]).toEqual(["PLN"])
+    expect(current.get("PLN")).toBeCloseTo(-200, 8)
+    expect((await cashBalances(h.db, null, portfolioId, "2024-01-01")).get("PLN")).toBe(-425)
+    expect((await cashBalances(h.db, null, portfolioId, "2024-01-02")).get("PLN")).toBeCloseTo(-200, 8)
+
+    const history = await cashBalanceSeries(h.db, null, portfolioId, "2024-01-01", "2024-01-03", "PLN")
+    expect(history.get("2024-01-01")).toBe(-425) // −100 USD × 4 − 5 EUR × 5
+    expect(history.get("2024-01-02")).toBeCloseTo(-200, 8) // +50 USD × 4.5
+    expect(history.get("2024-01-03")).toBeCloseTo(-200, 8) // no revaluation at the later 6:1 rate
+    expect(history.get("2024-01-03")).toBeCloseTo(current.get("PLN")!, 8)
+
+    // Replay is read-only: no synthetic FX conversion cash or trade rows.
+    const cashRows = await h.db.select().from(portfolioCashTransactions)
+    const tradeRows = await h.db.select().from(portfolioTransactions)
+    expect(cashRows).toHaveLength(1)
+    expect(tradeRows).toHaveLength(1)
+  })
+
+  it("cash-base-only replay fails instead of inventing 1:1 when event-date FX is missing", async () => {
+    mockInstrumentsFx({ table: {}, empty: true })
+    await h.db.update(portfolios).set({ cashBaseCurrencyOnly: true }).where(eq(portfolios.id, portfolioId))
+    await ext({ type: "DEPOSIT", amount: 100, currency: "USD", transactionDate: "2024-06-01" })
+
+    await expect(cashBalances(h.db, null, portfolioId)).rejects.toThrow(/instruments answered 404/u)
+    await expect(
+      cashBalanceSeries(h.db, null, portfolioId, "2024-06-01", "2024-06-02", "PLN"),
+    ).rejects.toThrow(/instruments answered 404/u)
   })
 })
 

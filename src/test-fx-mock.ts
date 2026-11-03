@@ -12,6 +12,8 @@ import { crossRate } from "@marx-org/contracts/fx"
 export interface FxMockOpts {
   /** EUR-quoted table (EUR is the implicit 1). */
   table: Record<string, number>
+  /** Optional EUR-quoted rate tables selected by the requested historical date. */
+  tablesByDate?: Record<string, Record<string, number>>
   asOf?: string
   /** When true, every pair 404s (the "no table at all" degrade). */
   empty?: boolean
@@ -39,11 +41,13 @@ export function mockInstrumentsFx(opts: FxMockOpts): void {
         const q = new URL(url).searchParams
         const from = (q.get("from") ?? "").toUpperCase()
         const to = (q.get("to") ?? "EUR").toUpperCase()
+        const date = q.get("date") ?? asOf
         if (from === to) return new Response(JSON.stringify({ rate: 1, asOf }), { status: 200 })
         if (opts.empty) {
           return new Response(JSON.stringify({ error: "NotFound", message: "no rate" }), { status: 404 })
         }
-        const rate = crossRate(from, to, { EUR: 1, ...opts.table })
+        const table = opts.tablesByDate?.[date] ?? opts.table
+        const rate = crossRate(from, to, { EUR: 1, ...table })
         if (rate === undefined) {
           return new Response(JSON.stringify({ error: "NotFound", message: "no rate" }), { status: 404 })
         }
