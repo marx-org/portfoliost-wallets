@@ -32,6 +32,10 @@ async function trade(row: {
   feesSettled?: string | number
   currency: string
   feeCurrency?: string
+  exchangeRate?: string | number | null
+  rateSource?: "automatic" | "manual"
+  feeExchangeRate?: string | number | null
+  feeRateSource?: "automatic" | "manual"
   executedAt: string
 }) {
   await h.db.insert(portfolioTransactions).values({
@@ -43,6 +47,10 @@ async function trade(row: {
     feeCurrency: row.feeCurrency,
     totalAmount: String(row.totalAmount),
     feesSettled: row.feesSettled != null ? String(row.feesSettled) : null,
+    exchangeRate: row.exchangeRate != null ? String(row.exchangeRate) : null,
+    rateSource: row.rateSource,
+    feeExchangeRate: row.feeExchangeRate != null ? String(row.feeExchangeRate) : null,
+    feeRateSource: row.feeRateSource,
     executedAt: new Date(row.executedAt),
   })
 }
@@ -52,6 +60,8 @@ async function ext(row: {
   amount: string | number
   currency: string
   transactionDate: string
+  exchangeRate?: string | number | null
+  rateSource?: "automatic" | "manual"
 }) {
   await h.db.insert(portfolioCashTransactions).values({
     userId,
@@ -60,6 +70,8 @@ async function ext(row: {
     amount: String(row.amount),
     currency: row.currency,
     transactionDate: row.transactionDate,
+    exchangeRate: row.exchangeRate != null ? String(row.exchangeRate) : null,
+    rateSource: row.rateSource,
   })
 }
 
@@ -166,6 +178,107 @@ describe("cashBalances", () => {
     expect(tradeRows).toHaveLength(1)
   })
 
+  it("#46: manual principal and external cash rates override event-date FX once", async () => {
+    mockInstrumentsFx({
+      table: { USD: 1, EUR: 1.25, PLN: 5 },
+      asOf: "2024-01-04",
+    })
+    await h.db.update(portfolios).set({ cashBaseCurrencyOnly: true }).where(eq(portfolios.id, portfolioId))
+    await trade({
+      type: "BUY", totalAmount: 100, currency: "USD", exchangeRate: 4.1, rateSource: "manual",
+      executedAt: "2024-01-01T10:00:00.000Z",
+    })
+    await trade({
+      type: "SELL", totalAmount: 40, currency: "EUR", exchangeRate: 5, rateSource: "manual",
+      executedAt: "2024-01-02T10:00:00.000Z",
+    })
+    await trade({
+      type: "DIVIDEND", totalAmount: 10, currency: "USD", exchangeRate: 3.9, rateSource: "manual",
+      executedAt: "2024-01-03T10:00:00.000Z",
+    })
+    await ext({
+      type: "DEPOSIT", amount: 20, currency: "USD", transactionDate: "2024-01-04",
+      exchangeRate: 4.2, rateSource: "manual",
+    })
+
+    const current = await cashBalances(h.db, null, portfolioId)
+    const history = await cashBalanceSeries(h.db, null, portfolioId, "2024-01-01", "2024-01-04", "PLN")
+    expect(current.get("PLN")).toBeCloseTo(-87, 8)
+    expect(history.get("2024-01-01")).toBeCloseTo(-410, 8)
+    expect(history.get("2024-01-02")).toBeCloseTo(-210, 8)
+    expect(history.get("2024-01-03")).toBeCloseTo(-171, 8)
+    expect(history.get("2024-01-04")).toBeCloseTo(current.get("PLN")!, 8)
+  })
+
+  it("#46: manual fee FX converts fee currency to trade currency, with same-currency fees at 1:1", async () => {
+    mockInstrumentsFx({ table: { USD: 1, EUR: 2, GBP: 2, CHF: 1, PLN: 4 }, asOf: "2024-01-03" })
+    await h.db.update(portfolios).set({ cashBaseCurrencyOnly: true }).where(eq(portfolios.id, portfolioId))
+    await trade({
+      type: "BUY", totalAmount: 100, currency: "USD", exchangeRate: 4, rateSource: "manual",
+      feesSettled: 2, feeCurrency: "EUR", feeExchangeRate: 1.2, feeRateSource: "manual",
+      executedAt: "2024-01-01T10:00:00.000Z",
+    })
+    await trade({
+      type: "SELL", totalAmount: 10, currency: "USD", exchangeRate: 4, rateSource: "manual",
+      feesSettled: 1, feeCurrency: "USD", feeExchangeRate: 999, feeRateSource: "manual",
+      executedAt: "2024-01-02T10:00:00.000Z",
+    })
+    await trade({
+      type: "BUY", totalAmount: 10, currency: "GBP", exchangeRate: 999, rateSource: "automatic",
+      feesSettled: 2, feeCurrency: "CHF", feeExchangeRate: 0.5, feeRateSource: "manual",
+      executedAt: "2024-01-03T10:00:00.000Z",
+    })
+
+    const current = await cashBalances(h.db, null, portfolioId)
+    const history = await cashBalanceSeries(h.db, null, portfolioId, "2024-01-01", "2024-01-03", "PLN")
+    // BUY: -100 USD × 4 - (2 EUR × 1.2 EUR→USD × 4 USD→PLN).
+    // SELL: +10 USD × 4 - 1 USD × 4; the same-currency fee rate is 1, not 999.
+    // Final BUY: -10 GBP × event-date 2 and -2 CHF × manual .5 CHF→GBP × event-date 2.
+    expect(current.get("PLN")).toBeCloseTo(-395.6, 8)
+    expect(history.get("2024-01-03")).toBeCloseTo(current.get("PLN")!, 8)
+  })
+
+  it("#46: automatic trade, fee, and external FX remain event-date resolved", async () => {
+    mockInstrumentsFx({
+      table: { USD: 2, EUR: 1, PLN: 5 },
+      asOf: "2024-05-03",
+      tablesByDate: {
+        "2024-05-01": { USD: 1, EUR: 1, PLN: 2 },
+        "2024-05-02": { USD: 1, EUR: 1, PLN: 4 },
+      },
+    })
+    await h.db.update(portfolios).set({ cashBaseCurrencyOnly: true }).where(eq(portfolios.id, portfolioId))
+    await trade({
+      type: "BUY", totalAmount: 100, currency: "USD", exchangeRate: 99, rateSource: "automatic",
+      feesSettled: 5, feeCurrency: "EUR", feeExchangeRate: 99, feeRateSource: "automatic",
+      executedAt: "2024-05-01T10:00:00.000Z",
+    })
+    await ext({
+      type: "DEPOSIT", amount: 10, currency: "USD", transactionDate: "2024-05-02",
+      exchangeRate: 99, rateSource: "automatic",
+    })
+
+    const current = await cashBalances(h.db, null, portfolioId)
+    const history = await cashBalanceSeries(h.db, null, portfolioId, "2024-05-01", "2024-05-02", "PLN")
+    // May 1: -100 USD × 2 and -5 EUR × 2. May 2: +10 USD × 4.
+    expect(current.get("PLN")).toBeCloseTo(-170, 8)
+    expect(history.get("2024-05-01")).toBeCloseTo(-210, 8)
+    expect(history.get("2024-05-02")).toBeCloseTo(current.get("PLN")!, 8)
+  })
+
+  it("#46: multi-currency replay keeps native legs and ignores stored conversion rates", async () => {
+    await trade({
+      type: "BUY", totalAmount: 100, currency: "USD", exchangeRate: 4.2, rateSource: "manual",
+      feesSettled: 5, feeCurrency: "EUR", feeExchangeRate: 1.5, feeRateSource: "manual",
+      executedAt: "2024-01-01T10:00:00.000Z",
+    })
+
+    const current = await cashBalances(h.db, null, portfolioId)
+    expect(current.get("USD")).toBe(-100)
+    expect(current.get("EUR")).toBe(-5)
+    expect(current.size).toBe(2)
+  })
+
   it("cash-base-only replay fails instead of inventing 1:1 when event-date FX is missing", async () => {
     mockInstrumentsFx({ table: {}, empty: true })
     await h.db.update(portfolios).set({ cashBaseCurrencyOnly: true }).where(eq(portfolios.id, portfolioId))
@@ -195,6 +308,15 @@ describe("cashBalanceSeries", () => {
     expect(s.get("2024-01-05")).toBeCloseTo(1000 * usdPln, 4)
     // contiguous
     expect([...s.keys()]).toHaveLength(5)
+  })
+
+  it("cash-base-only history does not resolve FX for events after the requested end date", async () => {
+    mockInstrumentsFx({ table: {}, empty: true })
+    await h.db.update(portfolios).set({ cashBaseCurrencyOnly: true }).where(eq(portfolios.id, portfolioId))
+    await ext({ type: "DEPOSIT", amount: 100, currency: "USD", transactionDate: "2024-06-02" })
+
+    const history = await cashBalanceSeries(h.db, null, portfolioId, "2024-06-01", "2024-06-01", "PLN")
+    expect(history.get("2024-06-01")).toBe(0)
   })
 
   it("base currency is 1:1", async () => {
