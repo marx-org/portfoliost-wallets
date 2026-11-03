@@ -99,12 +99,142 @@ async function eventRateToBase(
   return rate
 }
 
+function manualRate(value: string | number | null | undefined, field: string): number {
+  const rate = value == null || value === "" ? Number.NaN : Number(value)
+  if (!Number.isFinite(rate) || rate <= 0) {
+    throw new Error(`cash replay has ${field}=manual but no positive stored rate`)
+  }
+  return rate
+}
+
+async function cashLegRateToBase(
+  authToken: string | null,
+  currency: string,
+  baseCurrency: string,
+  day: string,
+  source: string | null | undefined,
+  storedRate: string | number | null | undefined,
+  cache: Map<string, number>,
+  field: string,
+): Promise<number> {
+  const from = currency.toUpperCase()
+  const base = baseCurrency.toUpperCase()
+  if (from === base) return 1
+  if (source === "manual") return manualRate(storedRate, field)
+  return eventRateToBase(authToken, from, base, day, cache)
+}
+
+/**
+ * Convert one trade's cash effects to base currency for cash-base-only replay.
+ * D29's trade rate is trade-currency → base; its manual fee rate is
+ * fee-currency → trade-currency. Automatic foreign-currency fees retain the
+ * ledger's existing event-date fee-currency → base lookup.
+ */
+async function tradeCashDeltaInBase(
+  authToken: string | null,
+  tx: {
+    type: string
+    totalAmount: string | number | null
+    feesSettled: string | number | null
+    currency: string | null
+    feeCurrency?: string | null
+    exchangeRate?: string | number | null
+    rateSource?: string | null
+    feeExchangeRate?: string | number | null
+    feeRateSource?: string | null
+  },
+  baseCurrency: string,
+  day: string,
+  cache: Map<string, number>,
+): Promise<number> {
+  const tradeCurrency = (tx.currency ?? "").toUpperCase()
+  const feeCurrency = (tx.feeCurrency ?? tx.currency ?? "").toUpperCase()
+  const notional = Number(tx.totalAmount ?? 0)
+  const fee = Number(tx.feesSettled ?? 0)
+  const principalSign = tx.type === "BUY" ? -1 : 1
+  let tradeToBase: number | undefined
+  const getTradeToBase = async () => {
+    if (tradeToBase === undefined) {
+      tradeToBase = await cashLegRateToBase(
+        authToken,
+        tradeCurrency,
+        baseCurrency,
+        day,
+        tx.rateSource,
+        tx.exchangeRate,
+        cache,
+        "exchangeRate",
+      )
+    }
+    return tradeToBase
+  }
+
+  let delta = 0
+  if (notional !== 0 && tradeCurrency) {
+    delta += principalSign * Math.abs(notional) * (await getTradeToBase())
+  }
+
+  if (fee !== 0 && feeCurrency) {
+    let feeToBase: number
+    if (feeCurrency === tradeCurrency) {
+      // Same-currency fees need no fee FX; convert them once with the principal
+      // leg's trade-currency rate (manual or event-date automatic).
+      feeToBase = await getTradeToBase()
+    } else if (tx.feeRateSource === "manual") {
+      const feeToTrade = manualRate(tx.feeExchangeRate, "feeExchangeRate")
+      feeToBase = feeToTrade * (await getTradeToBase())
+    } else {
+      feeToBase = await cashLegRateToBase(
+        authToken,
+        feeCurrency,
+        baseCurrency,
+        day,
+        "automatic",
+        null,
+        cache,
+        "feeExchangeRate",
+      )
+    }
+    delta -= Math.abs(fee) * feeToBase
+  }
+  return delta
+}
+
+/** External cash-row exchangeRate is stored directly as row-currency → base. */
+async function externalCashDeltaInBase(
+  authToken: string | null,
+  row: {
+    amount: string | number | null
+    currency: string | null
+    exchangeRate?: string | number | null
+    rateSource?: string | null
+  },
+  baseCurrency: string,
+  day: string,
+  cache: Map<string, number>,
+): Promise<number> {
+  const currency = (row.currency ?? "").toUpperCase()
+  if (!currency) return 0
+  const rate = await cashLegRateToBase(
+    authToken,
+    currency,
+    baseCurrency,
+    day,
+    row.rateSource,
+    row.exchangeRate,
+    cache,
+    "exchangeRate",
+  )
+  return Number(row.amount ?? 0) * rate
+}
+
 /**
  * Cash balances as of `asOf` (YYYY-MM-DD; trades with `executedAt ≤ asOf
  * end-of-day`, external rows with `transaction_date ≤ asOf` — no asOf = latest).
  * Multi-currency portfolios return each currency in its own units. A
- * cash-base-only portfolio returns a single base-currency balance, adding each
- * trade principal, fee, and external cash effect at that event's dated FX rate.
+ * cash-base-only portfolio returns a single base-currency balance, using a
+ * stored manual rate when its source is manual and otherwise the event's dated
+ * FX rate for each trade principal, fee, and external cash effect.
  */
 export async function cashBalances(
   db: DB,
@@ -119,16 +249,6 @@ export async function cashBalances(
   const eventRates = new Map<string, number>()
   if (baseOnly) balances.set(base, 0)
 
-  const applyEffect = async (ccy: string, delta: number, eventDay: string | null) => {
-    if (!baseOnly) {
-      balances.set(ccy, (balances.get(ccy) ?? 0) + delta)
-      return
-    }
-    if (!eventDay) throw new Error(`cash event in ${ccy} has no event date for base-currency replay`)
-    const rate = await eventRateToBase(authToken, ccy, base, eventDay, eventRates)
-    balances.set(base, (balances.get(base) ?? 0) + delta * rate)
-  }
-
   const tradeWhere = and(
     eq(portfolioTransactions.portfolioId, portfolioId),
     inArray(portfolioTransactions.type, [...TRADE_CASH_TYPES]),
@@ -141,6 +261,10 @@ export async function cashBalances(
       feesSettled: portfolioTransactions.feesSettled,
       currency: portfolioTransactions.currency,
       feeCurrency: portfolioTransactions.feeCurrency,
+      exchangeRate: portfolioTransactions.exchangeRate,
+      rateSource: portfolioTransactions.rateSource,
+      feeExchangeRate: portfolioTransactions.feeExchangeRate,
+      feeRateSource: portfolioTransactions.feeRateSource,
       executedAt: portfolioTransactions.executedAt,
     })
     .from(portfolioTransactions)
@@ -148,8 +272,14 @@ export async function cashBalances(
 
   for (const tx of trades) {
     const day = toDateStr(tx.executedAt)
-    for (const [ccy, delta] of tradeCashEffects(tx)) {
-      await applyEffect(ccy, delta, day)
+    if (baseOnly) {
+      if (!day) throw new Error(`cash trade has no event date for base-currency replay`)
+      const delta = await tradeCashDeltaInBase(authToken, tx, base, day, eventRates)
+      balances.set(base, (balances.get(base) ?? 0) + delta)
+    } else {
+      for (const [ccy, delta] of tradeCashEffects(tx)) {
+        balances.set(ccy, (balances.get(ccy) ?? 0) + delta)
+      }
     }
   }
 
@@ -165,6 +295,8 @@ export async function cashBalances(
     .select({
       amount: portfolioCashTransactions.amount,
       currency: portfolioCashTransactions.currency,
+      exchangeRate: portfolioCashTransactions.exchangeRate,
+      rateSource: portfolioCashTransactions.rateSource,
       transactionDate: portfolioCashTransactions.transactionDate,
       createdAt: portfolioCashTransactions.createdAt,
     })
@@ -173,7 +305,14 @@ export async function cashBalances(
 
   for (const r of ext) {
     const ccy = (r.currency ?? "").toUpperCase()
-    await applyEffect(ccy, Number(r.amount ?? 0), toDateStr(r.transactionDate) ?? toDateStr(r.createdAt))
+    const day = toDateStr(r.transactionDate) ?? toDateStr(r.createdAt)
+    if (baseOnly) {
+      if (!day) throw new Error(`cash event in ${ccy} has no event date for base-currency replay`)
+      const delta = await externalCashDeltaInBase(authToken, r, base, day, eventRates)
+      balances.set(base, (balances.get(base) ?? 0) + delta)
+    } else if (ccy) {
+      balances.set(ccy, (balances.get(ccy) ?? 0) + Number(r.amount ?? 0))
+    }
   }
 
   // RECALC_DEBUG — the live/as-of leg of the cash replay. Pairs with
@@ -228,6 +367,8 @@ export async function cashBalanceSeries(
     day: string
     ccy: string
     delta: number
+    /** Resolve FX only when this event enters the requested history window. */
+    baseDelta?: () => Promise<number>
   }
   const events: Event[] = []
   const eventRates = new Map<string, number>()
@@ -239,6 +380,10 @@ export async function cashBalanceSeries(
       feesSettled: portfolioTransactions.feesSettled,
       currency: portfolioTransactions.currency,
       feeCurrency: portfolioTransactions.feeCurrency,
+      exchangeRate: portfolioTransactions.exchangeRate,
+      rateSource: portfolioTransactions.rateSource,
+      feeExchangeRate: portfolioTransactions.feeExchangeRate,
+      feeRateSource: portfolioTransactions.feeRateSource,
       executedAt: portfolioTransactions.executedAt,
     })
     .from(portfolioTransactions)
@@ -248,13 +393,24 @@ export async function cashBalanceSeries(
   for (const tx of trades) {
     const day = toDateStr(tx.executedAt)
     if (!day) continue
-    for (const [ccy, delta] of tradeCashEffects(tx)) events.push({ day, ccy, delta })
+    if (baseOnly) {
+      events.push({
+        day,
+        ccy: base,
+        delta: 0,
+        baseDelta: () => tradeCashDeltaInBase(authToken, tx, base, day, eventRates),
+      })
+    } else {
+      for (const [ccy, delta] of tradeCashEffects(tx)) events.push({ day, ccy, delta })
+    }
   }
 
   const ext = await db
     .select({
       amount: portfolioCashTransactions.amount,
       currency: portfolioCashTransactions.currency,
+      exchangeRate: portfolioCashTransactions.exchangeRate,
+      rateSource: portfolioCashTransactions.rateSource,
       transactionDate: portfolioCashTransactions.transactionDate,
       createdAt: portfolioCashTransactions.createdAt,
     })
@@ -265,7 +421,16 @@ export async function cashBalanceSeries(
   for (const r of ext) {
     const day = toDateStr(r.transactionDate) ?? (baseOnly ? toDateStr(r.createdAt) : null)
     if (!day || !(r.currency ?? "")) continue
-    events.push({ day, ccy: (r.currency ?? "").toUpperCase(), delta: Number(r.amount ?? 0) })
+    if (baseOnly) {
+      events.push({
+        day,
+        ccy: base,
+        delta: 0,
+        baseDelta: () => externalCashDeltaInBase(authToken, r, base, day, eventRates),
+      })
+    } else {
+      events.push({ day, ccy: (r.currency ?? "").toUpperCase(), delta: Number(r.amount ?? 0) })
+    }
   }
 
   // the running-balance sweep assumes events are ordered by day
@@ -279,8 +444,10 @@ export async function cashBalanceSeries(
     while (ei < events.length && events[ei].day <= day) {
       const e = events[ei]
       if (baseOnly) {
-        const rate = await eventRateToBase(authToken, e.ccy, base, e.day, eventRates)
-        running.set(base, (running.get(base) ?? 0) + e.delta * rate)
+        // Convert once at the event's date, then carry the resulting base delta
+        // forward rather than applying FX again to the running balance.
+        const delta = e.baseDelta ? await e.baseDelta() : e.delta
+        running.set(base, (running.get(base) ?? 0) + delta)
       } else {
         running.set(e.ccy, (running.get(e.ccy) ?? 0) + e.delta)
       }
