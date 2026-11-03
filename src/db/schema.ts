@@ -125,6 +125,14 @@ export const portfolios = portfoliosSchema.table(
      * Default `false` so no existing account changes behaviour on deploy.
      */
     cashLegOnTrade: boolean("cash_leg_on_trade").notNull().default(false),
+    /**
+     * Whether this portfolio keeps cash exclusively in baseCurrency. When
+     * enabled, replay converts each trade principal, fee, and external cash
+     * event into baseCurrency at that event's date. Investment and trade
+     * currencies remain unrestricted. Default false preserves existing
+     * multi-currency cash behavior.
+     */
+    cashBaseCurrencyOnly: boolean("cash_base_currency_only").notNull().default(false),
     // the flag PortfolioCashTab.vue uses to suppress the negative-cash warning;
     // margin accounts are expected to run a negative cash balance.
     isMarginEnabled: boolean("is_margin_enabled").notNull().default(false),

@@ -35,8 +35,37 @@ describe("Portfolio CRUD (§15 Phase B)", () => {
     const body = await res.json()
     expect(body.name).toBe("Growth")
     expect(body.baseCurrency).toBe("USD")
+    expect(body.cashBaseCurrencyOnly).toBe(false)
     expect(body.capitalBasis).toBe(0)
     expect(body.id).toBeDefined()
+  })
+
+  it("POST/PATCH persists cashBaseCurrencyOnly and preserves it when omitted", async () => {
+    const h = await makeHarness()
+    const a = app(h.db)
+    const created = await a.request("/api/portfolios", {
+      method: "POST",
+      headers: h.headers,
+      body: JSON.stringify({ name: "Cash-only", baseCurrency: "PLN", cashBaseCurrencyOnly: true }),
+    })
+    expect(created.status).toBe(201)
+    const portfolio = await created.json()
+    expect(portfolio.cashBaseCurrencyOnly).toBe(true)
+
+    const patched = await a.request(`/api/portfolios/${portfolio.id}`, {
+      method: "PATCH",
+      headers: h.headers,
+      body: JSON.stringify({ name: "Cash-only renamed", cashBaseCurrencyOnly: false }),
+    })
+    expect(patched.status).toBe(200)
+    expect((await patched.json()).cashBaseCurrencyOnly).toBe(false)
+
+    const omitted = await a.request(`/api/portfolios/${portfolio.id}`, {
+      method: "PATCH",
+      headers: h.headers,
+      body: JSON.stringify({ description: "unrelated update" }),
+    })
+    expect((await omitted.json()).cashBaseCurrencyOnly).toBe(false)
   })
 
   it("POST /api/portfolios — virtual portfolios require and persist an owned label", async () => {

@@ -122,7 +122,7 @@ async function loadPortfolio(db: DB, id: string, userId: string) {
 async function buildPortfolioCash(
   db: DB,
   authToken: string,
-  portfolio: { id: string; baseCurrency: string },
+  portfolio: { id: string; baseCurrency: string; cashBaseCurrencyOnly?: boolean },
 ): Promise<PortfolioCash> {
   const base = portfolio.baseCurrency.toUpperCase()
   const balances = await cashBalances(db, authToken, portfolio.id)
@@ -464,6 +464,10 @@ export function createPortfolioCashRoutes(db?: DB) {
 
     const body = parsed.data
     const ccy = (body.currency ?? portfolio.baseCurrency).toUpperCase()
+    const base = portfolio.baseCurrency.toUpperCase()
+    if (portfolio.cashBaseCurrencyOnly && ccy !== base) {
+      return c.json({ error: "ValidationError", message: `Cash currency must be ${base}` }, 422)
+    }
     const amount = kind === "DEPOSIT" ? Math.abs(body.amount) : -Math.abs(body.amount)
     const baseRow = fxFields(body as Record<string, unknown>, ccy)
 
@@ -509,7 +513,11 @@ export function createPortfolioCashRoutes(db?: DB) {
     if (to.isVirtual) return c.json({ error: "ReadOnlyPortfolio", message: "Virtual portfolios are read-only" }, 409)
 
     const ccy = body.currency.toUpperCase()
+    const fromCcy = from.baseCurrency.toUpperCase()
     const toCcy = (to.baseCurrency ?? ccy).toUpperCase()
+    if (from.cashBaseCurrencyOnly && ccy !== fromCcy) {
+      return c.json({ error: "ValidationError", message: `Source cash currency must be ${fromCcy}` }, 422)
+    }
     // The request `amount` is a positive magnitude (like deposit/withdraw);
     // the debit leg is stored negated, the credit leg always positive.
     const debitAmount = -Math.abs(body.amount)
@@ -552,7 +560,7 @@ export function createPortfolioCashRoutes(db?: DB) {
           toPortfolioId: from.id,
           type: "TRANSFER",
           amount: scale8(targetAmount),
-          currency: ccy,
+          currency: toCcy,
           description: creditDesc ?? null,
           transactionDate: body.transactionDate ?? null,
           reference: ref,
@@ -629,6 +637,22 @@ export function createPortfolioCashRoutes(db?: DB) {
     const txId = c.req.param("txId")
     const existing = await ownTx(database, txId, identity.id)
     if (!existing) return c.json({ error: "NotFound", message: "Cash transaction not found" }, 404)
+
+    const [portfolio] = await database
+      .select({ baseCurrency: portfolios.baseCurrency, cashBaseCurrencyOnly: portfolios.cashBaseCurrencyOnly })
+      .from(portfolios)
+      .where(eq(portfolios.id, existing.portfolioId))
+    if (portfolio?.cashBaseCurrencyOnly) {
+      const base = portfolio.baseCurrency.toUpperCase()
+      const existingCurrency = existing.currency.toUpperCase()
+      const nextCurrency = (parsed.data.currency ?? existing.currency).toUpperCase()
+      if (existingCurrency !== base) {
+        return c.json({ error: "ValidationError", message: `Non-base cash rows cannot be edited while cash is limited to ${base}` }, 422)
+      }
+      if (nextCurrency !== base) {
+        return c.json({ error: "ValidationError", message: `Cash currency must be ${base}` }, 422)
+      }
+    }
 
     const b = parsed.data
     if (b.amount != null && b.amount === 0) {

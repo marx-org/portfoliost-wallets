@@ -95,7 +95,7 @@ describe("POST /api/import/portfolios/bootstrap (§23.3)", () => {
   // twice, never reproduced once it was given room.
   it("creates a portfolio tagged with externalSource; second call is idempotent", { timeout: 30_000 }, async () => {
     const h = await boot()
-    const call = () =>
+    const call = (baseCurrency: string, cashBaseCurrencyOnly: boolean) =>
       h.app.request("/api/import/portfolios/bootstrap", {
         method: "POST",
         headers: { ...h.headers, "content-type": "application/json" },
@@ -103,21 +103,48 @@ describe("POST /api/import/portfolios/bootstrap (§23.3)", () => {
           externalSource: "google-sheets:transakcje",
           name: "Transakcje",
           currency: "PLN",
-          baseCurrency: "PLN",
+          baseCurrency,
+          cashBaseCurrencyOnly,
         }),
       })
 
-    const first = await (await call()).json()
-    expect(first).toMatchObject({ name: "Transakcje", currency: "PLN", baseCurrency: "PLN", created: true })
+    const first = await (await call("USD", false)).json()
+    expect(first).toMatchObject({ name: "Transakcje", currency: "USD", baseCurrency: "USD", created: true })
 
-    const second = await (await call()).json()
-    expect(second).toMatchObject({ id: first.id, name: "Transakcje", created: false })
+    const second = await (await call("PLN", true)).json()
+    expect(second).toMatchObject({ id: first.id, name: "Transakcje", currency: "PLN", baseCurrency: "PLN", created: false })
 
     const [row] = await h.db
-      .select({ externalSource: portfolios.externalSource })
+      .select({ externalSource: portfolios.externalSource, baseCurrency: portfolios.baseCurrency, cashBaseCurrencyOnly: portfolios.cashBaseCurrencyOnly })
       .from(portfolios)
       .where(eq(portfolios.id, first.id))
     expect(row.externalSource).toBe("google-sheets:transakcje")
+    expect(row.baseCurrency).toBe("PLN")
+    expect(row.cashBaseCurrencyOnly).toBe(true)
+  })
+
+  it("does not claim or rewrite a manual portfolio with the same name", async () => {
+    const h = await boot()
+    const [manual] = await h.db
+      .insert(portfolios)
+      .values({ userId: "user-1", name: "Transakcje", baseCurrency: "USD", cashBaseCurrencyOnly: false })
+      .returning()
+
+    const res = await h.app.request("/api/import/portfolios/bootstrap", {
+      method: "POST",
+      headers: { ...h.headers, "content-type": "application/json" },
+      body: JSON.stringify({
+        externalSource: "google-sheets:transakcje",
+        name: "Transakcje",
+        currency: "PLN",
+        baseCurrency: "PLN",
+        cashBaseCurrencyOnly: true,
+      }),
+    })
+
+    expect(res.status).toBe(409)
+    const [unchanged] = await h.db.select().from(portfolios).where(eq(portfolios.id, manual.id))
+    expect(unchanged).toMatchObject({ externalSource: null, baseCurrency: "USD", cashBaseCurrencyOnly: false })
   })
 
   it("unknown fields → 422", async () => {
@@ -127,9 +154,10 @@ describe("POST /api/import/portfolios/bootstrap (§23.3)", () => {
       headers: { ...h.headers, "content-type": "application/json" },
       body: JSON.stringify({
         externalSource: "s",
-        name: "P",
-        currency: "PLN",
-        bogus: 1,
+          name: "P",
+          currency: "PLN",
+          cashBaseCurrencyOnly: false,
+          bogus: 1,
       }),
     })
     expect(res.status).toBe(422)

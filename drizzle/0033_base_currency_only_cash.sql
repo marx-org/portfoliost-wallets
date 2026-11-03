@@ -1,0 +1,2 @@
+ALTER TABLE "portfolios"."portfolios" ADD COLUMN "cash_base_currency_only" boolean DEFAULT false NOT NULL;--> statement-breakpoint
+COMMENT ON COLUMN "portfolios"."portfolios"."cash_base_currency_only" IS 'Whether the portfolio holds cash only in its base currency (base_currency); replay converts trade principal, fees and external cash effects into base_currency at each event date. Investment and trade currencies remain unrestricted.';

@@ -232,6 +232,13 @@
       "when": 1791827916699,
       "tag": "0032_known_madame_web",
       "breakpoints": true
+    },
+    {
+      "idx": 33,
+      "version": "7",
+      "when": 1793702857921,
+      "tag": "0033_base_currency_only_cash",
+      "breakpoints": true
     }
   ]
 }
