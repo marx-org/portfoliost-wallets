@@ -238,6 +238,50 @@ describe("cashBalances", () => {
     expect(history.get("2024-01-03")).toBeCloseTo(current.get("PLN")!, 8)
   })
 
+  it("#48: a fee already in the base currency is debited at face value, not at the trade rate", async () => {
+    mockInstrumentsFx({ table: { USD: 1, EUR: 2, GBP: 2, CHF: 1, PLN: 4 }, asOf: "2024-01-03" })
+    await h.db.update(portfolios).set({ cashBaseCurrencyOnly: true }).where(eq(portfolios.id, portfolioId))
+    // The exact shape sheets-sync emits for a PLN-denominated commission on a
+    // foreign trade (transakcje-mapper feeFields): feeCurrency = PLN, rate 1, manual.
+    await trade({
+      type: "BUY", totalAmount: 625.8, currency: "GBP", exchangeRate: 5.3913, rateSource: "manual",
+      feesSettled: 35.87, feeCurrency: "PLN", feeExchangeRate: 1, feeRateSource: "manual",
+      executedAt: "2024-01-01T10:00:00.000Z",
+    })
+    await trade({
+      type: "SELL", totalAmount: 100, currency: "USD", exchangeRate: 4, rateSource: "manual",
+      feesSettled: 19, feeCurrency: "PLN", feeExchangeRate: 1, feeRateSource: "manual",
+      executedAt: "2024-01-02T10:00:00.000Z",
+    })
+    // A third-currency fee still chains fee → trade → base.
+    await trade({
+      type: "BUY", totalAmount: 10, currency: "GBP", exchangeRate: 9, rateSource: "manual",
+      feesSettled: 2, feeCurrency: "CHF", feeExchangeRate: 0.5, feeRateSource: "manual",
+      executedAt: "2024-01-03T10:00:00.000Z",
+    })
+
+    const current = await cashBalances(h.db, null, portfolioId)
+    const history = await cashBalanceSeries(h.db, null, portfolioId, "2024-01-01", "2024-01-03", "PLN")
+    // BUY: -625.8 × 5.3913 - 35.87.  SELL: +100 × 4 - 19.  Final BUY: -10 × 9 - 2 × 0.5 × 9.
+    const expected = -625.8 * 5.3913 - 35.87 + 400 - 19 - 90 - 9
+    expect(current.get("PLN")).toBeCloseTo(expected, 8)
+    expect(history.get("2024-01-01")).toBeCloseTo(-625.8 * 5.3913 - 35.87, 8)
+    expect(history.get("2024-01-02")).toBeCloseTo(current.get("PLN")! + 99, 8)
+    expect(history.get("2024-01-03")).toBeCloseTo(current.get("PLN")!, 8)
+  })
+
+  it("#48: a base-currency fee stays its own leg in a multi-currency portfolio", async () => {
+    await trade({
+      type: "BUY", totalAmount: 100, currency: "USD", exchangeRate: 4.2, rateSource: "manual",
+      feesSettled: 19, feeCurrency: "PLN", feeExchangeRate: 1, feeRateSource: "manual",
+      executedAt: "2024-01-01T10:00:00.000Z",
+    })
+    const current = await cashBalances(h.db, null, portfolioId)
+    expect(current.get("USD")).toBe(-100)
+    expect(current.get("PLN")).toBe(-19)
+    expect(current.size).toBe(2)
+  })
+
   it("#46: automatic trade, fee, and external FX remain event-date resolved", async () => {
     mockInstrumentsFx({
       table: { USD: 2, EUR: 1, PLN: 5 },

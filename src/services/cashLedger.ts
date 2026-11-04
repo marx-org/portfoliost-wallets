@@ -129,6 +129,12 @@ async function cashLegRateToBase(
  * D29's trade rate is trade-currency → base; its manual fee rate is
  * fee-currency → trade-currency. Automatic foreign-currency fees retain the
  * ledger's existing event-date fee-currency → base lookup.
+ *
+ * A fee already denominated in the base currency needs no conversion at all:
+ * sheets-sync writes `feeCurrency = <base>`, `feeExchangeRate = 1`,
+ * `feeRateSource = manual` for every fee the sheet records in PLN, and feeding
+ * that identity rate through the fee → trade → base chain would debit a 19 PLN
+ * commission on a GBP trade as 19 × the GBP rate (#48).
  */
 async function tradeCashDeltaInBase(
   authToken: string | null,
@@ -147,6 +153,7 @@ async function tradeCashDeltaInBase(
   day: string,
   cache: Map<string, number>,
 ): Promise<number> {
+  const base = baseCurrency.toUpperCase()
   const tradeCurrency = (tx.currency ?? "").toUpperCase()
   const feeCurrency = (tx.feeCurrency ?? tx.currency ?? "").toUpperCase()
   const notional = Number(tx.totalAmount ?? 0)
@@ -180,6 +187,11 @@ async function tradeCashDeltaInBase(
       // Same-currency fees need no fee FX; convert them once with the principal
       // leg's trade-currency rate (manual or event-date automatic).
       feeToBase = await getTradeToBase()
+    } else if (feeCurrency === base) {
+      // #48 — the fee is already in base currency. Its stored manual rate is
+      // fee-currency → trade-currency, so chaining it would multiply a PLN
+      // commission by the foreign trade rate.
+      feeToBase = 1
     } else if (tx.feeRateSource === "manual") {
       const feeToTrade = manualRate(tx.feeExchangeRate, "feeExchangeRate")
       feeToBase = feeToTrade * (await getTradeToBase())
