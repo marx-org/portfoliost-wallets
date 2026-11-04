@@ -334,6 +334,129 @@ describe("DELETE /api/import/source/:externalSource (§23.5)", () => {
 })
 
 describe("POST /api/import/transactions (§23.4)", () => {
+  it("keeps PLN fees in the native cash leg and converts them for USD cost basis, P/L, and base display", async () => {
+    const h = await boot()
+    const { portfolioId } = await seedPortfolio(h)
+
+    const res = await postTransactions(h, [
+      {
+        externalId: "fee-fx-buy-usd-pln",
+        portfolioName: "Transakcje",
+        executedAt: "2024-01-15T10:00:00.000Z",
+        portfolioTx: {
+          portfolioId,
+          type: "BUY",
+          instrumentSymbol: "FEEFX",
+          quantity: 10,
+          price: 100,
+          currency: "USD",
+          exchangeRate: 4.7975,
+          rateSource: "manual",
+          fees: 19,
+          feesType: "fixed",
+          feeCurrency: "PLN",
+          feeExchangeRate: 1,
+          feeRateSource: "manual",
+        },
+      },
+      {
+        externalId: "fee-fx-buy-usd-pln-2",
+        portfolioName: "Transakcje",
+        executedAt: "2024-01-20T10:00:00.000Z",
+        portfolioTx: {
+          portfolioId,
+          type: "BUY",
+          instrumentSymbol: "FEEFX",
+          quantity: 10,
+          price: 110,
+          currency: "USD",
+          exchangeRate: 4.7975,
+          rateSource: "manual",
+          fees: 19,
+          feesType: "fixed",
+          feeCurrency: "PLN",
+          feeExchangeRate: 1,
+          feeRateSource: "manual",
+        },
+      },
+      {
+        externalId: "fee-fx-sell-usd-pln",
+        portfolioName: "Transakcje",
+        executedAt: "2024-02-15T10:00:00.000Z",
+        portfolioTx: {
+          portfolioId,
+          type: "SELL",
+          instrumentSymbol: "FEEFX",
+          quantity: 20,
+          price: 120,
+          currency: "USD",
+          exchangeRate: 4.7975,
+          rateSource: "manual",
+          fees: 19,
+          feesType: "fixed",
+          feeCurrency: "PLN",
+          feeExchangeRate: 1,
+          feeRateSource: "manual",
+        },
+      },
+      {
+        externalId: "fee-fx-pct-is-usd",
+        portfolioName: "Transakcje",
+        executedAt: "2024-02-16T10:00:00.000Z",
+        portfolioTx: {
+          portfolioId,
+          type: "BUY",
+          instrumentSymbol: "PCTFX",
+          quantity: 10,
+          price: 100,
+          currency: "USD",
+          exchangeRate: 4.8,
+          rateSource: "manual",
+          fees: 1,
+          feesType: "pct",
+          feeCurrency: "PLN",
+          feeExchangeRate: 1,
+          feeRateSource: "manual",
+        },
+      },
+    ])
+
+    expect(res.status).toBe(200)
+    expect((await res.json()).errors).toEqual([])
+
+    const imported = await h.db
+      .select()
+      .from(portfolioTransactions)
+      .where(eq(portfolioTransactions.portfolioId, portfolioId))
+    const buy = imported.find((tx) => tx.externalId === "fee-fx-buy-usd-pln")!
+    const sell = imported.find((tx) => tx.externalId === "fee-fx-sell-usd-pln")!
+    const pct = imported.find((tx) => tx.externalId === "fee-fx-pct-is-usd")!
+    expect(buy.feeCurrency).toBe("PLN")
+    expect(Number(buy.feeExchangeRate)).toBe(1)
+    expect(Number(buy.feesSettled)).toBe(19)
+    expect(Number(buy.convertedFees)).toBe(19)
+    expect(Number(sell.convertedFees)).toBe(19)
+    expect(Number(sell.realizedGainLoss)).toBe(288.04)
+    expect(Number(sell.convertedRealizedGainLoss)).toBeCloseTo(1381.87, 2)
+
+    const [position] = await h.db
+      .select()
+      .from(positions)
+      .where(and(positionInPortfolio(portfolioId), eq(positions.symbol, "FEEFX")))
+    expect(Number(position.averageCostBasis)).toBe(105.4)
+
+    // A percentage is materialized in USD under D28; the supplied PLN fee
+    // denomination/rate cannot turn it into a PLN cash leg.
+    expect(pct.feeCurrency).toBe("USD")
+    expect(Number(pct.feesSettled)).toBe(10)
+    expect(Number(pct.convertedFees)).toBe(48)
+
+    const { cashBalances } = await import("../services/cashLedger.js")
+    const balances = await cashBalances(h.db, null, portfolioId)
+    expect(balances.get("USD")).toBeCloseTo(-710, 8) // −1,000 − 1,100 + 2,400 − 1,000 − 10
+    expect(balances.get("PLN")).toBe(-57) // three fixed PLN fees remain separate native legs
+  })
+
   it("BUY then SELL restates the position (avg cost, qty, realizedGainLoss)", async () => {
     const h = await boot()
     const { portfolioId } = await seedPortfolio(h)

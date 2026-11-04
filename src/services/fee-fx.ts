@@ -1,6 +1,9 @@
 import { isValidRate, settleFee } from "@marx-org/contracts/fx"
 import { resolvedFxRate } from "./instruments-fx.js"
 
+const round2 = (n: number) => Math.round(n * 100) / 100
+const round8 = (n: number) => Math.round(n * 1e8) / 1e8
+
 export interface FeeFxFields {
   feeCurrency: string
   feesType: "fixed" | "pct"
@@ -15,6 +18,100 @@ export interface FeeFxFields {
 export type FeeFxResult =
   | { ok: true; fields: FeeFxFields; feesSettled: number }
   | { ok: false; message: string }
+
+export type TransactionFeeConversion =
+  | { ok: true; feeInTransactionCurrency: number; convertedFees: number }
+  | { ok: false; message: string }
+
+/**
+ * Convert an imported fee for the two outputs that are denominated differently
+ * from the stored fee leg: position cost / realised P&L (transaction currency)
+ * and `convertedFees` (portfolio base currency).
+ *
+ * `feesSettled` remains untouched and is persisted in `feeCurrency`; cash replay
+ * consumes that native leg directly. D29's manual fee rate is fee-currency →
+ * transaction-currency. A fee already in the portfolio base currency is a
+ * special case: its base value is the original amount, so derive its
+ * transaction-currency equivalent by dividing by the principal rate. This also
+ * avoids multiplying a PLN fee by sheets-sync's identity fee rate of 1.
+ * Percentage fees have no independent currency under D28 and are materialized
+ * in the transaction currency by the importer.
+ */
+export async function convertTransactionFee(
+  authToken: string | null,
+  input: {
+    amount: number
+    feesType?: string | null
+    feeCurrency: string
+    feeRateSource?: string | null
+    feeExchangeRate?: number | null
+    transactionCurrency: string
+    baseCurrency: string
+    transactionToBaseRate: number
+    date: string
+  },
+): Promise<TransactionFeeConversion> {
+  const amount = Math.abs(Number(input.amount) || 0)
+  const transactionCurrency = input.transactionCurrency.toUpperCase()
+  const baseCurrency = input.baseCurrency.toUpperCase()
+  const feeCurrency = input.feeCurrency.toUpperCase()
+  const transactionToBaseRate = input.transactionToBaseRate
+
+  if (!isValidRate(transactionToBaseRate)) {
+    return { ok: false, message: "transactionToBaseRate must be a positive number" }
+  }
+  if (amount === 0) {
+    return { ok: true, feeInTransactionCurrency: 0, convertedFees: 0 }
+  }
+
+  // D28: pct fees have no independent denomination; settleImportFees has
+  // materialized this amount from the transaction notional in transaction ccy.
+  if (input.feesType === "pct" || feeCurrency === transactionCurrency) {
+    const feeInTransactionCurrency = amount
+    return {
+      ok: true,
+      feeInTransactionCurrency,
+      convertedFees: round2(feeInTransactionCurrency * transactionToBaseRate),
+    }
+  }
+
+  if (feeCurrency === baseCurrency) {
+    return {
+      ok: true,
+      feeInTransactionCurrency: round8(amount / transactionToBaseRate),
+      convertedFees: round2(amount),
+    }
+  }
+
+  let feeToTransactionRate: number
+  if (input.feeRateSource === "manual") {
+    if (!isValidRate(input.feeExchangeRate)) {
+      return { ok: false, message: "feeExchangeRate must be a positive number when feeRateSource is manual" }
+    }
+    feeToTransactionRate = input.feeExchangeRate
+  } else {
+    // Preserve the transaction-date automatic lookup used by fee settlement.
+    feeToTransactionRate =
+      (await resolvedFxRate(authToken, feeCurrency, transactionCurrency, input.date))?.rate ?? 1
+  }
+
+  const feeInTransactionCurrency = settleFee(
+    amount,
+    feeCurrency,
+    transactionCurrency,
+    {},
+    feeToTransactionRate,
+  )
+  if (feeInTransactionCurrency == null) {
+    return { ok: false, message: `could not convert ${feeCurrency} fee to ${transactionCurrency}` }
+  }
+
+  return {
+    ok: true,
+    feeInTransactionCurrency: round8(feeInTransactionCurrency),
+    convertedFees: round2(feeInTransactionCurrency * transactionToBaseRate),
+  }
+}
 
 /**
  * Resolve + validate fee/FX fields of a movement request (fees-and-custom-fx
