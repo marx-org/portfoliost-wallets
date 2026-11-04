@@ -32,6 +32,7 @@ import { notifyTransactionsChanged } from "../services/recalc-queue.js"
 import { transferCloseForDate } from "../services/backfill.js"
 import { resolveServiceToken } from "../services/instruments-fx.js"
 import { rateToBase } from "../services/cashLedger.js"
+import { convertTransactionFee } from "../services/fee-fx.js"
 import { samePositionInstrument } from "../services/positionGroups.js"
 import type { components } from "../generated/api-types.js"
 
@@ -46,7 +47,7 @@ const round2 = (n: number) => Math.round(n * 100) / 100
 const round8 = (n: number) => Math.round(n * 1e8) / 1e8
 const scale8 = (n: number) => n.toFixed(8)
 
-/** Fees settled in the transaction currency from the importer-supplied fee. */
+/** Materialize a fixed fee in its supplied currency or a pct fee in transaction currency. */
 function settleImportFees(
   fees: number | null | undefined,
   feesType: string | null | undefined,
@@ -215,7 +216,7 @@ async function upsertImportPositionOnBuy(
     price: number
     currency: string
     assetType: string
-    feesSettled: number
+    feeInTransactionCurrency: number
     /** §72.8 — the instrument's listing currency when the importer resolved it. */
     listingCurrency?: string | null
     /** §72.13 — the TRADE's date, which is when the lot opened. */
@@ -248,13 +249,18 @@ async function upsertImportPositionOnBuy(
   const existing = compatible.find((candidate) => candidate.isOpen)
     ?? compatible.filter((candidate) => !candidate.isOpen)
       .sort((a, b) => a.openedAt.getTime() - b.openedAt.getTime())[0]
+  // A LONG opening's settled cost includes its commission; a SHORT opening's
+  // recorded premium is net of that cost.
+  const feeSign = body.direction === "SHORT" ? -1 : 1
+  const costOfTrade = body.quantity * body.price + feeSign * body.feeInTransactionCurrency
+  const costPerUnit = round8(costOfTrade / body.quantity)
 
   if (existing) {
     const reopening = !existing.isOpen
     const oldQty = reopening ? 0 : Number(existing.quantity)
     const oldCost = Number(existing.averageCostBasis)
     const newQty = oldQty + body.quantity
-    const newAvgCost = round2((oldQty * oldCost + body.quantity * body.price) / newQty)
+    const newAvgCost = round2((oldQty * oldCost + costOfTrade) / newQty)
 
     const [updated] = await tx
       .update(positions)
@@ -302,7 +308,7 @@ async function upsertImportPositionOnBuy(
       symbol,
       companyName: body.instrumentName,
       quantity: String(body.quantity),
-      averageCostBasis: String(body.price),
+      averageCostBasis: String(costPerUnit),
       instrumentCurrency: body.listingCurrency?.toUpperCase() ?? body.currency,
       assetType: body.assetType,
       contractSize: body.contractSize != null ? String(body.contractSize) : null,
@@ -342,7 +348,7 @@ async function processImportSell(
     symbol: string
     quantity: number
     price: number
-    feesSettled: number
+    feeInTransactionCurrency: number
     /** §72.13 — the SELL's date, which is when the lot closed. */
     executedAt: Date
     /** Close the lot with this direction (undefined = default NULL/LONG lot). */
@@ -385,7 +391,7 @@ async function processImportSell(
   const sellQty = Math.min(body.quantity, oldQty)
 
   const avgCost = Number(pos.averageCostBasis)
-  const realizedGainLoss = round2((body.price - avgCost) * sellQty - body.feesSettled)
+  const realizedGainLoss = round2((body.price - avgCost) * sellQty - body.feeInTransactionCurrency)
   const newQty = Math.round((oldQty - sellQty) * 1e8) / 1e8
 
   const updateData: Record<string, unknown> = {
@@ -1381,7 +1387,7 @@ async function insertImportTransfer(
       price: draw.price,
       currency: txCcy,
       assetType: ptx.assetType,
-      feesSettled: 0,
+      feeInTransactionCurrency: 0,
       listingCurrency: ptx.listingCurrency,
       executedAt,
       sector: ptx.sector ?? null,
@@ -1533,6 +1539,29 @@ async function insertImportPortfolioTx(
   const restatedPrice = Math.abs(importCum - 1) < 1e-12 ? price : round8(originalPrice / importCum)
   const notional = quantity * restatedPrice
   const feesSettled = settleImportFees(ptx.fees, ptx.feesType, notional)
+  // D28 gives percentage fees no independent currency: settle and persist them
+  // in the transaction currency. Fixed fees retain their source denomination
+  // for the native cash leg.
+  const feeCurrency =
+    ptx.feesType === "pct" && feesSettled !== 0
+      ? txCcy
+      : ptx.feeCurrency?.toUpperCase() ?? null
+  const feeRateSource = ptx.feesType === "pct" ? "automatic" : ptx.feeRateSource ?? "automatic"
+  const feeExchangeRate = ptx.feesType === "pct" ? null : ptx.feeExchangeRate ?? null
+  const feeConversion = await convertTransactionFee(authToken, {
+    amount: feesSettled,
+    feesType: ptx.feesType,
+    feeCurrency: feeCurrency ?? txCcy,
+    feeRateSource,
+    feeExchangeRate,
+    transactionCurrency: txCcy,
+    baseCurrency,
+    transactionToBaseRate: rate,
+    date: executedAt.toISOString().slice(0, 10),
+  })
+  if (!feeConversion.ok) {
+    throw new ImportRowError("invalid_fee_conversion", row.externalId, feeConversion.message)
+  }
 
   // §49 convention (interactive route): a DIVIDEND's totalAmount is the NET
   // (gross − withholding tax); the wallet leg keeps whatever the importer
@@ -1562,7 +1591,7 @@ async function insertImportPortfolioTx(
       price: restatedPrice,
       currency: txCcy,
       assetType: ptx.assetType,
-      feesSettled,
+      feeInTransactionCurrency: feeConversion.feeInTransactionCurrency,
       listingCurrency: ptx.listingCurrency,
       executedAt,
       direction: ptx.direction ?? null,
@@ -1578,7 +1607,8 @@ async function insertImportPortfolioTx(
       symbol,
       quantity,
       price: ptx.type === "EXPIRATION" ? 0 : restatedPrice,
-      feesSettled: ptx.type === "EXPIRATION" ? 0 : feesSettled,
+      feeInTransactionCurrency:
+        ptx.type === "EXPIRATION" ? 0 : feeConversion.feeInTransactionCurrency,
       executedAt,
       // SELL rows that reach this branch are always default-lot closes (a
       // SHORT-direction SELL is an open, handled above) — so the default
@@ -1636,18 +1666,18 @@ async function insertImportPortfolioTx(
       assetType: ptx.assetType,
       fees: ptx.fees != null ? scale8(ptx.fees) : null,
       feesType: ptx.feesType ?? null,
-      feeCurrency: ptx.feeCurrency?.toUpperCase() ?? null,
+      feeCurrency,
       taxes: ptx.taxes != null ? scale8(ptx.taxes) : null,
       feesSettled: scale8(feesSettled),
       totalAmount: String(totalAmount),
       realizedGainLoss: realizedGainLoss != null ? String(realizedGainLoss) : null,
       exchangeRate: String(rate),
       rateSource: ptx.rateSource ?? "automatic",
-      feeRateSource: ptx.feeRateSource ?? "automatic",
-      feeExchangeRate: ptx.feeExchangeRate != null ? String(ptx.feeExchangeRate) : null,
+      feeRateSource,
+      feeExchangeRate: feeExchangeRate != null ? String(feeExchangeRate) : null,
       convertedTotalAmount: String(round2(totalAmount * rate)),
       convertedPrice: String(round2(price * rate)),
-      convertedFees: String(round2(feesSettled * rate)),
+      convertedFees: String(feeConversion.convertedFees),
       convertedRealizedGainLoss:
         realizedGainLoss != null ? String(round2(realizedGainLoss * rate)) : null,
       externalSource: source.externalSource,
