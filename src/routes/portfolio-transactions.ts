@@ -638,7 +638,7 @@ export function createTransactionRoutes(db?: DB) {
           feeExchangeRate: fx.fields.feeExchangeRate != null ? String(fx.fields.feeExchangeRate) : null,
           convertedTotalAmount: String(round2(netAmount * fx.fields.exchangeRate)),
           convertedPrice: String(round2(body.price * fx.fields.exchangeRate)),
-          convertedFees: String(round2(fx.feesSettled * fx.fields.exchangeRate)),
+          convertedFees: String(round2(fx.feeInBase)),
           executedAt,
         })
         .returning()
@@ -650,7 +650,7 @@ export function createTransactionRoutes(db?: DB) {
         position = await upsertPositionOnBuy(tx, identity.id, portfolioId, {
           ...body,
           symbol,
-          feesSettled: fx.feesSettled,
+          feesSettled: fx.feeInTransaction,
           openedAt: executedAt,
         })
         // back-link positionId on the transaction
@@ -668,7 +668,7 @@ export function createTransactionRoutes(db?: DB) {
           price: body.price,
           currency: txCcy,
           positionId: body.positionId,
-          feesSettled: fx.feesSettled,
+          feesSettled: fx.feeInTransaction,
           executedAt,
         })
         if ("error" in sellResult) return { error: sellResult.error }
@@ -693,10 +693,10 @@ export function createTransactionRoutes(db?: DB) {
         // The amount mirrors the importer's `rowCcyCash`: what the trade actually
         // moved, i.e. the net amount (notional − taxes for a dividend, though a
         // dividend never gets a leg) PLUS the settled fees, which the replay effect
-        // subtracts from the wallet. Fees are in `fx.feeCurrency`, so a fee in
-        // another currency is converted with the rate this trade already resolved.
-        const feesInRowCcy =
-          (fx.feesSettled || 0) * (fx.fields.feeCurrency === txCcy ? 1 : fx.fields.feeExchangeRate ?? 1)
+        // subtracts from the wallet. The fee is native in `fx.feeCurrency`; its
+        // transaction-currency value is what resolveFeeFx already derived, so the
+        // leg is gross = notional + feeInTransaction.
+        const feesInRowCcy = round2(fx.feeInTransaction)
         const gross = round2(Math.abs(netAmount) + feesInRowCcy)
         const [cash] = await tx
           .insert(portfolioCashTransactions)
@@ -718,14 +718,10 @@ export function createTransactionRoutes(db?: DB) {
 
       await recomputePortfolioTotals(tx, c.req.header("Authorization") ?? null, identity.id, portfolioId)
 
-      const convertedFees =
-        body.fees != null
-          ? round2(
-              (fx.fields.feesType === "pct" ? notional * (body.fees ?? 0) / 100 : (body.fees ?? 0))
-              * (fx.fields.feeCurrency === txCcy ? 1 : fx.fields.feeExchangeRate ?? 1)
-              * fx.fields.exchangeRate,
-            )
-          : 0
+      // resolveFeeFx already resolved both denominations from the fee's own rate
+      // to the base currency. Recomputing here from `body.fees` is what multiplied
+      // a PLN fee by the trade rate (#41).
+      const convertedFees = body.fees != null ? round2(fx.feeInBase) : 0
 
       return {
         transaction: {
@@ -835,7 +831,7 @@ export function createTransactionRoutes(db?: DB) {
           feeExchangeRate: fx.fields.feeExchangeRate != null ? String(fx.fields.feeExchangeRate) : null,
           convertedTotalAmount: String(round2(netAmount * fx.fields.exchangeRate)),
           convertedPrice: String(round2(price * fx.fields.exchangeRate)),
-          convertedFees: String(round2(fx.feesSettled * fx.fields.exchangeRate)),
+          convertedFees: String(round2(fx.feeInBase)),
           executedAt: body.executedAt ? new Date(body.executedAt) : existing.executedAt,
           updatedAt: new Date(),
         })
@@ -857,7 +853,7 @@ export function createTransactionRoutes(db?: DB) {
         rateSource: fx.fields.rateSource,
         convertedTotalAmount: round2(netAmount * fx.fields.exchangeRate),
         convertedPrice: round2(price * fx.fields.exchangeRate),
-        convertedFees: round2(fx.feesSettled * fx.fields.exchangeRate),
+        convertedFees: round2(fx.feeInBase),
       }
     })
 
@@ -1347,7 +1343,7 @@ export function createTransactionRoutes(db?: DB) {
           feeExchangeRate: fx.fields.feeExchangeRate != null ? String(fx.fields.feeExchangeRate) : null,
           convertedTotalAmount: String(round2(notional * fx.fields.exchangeRate)),
           convertedPrice: String(round2(price * fx.fields.exchangeRate)),
-          convertedFees: String(round2(fx.feesSettled * fx.fields.exchangeRate)),
+          convertedFees: String(round2(fx.feeInBase)),
           executedAt,
         })
         .returning()
@@ -1362,7 +1358,7 @@ export function createTransactionRoutes(db?: DB) {
         assetType: body.assetType,
         sector: body.sector,
         country: body.country,
-        feesSettled: fx.feesSettled,
+        feesSettled: fx.feeInTransaction,
         contractSize: body.contractSize,
         direction: body.direction,
         optionType: body.optionType,
@@ -1384,8 +1380,7 @@ export function createTransactionRoutes(db?: DB) {
       // rate this request already resolved.
       let cashLeg = null
       if (body.cashLeg) {
-        const feesInRowCcy =
-          (fx.feesSettled || 0) * (fx.fields.feeCurrency === currency ? 1 : fx.fields.feeExchangeRate ?? 1)
+        const feesInRowCcy = round2(fx.feeInTransaction)
         const gross = round2(notional + feesInRowCcy)
         const [cash] = await tx
           .insert(portfolioCashTransactions)

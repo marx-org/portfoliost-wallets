@@ -495,6 +495,60 @@ describe("POST /api/import/transactions (§23.4)", () => {
     expect(balances.get("PLN")).toBe(-57) // three fixed PLN fees remain separate native legs
   })
 
+  it("a third-currency fee is converted by its own rate to the base, not by the trade rate (#57)", async () => {
+    const h = await boot()
+    const { portfolioId } = await seedPortfolio(h)
+
+    // Production row 233 shape: a 1.25 USD commission on a EUR SAP.DE sale in a
+    // PLN-base portfolio. The sheet's fee rate (4.44) is USD -> PLN, the trade
+    // rate (4.67) is EUR -> PLN. Multiplying the fee by the trade rate booked
+    // 5.55 EUR of cost instead of 1.1884 EUR.
+    const res = await postTransactions(h, [
+      {
+        externalId: "fee-fx-eur-usd",
+        portfolioName: "Transakcje",
+        executedAt: "2022-06-20T10:00:00.000Z",
+        portfolioTx: {
+          portfolioId,
+          type: "BUY",
+          instrumentSymbol: "SAP.DE",
+          quantity: 10,
+          price: 100,
+          currency: "EUR",
+          exchangeRate: 4.67,
+          rateSource: "manual",
+          fees: 1.25,
+          feesType: "fixed",
+          feeCurrency: "USD",
+          feeExchangeRate: 4.44,
+          feeRateSource: "manual",
+        },
+      },
+    ])
+    expect(res.status).toBe(200)
+    expect((await res.json()).errors).toEqual([])
+
+    const [tx] = await h.db
+      .select()
+      .from(portfolioTransactions)
+      .where(eq(portfolioTransactions.portfolioId, portfolioId))
+    expect(Number(tx.feesSettled)).toBe(1.25) // native leg, still in USD
+    expect(tx.feeCurrency).toBe("USD")
+    expect(Number(tx.feeExchangeRate)).toBe(4.44)
+    expect(Number(tx.convertedFees)).toBe(5.55) // 1.25 USD x 4.44 PLN/USD
+
+    const [position] = await h.db
+      .select()
+      .from(positions)
+      .where(and(positionInPortfolio(portfolioId), eq(positions.symbol, "SAP.DE")))
+    expect(Number(position.averageCostBasis)).toBeCloseTo((1000 + 1.25 * 4.44 / 4.67) / 10, 8)
+
+    const { cashBalances } = await import("../services/cashLedger.js")
+    const balances = await cashBalances(h.db, null, portfolioId)
+    expect(balances.get("EUR")).toBeCloseTo(-1000, 8)
+    expect(balances.get("USD")).toBeCloseTo(-1.25, 8)
+  })
+
   it("BUY then SELL restates the position (avg cost, qty, realizedGainLoss)", async () => {
     const h = await boot()
     const { portfolioId } = await seedPortfolio(h)
