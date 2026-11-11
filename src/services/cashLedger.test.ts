@@ -407,6 +407,25 @@ describe("cashCurrency: a single settlement currency", () => {
     expect(balances.get("USD")).toBeCloseTo(110, 8)
   })
 
+  it("#57: a fee in the ledger currency debits its native amount, never a re-conversion", async () => {
+    // Workbook row 233 replayed against a USD settlement ledger: a 1.25 USD
+    // commission on a EUR SAP.DE sale, fee rate 4.44 (PLN per USD), trade rate
+    // 4.67 (PLN per EUR). The fee is already in the ledger currency, so chaining
+    // it through fee -> base -> ledger would debit 4.44 / 1.0518 = 4.22 USD.
+    const eurToUsd = 4.67 / 4.44
+    mockInstrumentsFx({ table: { EUR: 1, USD: eurToUsd, PLN: 4.67 }, asOf: "2022-06-20" })
+    await h.db.update(portfolios).set({ cashCurrency: "USD" }).where(eq(portfolios.id, portfolioId))
+    await trade({
+      type: "SELL", totalAmount: 2069.95, currency: "EUR", exchangeRate: 4.67, rateSource: "manual",
+      feesSettled: 1.25, feeCurrency: "USD", feeExchangeRate: 4.44, feeRateSource: "manual",
+      executedAt: "2022-06-20T10:00:00.000Z",
+    })
+
+    const balances = await cashBalances(h.db, null, portfolioId)
+    expect([...balances.keys()]).toEqual(["USD"])
+    expect(balances.get("USD")).toBeCloseTo(2069.95 * eurToUsd - 1.25, 8)
+  })
+
   it("cashBaseCurrencyOnly alone still replays into the base currency", async () => {
     mockInstrumentsFx({ table: { USD: 1.1, PLN: 4.4 }, asOf: "2024-01-03" })
     await h.db.update(portfolios).set({ cashBaseCurrencyOnly: true }).where(eq(portfolios.id, portfolioId))
