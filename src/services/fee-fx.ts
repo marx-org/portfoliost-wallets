@@ -16,7 +16,16 @@ export interface FeeFxFields {
 }
 
 export type FeeFxResult =
-  | { ok: true; fields: FeeFxFields; feesSettled: number }
+  | {
+      ok: true
+      fields: FeeFxFields
+      /** the fee in its own currency — the native cash leg */
+      feesSettled: number
+      /** fee revalued to the portfolio base currency */
+      feeInBase: number
+      /** fee revalued to the transaction currency, for position math */
+      feeInTransaction: number
+    }
   | { ok: false; message: string }
 
 export type TransactionFeeConversion =
@@ -29,13 +38,21 @@ export type TransactionFeeConversion =
  * and `convertedFees` (portfolio base currency).
  *
  * `feesSettled` remains untouched and is persisted in `feeCurrency`; cash replay
- * consumes that native leg directly. D29's manual fee rate is fee-currency →
- * transaction-currency. A fee already in the portfolio base currency is a
- * special case: its base value is the original amount, so derive its
- * transaction-currency equivalent by dividing by the principal rate. This also
- * avoids multiplying a PLN fee by sheets-sync's identity fee rate of 1.
- * Percentage fees have no independent currency under D28 and are materialized
- * in the transaction currency by the importer.
+ * consumes that native leg directly.
+ *
+ * The manual fee rate is the fee currency's rate to the portfolio **base**
+ * currency — the sheet's col 32 "Kurs waluty opłaty" — not fee → transaction
+ * currency. Production proves it: workbook row 233 books a 1.25 USD commission
+ * on a EUR SAP.DE sale at 4.44, the PLN/USD quote of 2022-06-20, while the trade
+ * rate on the same row is 4.67 (EUR → PLN). Treating 4.44 as USD per EUR debits
+ * the position 5.55 EUR instead of 1.1884 EUR.
+ *
+ * So the fee's base value is `amount × feeToBaseRate`, and its value in the
+ * transaction currency is that divided by the trade's own base rate. A fee
+ * already in the base currency is the same rule with rate 1, which is why
+ * sheets-sync's identity fee rate must not be chained through the trade rate
+ * (#48). Percentage fees have no independent denomination under D28 and are
+ * materialized in the transaction currency by the importer.
  */
 export async function convertTransactionFee(
   authToken: string | null,
@@ -75,53 +92,49 @@ export async function convertTransactionFee(
     }
   }
 
+  let feeToBaseRate: number
   if (feeCurrency === baseCurrency) {
-    return {
-      ok: true,
-      feeInTransactionCurrency: round8(amount / transactionToBaseRate),
-      convertedFees: round2(amount),
-    }
-  }
-
-  let feeToTransactionRate: number
-  if (input.feeRateSource === "manual") {
+    // The stored manual rate for a base-currency fee is the identity 1; the
+    // base value is the amount itself (#48).
+    feeToBaseRate = 1
+  } else if (input.feeRateSource === "manual") {
     if (!isValidRate(input.feeExchangeRate)) {
       return { ok: false, message: "feeExchangeRate must be a positive number when feeRateSource is manual" }
     }
-    feeToTransactionRate = input.feeExchangeRate
+    feeToBaseRate = input.feeExchangeRate
   } else {
     // Preserve the transaction-date automatic lookup used by fee settlement.
-    feeToTransactionRate =
-      (await resolvedFxRate(authToken, feeCurrency, transactionCurrency, input.date))?.rate ?? 1
+    feeToBaseRate = (await resolvedFxRate(authToken, feeCurrency, baseCurrency, input.date))?.rate ?? 1
   }
 
-  const feeInTransactionCurrency = settleFee(
-    amount,
-    feeCurrency,
-    transactionCurrency,
-    {},
-    feeToTransactionRate,
-  )
-  if (feeInTransactionCurrency == null) {
-    return { ok: false, message: `could not convert ${feeCurrency} fee to ${transactionCurrency}` }
+  const feeInBase = settleFee(amount, feeCurrency, baseCurrency, {}, feeToBaseRate)
+  if (feeInBase == null) {
+    return { ok: false, message: `could not convert ${feeCurrency} fee to ${baseCurrency}` }
   }
 
   return {
     ok: true,
-    feeInTransactionCurrency: round8(feeInTransactionCurrency),
-    convertedFees: round2(feeInTransactionCurrency * transactionToBaseRate),
+    feeInTransactionCurrency: round8(feeInBase / transactionToBaseRate),
+    convertedFees: round2(feeInBase),
   }
 }
 
 /**
  * Resolve + validate fee/FX fields of a movement request (fees-and-custom-fx
- * D28/D29/D32), computing the settled fee in the WALLET currency.
+ * D28/D29/D32).
  *
  * - `rateSource=manual` requires a positive finite `exchangeRate` (tx ccy ->
  *   wallet base ccy); `automatic` resolves from instruments' fx_rates (plan
  *   §48.3 — the FX data moved to the instruments module).
- * - `pct` fees are materialized against `notional` on the fly.
- * - foreign `feeCurrency` settles via `settleFee` (manual fee rate wins).
+ * - `pct` fees are materialized against `notional` on the fly and, having no
+ *   independent denomination (D28), take the transaction currency as their fee
+ *   currency.
+ * - `feesSettled` is the fee **in its own currency** — the native cash leg the
+ *   ledger replays. `feeExchangeRate` is the fee currency's rate to the
+ *   portfolio base currency, the same axis the importer writes (sheet col 32
+ *   "Kurs waluty opłaty"); it is not fee → transaction currency.
+ * - `feeInBase` and `feeInTransaction` are the two derived denominations the
+ *   position math and the base-currency display need.
  */
 export async function resolveFeeFx(
   authToken: string | null,
@@ -134,13 +147,12 @@ export async function resolveFeeFx(
   const rateSource = body.rateSource === "manual" ? "manual" : "automatic"
   const feeRateSource = body.feeRateSource === "manual" ? "manual" : "automatic"
   const feesType: "fixed" | "pct" = body.fees_type === "pct" || body.feesType === "pct" ? "pct" : "fixed"
-  const feeCurrency = String(body.fee_currency ?? body.feeCurrency ?? walletCcy).toUpperCase()
   const upperWallet = walletCcy.toUpperCase()
   // #116 — conversion target is the owning portfolio base currency (the display
   // currency), not a hardcoded USD. `walletCcy` stays the transaction currency so
-  // fee settlement is unchanged; only the rate used for the converted* fields
-  // moves to the display currency.
+  // the transaction leg is unchanged; only the fee denominations move to it.
   const displayCcy = (opts.displayCcy ?? "USD").toUpperCase()
+  let feeCurrency = String(body.fee_currency ?? body.feeCurrency ?? upperWallet).toUpperCase()
 
   // main rate (tx ccy -> display/base currency)
   let exchangeRate: number
@@ -157,28 +169,38 @@ export async function resolveFeeFx(
     exchangeRate = (await resolvedFxRate(authToken, upperWallet, displayCcy))?.rate ?? 1
   }
 
-  // fee materialization + settlement
+  // fee materialization
   const rawFees = num(body.fees) ?? 0
   const effectiveFee =
     feesType === "pct" ? ((opts.notional ?? 0) * rawFees) / 100 : rawFees > 0 ? rawFees : 0
 
+  // D28: a percentage is a share of the notional, so it is denominated in the
+  // transaction currency. The import path does the same (import.ts).
+  if (feesType === "pct") feeCurrency = upperWallet
+
+  // fee -> base rate. It is not stored when no independent rate is needed:
+  // a fee already in the base currency is its own base value, and a fee in the
+  // transaction currency rides the trade's own rate.
   let feeExchangeRate: number | null = null
-  if (effectiveFee > 0 && feeCurrency !== upperWallet) {
-    if (feeRateSource === "manual") {
-      const fr = num(body.feeExchangeRate)
-      if (!isValidRate(fr)) return { ok: false, message: "feeExchangeRate must be a positive number when feeRateSource is 'manual'" }
-      feeExchangeRate = fr
+  let feeInBase = 0
+  if (effectiveFee > 0) {
+    if (feeCurrency === displayCcy) {
+      feeInBase = round8(effectiveFee)
+    } else if (feeCurrency === upperWallet) {
+      feeInBase = round8(effectiveFee * exchangeRate)
     } else {
-      feeExchangeRate = (await resolvedFxRate(authToken, feeCurrency, upperWallet))?.rate ?? 1
+      if (feeRateSource === "manual") {
+        const fr = num(body.feeExchangeRate)
+        if (!isValidRate(fr)) return { ok: false, message: "feeExchangeRate must be a positive number when feeRateSource is 'manual'" }
+        feeExchangeRate = fr
+      } else {
+        feeExchangeRate = (await resolvedFxRate(authToken, feeCurrency, displayCcy))?.rate ?? 1
+      }
+      feeInBase = round8(settleFee(effectiveFee, feeCurrency, displayCcy, {}, feeExchangeRate) ?? 0)
     }
   }
-
-  const feesSettled =
-    effectiveFee === 0
-      ? 0
-      : Math.round(
-          (settleFee(effectiveFee, feeCurrency, upperWallet, {}, feeExchangeRate ?? undefined) ?? 0) * 1e8,
-        ) / 1e8
+  const feeInTransaction =
+    effectiveFee === 0 ? 0 : feeCurrency === upperWallet ? effectiveFee : round8(feeInBase / exchangeRate)
 
   // elastic transfer target leg (wallets D22)
   let transferFxRate: number | null = null
@@ -218,6 +240,8 @@ export async function resolveFeeFx(
       transferFxRate,
       targetAmount,
     },
-    feesSettled,
+    feesSettled: effectiveFee,
+    feeInBase,
+    feeInTransaction,
   }
 }
