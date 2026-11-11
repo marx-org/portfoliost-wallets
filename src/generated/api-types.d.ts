@@ -3197,8 +3197,10 @@ export interface components {
             name: string;
             description?: string | null;
             baseCurrency?: string;
-            /** @description Whether this portfolio holds cash only in baseCurrency. When true, cash effects from trades and external cash rows are converted using event-date FX. Investment and trade currencies remain unrestricted. */
+            /** @description Whether this portfolio holds cash only in baseCurrency. When true, cash effects from trades and external cash rows are converted using event-date FX. Investment and trade currencies remain unrestricted. Shorthand for `cashCurrency = baseCurrency`; `cashCurrency` wins when both are set. */
             cashBaseCurrencyOnly: boolean;
+            /** @description The single currency the portfolio's CASH ledger is denominated in — the currency the broker actually settles in, which is not necessarily the portfolio's baseCurrency. When set, every trade principal, fee and external cash effect is replayed into this currency at its own event date, and the balance is revalued to baseCurrency for display. When null the ledger keeps one balance per trade currency. A broker whose account is single-currency (IBKR: USD) must set it, otherwise the per-trade-currency balances it produces are fictitious. */
+            cashCurrency?: string | null;
             capitalBasis: number;
             currentValue: number;
             isPublic: boolean;
@@ -3236,6 +3238,8 @@ export interface components {
             isPublic?: boolean;
             /** @description Cash-only currency policy. When true, cash is held in baseCurrency; investment and trade currencies remain unrestricted. Optional for backward compatibility: omitted on create defaults to false and omitted on update preserves the current value. */
             cashBaseCurrencyOnly?: boolean;
+            /** @description The single currency the cash ledger is denominated in. Optional: omitted on create leaves the ledger per-currency, omitted on update preserves the current value. Setting it to baseCurrency is the same as `cashBaseCurrencyOnly: true`. */
+            cashCurrency?: string | null;
             /**
              * @description True for a virtual portfolio; see the schema description for the label requirement.
              * @default false
@@ -3956,6 +3960,8 @@ export interface components {
             baseCurrency?: string;
             /** @description Cash-only currency policy for the imported portfolio. When true, cash is held in baseCurrency; investment and trade currencies remain unrestricted. Importers must send the explicit policy value. */
             cashBaseCurrencyOnly: boolean;
+            /** @description The currency the imported account actually settles cash in. For a single-currency broker account that is not the portfolio base currency (IBKR: USD), this is what keeps the cash ledger from inventing a balance in every instrument's trading currency. */
+            cashCurrency?: string | null;
         };
         ImportPortfolioBootstrapResponse: {
             /** Format: uuid */

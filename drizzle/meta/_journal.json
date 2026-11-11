@@ -239,6 +239,13 @@
       "when": 1793702857921,
       "tag": "0033_base_currency_only_cash",
       "breakpoints": true
+    },
+    {
+      "idx": 34,
+      "version": "7",
+      "when": 1794411945320,
+      "tag": "0034_cash_settlement_currency",
+      "breakpoints": true
     }
   ]
 }

@@ -123,6 +123,44 @@ describe("POST /api/import/portfolios/bootstrap (§23.3)", () => {
     expect(row.cashBaseCurrencyOnly).toBe(true)
   })
 
+  it("bootstrap carries a settlement currency distinct from the base (IBKR: PLN display, USD cash)", async () => {
+    const h = await boot()
+    const body = {
+      externalSource: "google-sheets:transakcje",
+      name: "IBKR",
+      currency: "PLN",
+      baseCurrency: "PLN",
+      cashBaseCurrencyOnly: false,
+      cashCurrency: "usd",
+    }
+    const first = await (await h.app.request("/api/import/portfolios/bootstrap", {
+      method: "POST",
+      headers: { ...h.headers, "content-type": "application/json" },
+      body: JSON.stringify(body),
+    })).json()
+    expect(first).toMatchObject({ created: true, baseCurrency: "PLN" })
+
+    // A re-import that drops the field must not silently revert a single-currency
+    // account to a per-trade-currency ledger.
+    const [row] = await h.db
+      .select({ cashCurrency: portfolios.cashCurrency, cashBaseCurrencyOnly: portfolios.cashBaseCurrencyOnly })
+      .from(portfolios)
+      .where(eq(portfolios.id, first.id))
+    expect(row.cashCurrency).toBe("USD")
+
+    const reimport = await (await h.app.request("/api/import/portfolios/bootstrap", {
+      method: "POST",
+      headers: { ...h.headers, "content-type": "application/json" },
+      body: JSON.stringify({ ...body, cashCurrency: null }),
+    })).json()
+    expect(reimport.created).toBe(false)
+    const [updated] = await h.db
+      .select({ cashCurrency: portfolios.cashCurrency })
+      .from(portfolios)
+      .where(eq(portfolios.id, first.id))
+    expect(updated.cashCurrency).toBeNull()
+  })
+
   it("does not claim or rewrite a manual portfolio with the same name", async () => {
     const h = await boot()
     const [manual] = await h.db

@@ -20,7 +20,7 @@ import {
   portfolioTransactions,
   labels,
 } from "../db/schema.js"
-import { cashBalances, cashBalanceSeries, toDateStr, tradeCashEffects } from "../services/cashLedger.js"
+import { cashBalances, cashBalanceSeries, ledgerCurrency, toDateStr, tradeCashEffects } from "../services/cashLedger.js"
 import { fxTo } from "../services/instruments-fx.js"
 import { ISO_CURRENCY } from "../services/currency.js"
 import {
@@ -464,9 +464,9 @@ export function createPortfolioCashRoutes(db?: DB) {
 
     const body = parsed.data
     const ccy = (body.currency ?? portfolio.baseCurrency).toUpperCase()
-    const base = portfolio.baseCurrency.toUpperCase()
-    if (portfolio.cashBaseCurrencyOnly && ccy !== base) {
-      return c.json({ error: "ValidationError", message: `Cash currency must be ${base}` }, 422)
+    const ledger = ledgerCurrency(portfolio)
+    if (ledger && ccy !== ledger) {
+      return c.json({ error: "ValidationError", message: `Cash currency must be ${ledger}` }, 422)
     }
     const amount = kind === "DEPOSIT" ? Math.abs(body.amount) : -Math.abs(body.amount)
     const baseRow = fxFields(body as Record<string, unknown>, ccy)
@@ -513,10 +513,10 @@ export function createPortfolioCashRoutes(db?: DB) {
     if (to.isVirtual) return c.json({ error: "ReadOnlyPortfolio", message: "Virtual portfolios are read-only" }, 409)
 
     const ccy = body.currency.toUpperCase()
-    const fromCcy = from.baseCurrency.toUpperCase()
+    const fromLedger = ledgerCurrency(from)
     const toCcy = (to.baseCurrency ?? ccy).toUpperCase()
-    if (from.cashBaseCurrencyOnly && ccy !== fromCcy) {
-      return c.json({ error: "ValidationError", message: `Source cash currency must be ${fromCcy}` }, 422)
+    if (fromLedger && ccy !== fromLedger) {
+      return c.json({ error: "ValidationError", message: `Source cash currency must be ${fromLedger}` }, 422)
     }
     // The request `amount` is a positive magnitude (like deposit/withdraw);
     // the debit leg is stored negated, the credit leg always positive.
@@ -639,18 +639,22 @@ export function createPortfolioCashRoutes(db?: DB) {
     if (!existing) return c.json({ error: "NotFound", message: "Cash transaction not found" }, 404)
 
     const [portfolio] = await database
-      .select({ baseCurrency: portfolios.baseCurrency, cashBaseCurrencyOnly: portfolios.cashBaseCurrencyOnly })
+      .select({
+        baseCurrency: portfolios.baseCurrency,
+        cashBaseCurrencyOnly: portfolios.cashBaseCurrencyOnly,
+        cashCurrency: portfolios.cashCurrency,
+      })
       .from(portfolios)
       .where(eq(portfolios.id, existing.portfolioId))
-    if (portfolio?.cashBaseCurrencyOnly) {
-      const base = portfolio.baseCurrency.toUpperCase()
+    const ledger = ledgerCurrency(portfolio)
+    if (ledger) {
       const existingCurrency = existing.currency.toUpperCase()
       const nextCurrency = (parsed.data.currency ?? existing.currency).toUpperCase()
-      if (existingCurrency !== base) {
-        return c.json({ error: "ValidationError", message: `Non-base cash rows cannot be edited while cash is limited to ${base}` }, 422)
+      if (existingCurrency !== ledger) {
+        return c.json({ error: "ValidationError", message: `Non-${ledger} cash rows cannot be edited while cash is limited to ${ledger}` }, 422)
       }
-      if (nextCurrency !== base) {
-        return c.json({ error: "ValidationError", message: `Cash currency must be ${base}` }, 422)
+      if (nextCurrency !== ledger) {
+        return c.json({ error: "ValidationError", message: `Cash currency must be ${ledger}` }, 422)
       }
     }
 
