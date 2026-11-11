@@ -1,8 +1,13 @@
 /**
  * Plan §62 — portfolio-native cash ledger, derived by replay.
  *
- * A portfolio owns its cash as a per-currency ledger; nothing is stored. The
- * per-currency balance is a pure function of:
+ * A portfolio owns its cash as a ledger; nothing is stored. The ledger is
+ * denominated in one of two ways:
+ *   • `cashCurrency` set (or `cashBaseCurrencyOnly: true`) — a single balance
+ *     in that currency, every effect converted at its own event date;
+ *   • neither — one balance per currency, each in its own units.
+ *
+ * The per-currency effects come from:
  *   (a) portfolio trade rows — BUY −(notional+fees), SELL +(notional−fees),
  *       DIVIDEND +net (the §49 convention: totalAmount is net of tax) −
  *       fees; principal leg in `tx.currency`, fee leg in
@@ -13,6 +18,15 @@
  *
  * Splits/ADJUSTMENT have no cash effect. Negative balances are allowed
  * (replay fidelity — real ledgers dip negative before a deposit lands).
+ *
+ * **Why the settlement currency is not the display base.** A single-currency
+ * broker account settles every leg into one currency and books the conversion
+ * itself (IBKR's Cash Report carries `CurrencyPrimary = USD` on every row and a
+ * "Net Amount in Base from Forex Trade" line for each foreign leg). Booking
+ * the leg in the instrument's trading currency instead manufactures balances
+ * in currencies the account never held — measured on the live IBKR portfolio
+ * 2026-11-11: seven such balances, and a cash figure 7 035.81 PLN above the
+ * broker's own −165.049018 USD.
  */
 import { and, eq, inArray, sql } from "drizzle-orm"
 import type { DB } from "../db/index.js"
@@ -75,26 +89,53 @@ export function tradeCashEffects(tx: {
 
 async function cashPolicy(db: DB, portfolioId: string) {
   const [portfolio] = await db
-    .select({ baseCurrency: portfolios.baseCurrency, cashBaseCurrencyOnly: portfolios.cashBaseCurrencyOnly })
+    .select({
+      baseCurrency: portfolios.baseCurrency,
+      cashBaseCurrencyOnly: portfolios.cashBaseCurrencyOnly,
+      cashCurrency: portfolios.cashCurrency,
+    })
     .from(portfolios)
     .where(eq(portfolios.id, portfolioId))
   return portfolio
 }
 
-async function eventRateToBase(
+/**
+ * The single currency a portfolio's cash ledger is denominated in, or `null`
+ * when the ledger is genuinely multi-currency.
+ *
+ * `cashCurrency` is the settlement currency of the account — the currency the
+ * broker actually holds money in — and it is deliberately not the portfolio's
+ * display base. `cashBaseCurrencyOnly: true` is exactly `cashCurrency =
+ * baseCurrency`, so a portfolio that only ever sets the flag behaves the same
+ * as before.
+ */
+export function ledgerCurrency(
+  policy: { baseCurrency?: string | null; cashBaseCurrencyOnly?: boolean; cashCurrency?: string | null } | null,
+): string | null {
+  if (!policy) return null
+  const explicit = (policy.cashCurrency ?? "").trim().toUpperCase()
+  if (explicit) return explicit
+  if (policy.cashBaseCurrencyOnly === true) {
+    const base = (policy.baseCurrency ?? "").trim().toUpperCase()
+    return base || null
+  }
+  return null
+}
+
+async function eventRateTo(
   authToken: string | null,
   from: string,
-  base: string,
+  to: string,
   day: string,
   cache: Map<string, number>,
 ): Promise<number> {
-  const key = `${from}>${base}@${day}`
+  const key = `${from}>${to}@${day}`
   const cached = cache.get(key)
   if (cached !== undefined) return cached
-  // Base-currency-only replay must not turn a missing historical quote into a
+  // A single-currency replay must not turn a missing historical quote into a
   // fabricated 1:1 balance. rateToBase throws when either the FX service or the
   // requested dated pair is unavailable.
-  const rate = await rateToBase(authToken, from, base, day, { strict: true })
+  const rate = await rateToBase(authToken, from, to, day, { strict: true })
   cache.set(key, rate)
   return rate
 }
@@ -107,9 +148,19 @@ function manualRate(value: string | number | null | undefined, field: string): n
   return rate
 }
 
-async function cashLegRateToBase(
+/**
+ * Rate for one cash leg into the ledger currency.
+ *
+ * A stored manual rate is the sheet's own currency -> baseCurrency quote. It is
+ * usable directly only when the ledger is denominated in that base; against a
+ * different settlement currency the event-date pair is used instead, because
+ * chaining the sheet's 2-dp rate through base would compound two independent
+ * quotes into one number nobody chose.
+ */
+async function cashLegRateTo(
   authToken: string | null,
   currency: string,
+  target: string,
   baseCurrency: string,
   day: string,
   source: string | null | undefined,
@@ -118,25 +169,27 @@ async function cashLegRateToBase(
   field: string,
 ): Promise<number> {
   const from = currency.toUpperCase()
-  const base = baseCurrency.toUpperCase()
-  if (from === base) return 1
-  if (source === "manual") return manualRate(storedRate, field)
-  return eventRateToBase(authToken, from, base, day, cache)
+  const to = target.toUpperCase()
+  if (from === to) return 1
+  if (to === baseCurrency.toUpperCase() && source === "manual") return manualRate(storedRate, field)
+  return eventRateTo(authToken, from, to, day, cache)
 }
 
 /**
- * Convert one trade's cash effects to base currency for cash-base-only replay.
- * D29's trade rate is trade-currency → base; its manual fee rate is
- * fee-currency → trade-currency. Automatic foreign-currency fees retain the
- * ledger's existing event-date fee-currency → base lookup.
+ * Convert one trade's cash effects into the ledger currency.
  *
- * A fee already denominated in the base currency needs no conversion at all:
- * sheets-sync writes `feeCurrency = <base>`, `feeExchangeRate = 1`,
- * `feeRateSource = manual` for every fee the sheet records in PLN, and feeding
- * that identity rate through the fee → trade → base chain would debit a 19 PLN
- * commission on a GBP trade as 19 × the GBP rate (#48).
+ * D29's trade rate is trade-currency -> baseCurrency; its manual fee rate is
+ * fee-currency -> baseCurrency. Automatic foreign-currency fees keep the
+ * ledger's event-date fee-currency -> ledger lookup.
+ *
+ * A fee already in the ledger currency needs no conversion at all: sheets-sync
+ * writes `feeCurrency = <base>`, `feeExchangeRate = 1`, `feeRateSource = manual`
+ * for every fee the sheet records in PLN, and feeding that identity rate through
+ * the fee -> trade -> ledger chain would debit a 19 PLN commission on a GBP trade
+ * as 19 GBP (#48). Against a settlement currency that is not the base (IBKR:
+ * USD, base PLN) the same fee converts once, PLN -> USD, at the event date.
  */
-async function tradeCashDeltaInBase(
+async function tradeCashDeltaInCurrency(
   authToken: string | null,
   tx: {
     type: string
@@ -149,6 +202,7 @@ async function tradeCashDeltaInBase(
     feeExchangeRate?: string | number | null
     feeRateSource?: string | null
   },
+  ledger: string,
   baseCurrency: string,
   day: string,
   cache: Map<string, number>,
@@ -159,13 +213,14 @@ async function tradeCashDeltaInBase(
   const notional = Number(tx.totalAmount ?? 0)
   const fee = Number(tx.feesSettled ?? 0)
   const principalSign = tx.type === "BUY" ? -1 : 1
-  let tradeToBase: number | undefined
-  const getTradeToBase = async () => {
-    if (tradeToBase === undefined) {
-      tradeToBase = await cashLegRateToBase(
+  let tradeToLedger: number | undefined
+  const getTradeToLedger = async () => {
+    if (tradeToLedger === undefined) {
+      tradeToLedger = await cashLegRateTo(
         authToken,
         tradeCurrency,
-        baseCurrency,
+        ledger,
+        base,
         day,
         tx.rateSource,
         tx.exchangeRate,
@@ -173,33 +228,43 @@ async function tradeCashDeltaInBase(
         "exchangeRate",
       )
     }
-    return tradeToBase
+    return tradeToLedger
+  }
+  let baseToLedger: number | undefined
+  const getBaseToLedger = async () => {
+    if (baseToLedger === undefined) {
+      baseToLedger = await eventRateTo(authToken, base, ledger, day, cache)
+    }
+    return baseToLedger
   }
 
   let delta = 0
   if (notional !== 0 && tradeCurrency) {
-    delta += principalSign * Math.abs(notional) * (await getTradeToBase())
+    delta += principalSign * Math.abs(notional) * (await getTradeToLedger())
   }
 
   if (fee !== 0 && feeCurrency) {
-    let feeToBase: number
-    if (feeCurrency === tradeCurrency) {
+    let feeToLedger: number
+    if (feeCurrency === ledger) {
+      feeToLedger = 1
+    } else if (feeCurrency === tradeCurrency) {
       // Same-currency fees need no fee FX; convert them once with the principal
       // leg's trade-currency rate (manual or event-date automatic).
-      feeToBase = await getTradeToBase()
+      feeToLedger = await getTradeToLedger()
     } else if (feeCurrency === base) {
-      // #48 — the fee is already in base currency. Its stored manual rate is
-      // fee-currency → trade-currency, so chaining it would multiply a PLN
-      // commission by the foreign trade rate.
-      feeToBase = 1
+      // #48 - the fee is already in the portfolio's base currency, so its stored
+      // manual rate is the identity. Chaining it through the trade rate would
+      // multiply a PLN commission by the foreign trade rate.
+      feeToLedger = await getBaseToLedger()
     } else if (tx.feeRateSource === "manual") {
-      const feeToTrade = manualRate(tx.feeExchangeRate, "feeExchangeRate")
-      feeToBase = feeToTrade * (await getTradeToBase())
+      const feeToBase = manualRate(tx.feeExchangeRate, "feeExchangeRate")
+      feeToLedger = feeToBase * (await getBaseToLedger())
     } else {
-      feeToBase = await cashLegRateToBase(
+      feeToLedger = await cashLegRateTo(
         authToken,
         feeCurrency,
-        baseCurrency,
+        ledger,
+        base,
         day,
         "automatic",
         null,
@@ -207,13 +272,17 @@ async function tradeCashDeltaInBase(
         "feeExchangeRate",
       )
     }
-    delta -= Math.abs(fee) * feeToBase
+    delta -= Math.abs(fee) * feeToLedger
   }
   return delta
 }
 
-/** External cash-row exchangeRate is stored directly as row-currency → base. */
-async function externalCashDeltaInBase(
+/**
+ * External cash-row exchangeRate is stored directly as row-currency -> base.
+ * Against a different settlement currency the row converts through the
+ * event-date pair instead.
+ */
+async function externalCashDeltaInCurrency(
   authToken: string | null,
   row: {
     amount: string | number | null
@@ -221,15 +290,17 @@ async function externalCashDeltaInBase(
     exchangeRate?: string | number | null
     rateSource?: string | null
   },
+  ledger: string,
   baseCurrency: string,
   day: string,
   cache: Map<string, number>,
 ): Promise<number> {
   const currency = (row.currency ?? "").toUpperCase()
   if (!currency) return 0
-  const rate = await cashLegRateToBase(
+  const rate = await cashLegRateTo(
     authToken,
     currency,
+    ledger,
     baseCurrency,
     day,
     row.rateSource,
@@ -243,10 +314,10 @@ async function externalCashDeltaInBase(
 /**
  * Cash balances as of `asOf` (YYYY-MM-DD; trades with `executedAt ≤ asOf
  * end-of-day`, external rows with `transaction_date ≤ asOf` — no asOf = latest).
- * Multi-currency portfolios return each currency in its own units. A
- * cash-base-only portfolio returns a single base-currency balance, using a
- * stored manual rate when its source is manual and otherwise the event's dated
- * FX rate for each trade principal, fee, and external cash effect.
+ * A portfolio with a settlement currency returns a single balance in that
+ * currency, using a stored manual rate when its source is manual and the event's
+ * dated FX rate otherwise, for each trade principal, fee and external cash
+ * effect. A portfolio with none returns each currency in its own units.
  */
 export async function cashBalances(
   db: DB,
@@ -257,9 +328,9 @@ export async function cashBalances(
   const balances = new Map<string, number>()
   const policy = await cashPolicy(db, portfolioId)
   const base = policy?.baseCurrency.toUpperCase() ?? ""
-  const baseOnly = policy?.cashBaseCurrencyOnly === true
+  const ledger = ledgerCurrency(policy)
   const eventRates = new Map<string, number>()
-  if (baseOnly) balances.set(base, 0)
+  if (ledger) balances.set(ledger, 0)
 
   const tradeWhere = and(
     eq(portfolioTransactions.portfolioId, portfolioId),
@@ -284,10 +355,10 @@ export async function cashBalances(
 
   for (const tx of trades) {
     const day = toDateStr(tx.executedAt)
-    if (baseOnly) {
-      if (!day) throw new Error(`cash trade has no event date for base-currency replay`)
-      const delta = await tradeCashDeltaInBase(authToken, tx, base, day, eventRates)
-      balances.set(base, (balances.get(base) ?? 0) + delta)
+    if (ledger) {
+      if (!day) throw new Error(`cash trade has no event date for single-currency replay`)
+      const delta = await tradeCashDeltaInCurrency(authToken, tx, ledger, base, day, eventRates)
+      balances.set(ledger, (balances.get(ledger) ?? 0) + delta)
     } else {
       for (const [ccy, delta] of tradeCashEffects(tx)) {
         balances.set(ccy, (balances.get(ccy) ?? 0) + delta)
@@ -298,7 +369,7 @@ export async function cashBalances(
   const extWhere = and(
     eq(portfolioCashTransactions.portfolioId, portfolioId),
     asOf
-      ? baseOnly
+      ? ledger
         ? sql`coalesce(${portfolioCashTransactions.transactionDate}, date(${portfolioCashTransactions.createdAt})) <= ${asOf}`
         : sql`${portfolioCashTransactions.transactionDate} <= ${asOf}`
       : undefined,
@@ -318,10 +389,10 @@ export async function cashBalances(
   for (const r of ext) {
     const ccy = (r.currency ?? "").toUpperCase()
     const day = toDateStr(r.transactionDate) ?? toDateStr(r.createdAt)
-    if (baseOnly) {
-      if (!day) throw new Error(`cash event in ${ccy} has no event date for base-currency replay`)
-      const delta = await externalCashDeltaInBase(authToken, r, base, day, eventRates)
-      balances.set(base, (balances.get(base) ?? 0) + delta)
+    if (ledger) {
+      if (!day) throw new Error(`cash event in ${ccy} has no event date for single-currency replay`)
+      const delta = await externalCashDeltaInCurrency(authToken, r, ledger, base, day, eventRates)
+      balances.set(ledger, (balances.get(ledger) ?? 0) + delta)
     } else if (ccy) {
       balances.set(ccy, (balances.get(ccy) ?? 0) + Number(r.amount ?? 0))
     }
@@ -351,10 +422,12 @@ function enumerateDays(from: string, to: string): string[] {
 }
 
 /**
- * Daily base-currency cash totals across [from, to]. Multi-currency portfolios
- * revalue each running currency balance at the day's FX rate. For a
- * cash-base-only portfolio, each event is converted once at its own date and
- * the resulting base-currency balance is carried forward without revaluation.
+ * Daily base-currency cash totals across [from, to]. A portfolio with no
+ * settlement currency revalues each running currency balance at the day's FX
+ * rate. A single-currency ledger converts each event once at its own date and
+ * carries the resulting balance forward without revaluation, then revalues that
+ * one balance into the display base at the day's rate — the balance is held in
+ * the settlement currency, so its base-currency value does move with FX.
  * In both cases days are contiguous within the requested window.
  */
 export async function cashBalanceSeries(
@@ -370,8 +443,8 @@ export async function cashBalanceSeries(
   opts: { strict?: boolean } = {},
 ): Promise<Map<string, number>> {
   const policy = await cashPolicy(db, portfolioId)
-  const baseOnly = policy?.cashBaseCurrencyOnly === true
-  const base = (baseOnly ? policy.baseCurrency : baseCurrency).toUpperCase()
+  const ledger = ledgerCurrency(policy)
+  const base = baseCurrency.toUpperCase()
   const days = enumerateDays(from, to)
   if (days.length === 0) return new Map()
 
@@ -380,7 +453,7 @@ export async function cashBalanceSeries(
     ccy: string
     delta: number
     /** Resolve FX only when this event enters the requested history window. */
-    baseDelta?: () => Promise<number>
+    ledgerDelta?: () => Promise<number>
   }
   const events: Event[] = []
   const eventRates = new Map<string, number>()
@@ -405,12 +478,12 @@ export async function cashBalanceSeries(
   for (const tx of trades) {
     const day = toDateStr(tx.executedAt)
     if (!day) continue
-    if (baseOnly) {
+    if (ledger) {
       events.push({
         day,
-        ccy: base,
+        ccy: ledger,
         delta: 0,
-        baseDelta: () => tradeCashDeltaInBase(authToken, tx, base, day, eventRates),
+        ledgerDelta: () => tradeCashDeltaInCurrency(authToken, tx, ledger, base, day, eventRates),
       })
     } else {
       for (const [ccy, delta] of tradeCashEffects(tx)) events.push({ day, ccy, delta })
@@ -431,14 +504,14 @@ export async function cashBalanceSeries(
     .orderBy(portfolioCashTransactions.transactionDate)
 
   for (const r of ext) {
-    const day = toDateStr(r.transactionDate) ?? (baseOnly ? toDateStr(r.createdAt) : null)
+    const day = toDateStr(r.transactionDate) ?? (ledger ? toDateStr(r.createdAt) : null)
     if (!day || !(r.currency ?? "")) continue
-    if (baseOnly) {
+    if (ledger) {
       events.push({
         day,
-        ccy: base,
+        ccy: ledger,
         delta: 0,
-        baseDelta: () => externalCashDeltaInBase(authToken, r, base, day, eventRates),
+        ledgerDelta: () => externalCashDeltaInCurrency(authToken, r, ledger, base, day, eventRates),
       })
     } else {
       events.push({ day, ccy: (r.currency ?? "").toUpperCase(), delta: Number(r.amount ?? 0) })
@@ -455,11 +528,12 @@ export async function cashBalanceSeries(
   for (const day of days) {
     while (ei < events.length && events[ei].day <= day) {
       const e = events[ei]
-      if (baseOnly) {
-        // Convert once at the event's date, then carry the resulting base delta
-        // forward rather than applying FX again to the running balance.
-        const delta = e.baseDelta ? await e.baseDelta() : e.delta
-        running.set(base, (running.get(base) ?? 0) + delta)
+      if (ledger) {
+        // Convert once at the event's date, then carry the resulting ledger delta
+        // forward rather than applying FX again to the running balance. The day's
+        // total revalues that balance into the display base below.
+        const delta = e.ledgerDelta ? await e.ledgerDelta() : e.delta
+        running.set(ledger, (running.get(ledger) ?? 0) + delta)
       } else {
         running.set(e.ccy, (running.get(e.ccy) ?? 0) + e.delta)
       }

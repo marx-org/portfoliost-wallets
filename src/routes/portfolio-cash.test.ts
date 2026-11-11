@@ -141,6 +141,29 @@ describe("POST deposits / withdrawals (62.3)", () => {
     expect(cash.balances).toEqual([{ currency: "PLN", balance: 50 }])
   })
 
+  it("a settlement-currency portfolio accepts only that currency and reports one balance", async () => {
+    mockInstrumentsFx({ table: { USD: 1.08, PLN: 4.3 }, asOf: "2024-12-31" })
+    try {
+      const h = await boot()
+      const pf = crypto.randomUUID()
+      await h.db.insert(portfolios).values({ userId: "user-1", id: pf, name: "IBKR", baseCurrency: "PLN", cashCurrency: "USD" })
+
+      const rejected = await post(h, `/api/portfolios/${pf}/cash/deposits`, { amount: 100, currency: "PLN" })
+      expect(rejected.status).toBe(422)
+
+      const deposit = await post(h, `/api/portfolios/${pf}/cash/deposits`, { amount: 100, currency: "USD" })
+      expect(deposit.status).toBe(201)
+
+      const cash = await (await h.app.request(`/api/portfolios/${pf}/cash`, { headers: h.headers })).json()
+      expect(cash.baseCurrency).toBe("PLN")
+      expect(cash.balances).toEqual([{ currency: "USD", balance: 100 }])
+      // 100 USD at 4.3/1.08 = 3.98148 PLN per USD
+      expect(cash.total).toBe(398.15)
+    } finally {
+      unmockInstrumentsFx()
+    }
+  })
+
   it("withdrawal clamps to negative even if a positive value is sent", async () => {
     const h = await boot()
     const pf = await makePf(h)

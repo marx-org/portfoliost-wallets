@@ -59,6 +59,7 @@ export const CreatePortfolioSchema = z.object({
   // §87.5 — UI-only; see the schema.ts note. Never read by the import.
   cashLegOnTrade: z.boolean().optional(),
   cashBaseCurrencyOnly: z.boolean().optional(),
+  cashCurrency: z.string().regex(ISO_CURRENCY).nullable().optional(),
   isMarginEnabled: z.boolean().optional(),
   isVirtual: z.boolean().optional(),
   labelId: z.string().uuid().nullable().optional(),
@@ -76,6 +77,7 @@ export const UpdatePortfolioSchema = z.object({
   // §87.5 — UI-only; see the schema.ts note. Never read by the import.
   cashLegOnTrade: z.boolean().optional(),
   cashBaseCurrencyOnly: z.boolean().optional(),
+  cashCurrency: z.string().regex(ISO_CURRENCY).nullable().optional(),
   isMarginEnabled: z.boolean().optional(),
   labelId: z.string().uuid().nullable().optional(),
 })
@@ -99,6 +101,7 @@ function serializePortfolio(p: typeof portfolios.$inferSelect) {
     // §87.5 — the SPA reads this to pre-tick the form's cash checkbox.
     cashLegOnTrade: p.cashLegOnTrade,
     cashBaseCurrencyOnly: p.cashBaseCurrencyOnly,
+    cashCurrency: p.cashCurrency ?? null,
     isMarginEnabled: p.isMarginEnabled,
     createdAt: p.createdAt.toISOString(),
     updatedAt: p.updatedAt.toISOString(),
@@ -771,6 +774,7 @@ async function resolveAggregateBase(
           // carried explicitly by the import payload, never inferred here.
           cashLegOnTrade: isVirtual ? false : parsed.data.cashLegOnTrade ?? false,
           cashBaseCurrencyOnly: parsed.data.cashBaseCurrencyOnly ?? false,
+          cashCurrency: parsed.data.cashCurrency?.toUpperCase() ?? null,
           isMarginEnabled: parsed.data.isMarginEnabled ?? false,
           isVirtual,
           labelId: isVirtual ? parsed.data.labelId! : null,
@@ -1201,6 +1205,7 @@ async function resolveAggregateBase(
     if (data.baseCurrency !== undefined) updates.baseCurrency = data.baseCurrency.toUpperCase()
     if (data.isPublic !== undefined) updates.isPublic = data.isPublic
     if (data.cashBaseCurrencyOnly !== undefined) updates.cashBaseCurrencyOnly = data.cashBaseCurrencyOnly
+    if (data.cashCurrency !== undefined) updates.cashCurrency = data.cashCurrency?.toUpperCase() ?? null
     if (data.cashLegOnTrade !== undefined) {
       if (existing.isVirtual && data.cashLegOnTrade) {
         return c.json({ error: "ValidationError", message: "Virtual portfolios cannot use cash legs" }, 422)

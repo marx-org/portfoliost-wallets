@@ -68,6 +68,33 @@ describe("Portfolio CRUD (§15 Phase B)", () => {
     expect((await omitted.json()).cashBaseCurrencyOnly).toBe(false)
   })
 
+  it("POST/PATCH persists cashCurrency, normalises case, and clears it with null", async () => {
+    const h = await makeHarness()
+    const a = app(h.db)
+    const created = await a.request("/api/portfolios", {
+      method: "POST",
+      headers: h.headers,
+      body: JSON.stringify({ name: "IBKR-like", baseCurrency: "PLN", cashCurrency: "usd" }),
+    })
+    expect(created.status).toBe(201)
+    const portfolio = await created.json()
+    expect(portfolio.cashCurrency).toBe("USD")
+
+    const cleared = await a.request(`/api/portfolios/${portfolio.id}`, {
+      method: "PATCH",
+      headers: h.headers,
+      body: JSON.stringify({ cashCurrency: null }),
+    })
+    expect((await cleared.json()).cashCurrency).toBeNull()
+
+    const invalid = await a.request(`/api/portfolios/${portfolio.id}`, {
+      method: "PATCH",
+      headers: h.headers,
+      body: JSON.stringify({ cashCurrency: "zl" }),
+    })
+    expect(invalid.status).toBe(422)
+  })
+
   it("POST /api/portfolios — virtual portfolios require and persist an owned label", async () => {
     const h = await makeHarness()
     const a = app(h.db)

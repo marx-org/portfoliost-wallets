@@ -1,0 +1,2 @@
+ALTER TABLE "portfolios"."portfolios" ADD COLUMN "cash_currency" char(3);--> statement-breakpoint
+COMMENT ON COLUMN "portfolios"."portfolios"."cash_currency" IS 'Single currency the cash ledger is denominated in (the currency the account settles in). When set, trade principal, fees and external cash effects are replayed into it at their event date and the balance is revalued to base_currency for display; when null the ledger keeps one balance per trade currency. cash_base_currency_only is the shorthand for cash_currency = base_currency.';

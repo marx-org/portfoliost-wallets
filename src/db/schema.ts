@@ -133,6 +133,27 @@ export const portfolios = portfoliosSchema.table(
      * multi-currency cash behavior.
      */
     cashBaseCurrencyOnly: boolean("cash_base_currency_only").notNull().default(false),
+    /**
+     * The single currency this portfolio's CASH ledger is denominated in — the
+     * currency the account actually settles in, which is not necessarily the
+     * portfolio's display base. When set, every trade principal, fee and external
+     * cash effect is replayed into it at its own event date and the resulting
+     * balance is revalued to baseCurrency for display. When null the ledger keeps
+     * one balance per trade currency.
+     *
+     * Why this is not the same thing as `cashBaseCurrencyOnly`: a broker account
+     * can be single-currency while the portfolio is displayed in another. IBKR
+     * settles everything in USD (its Cash Report carries `CurrencyPrimary = USD`
+     * on every row and books a "Net Amount in Base from Forex Trade" line for
+     * each foreign leg) while the portfolio's base is PLN. With only the base
+     * flag, each leg is booked in the instrument's trading currency and the
+     * ledger accumulates balances in currencies the account never held.
+     *
+     * `cashBaseCurrencyOnly: true` is exactly `cashCurrency = baseCurrency`;
+     * `cashCurrency` wins when both are present, so existing portfolios behave
+     * identically until this column is set.
+     */
+    cashCurrency: char("cash_currency", { length: 3 }),
     // the flag PortfolioCashTab.vue uses to suppress the negative-cash warning;
     // margin accounts are expected to run a negative cash balance.
     isMarginEnabled: boolean("is_margin_enabled").notNull().default(false),

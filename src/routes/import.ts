@@ -75,6 +75,7 @@ export const ImportPortfolioBootstrapRequestSchema = ExternalSourceSchema.extend
   currency: z.string().regex(ISO_CURRENCY, "currency must be an ISO 4217 code"),
   baseCurrency: z.string().regex(ISO_CURRENCY).optional(),
   cashBaseCurrencyOnly: z.boolean(),
+  cashCurrency: z.string().regex(ISO_CURRENCY).nullable().optional(),
 }).strict()
 
 export const ImportLabelBootstrapRequestSchema = ExternalSourceSchema.extend({
@@ -483,6 +484,7 @@ export function createImportRoutes(db?: DB) {
     // portfolio's own currency, so this is only a fallback for new portfolios.
     const defaultBase = await preferredBaseCurrency(forwardedHeaders, undefined, { strict: false })
     const baseCurrency = (parsed.data.baseCurrency ?? defaultBase).toUpperCase()
+    const cashCurrency = parsed.data.cashCurrency?.toUpperCase() ?? null
 
     const [inserted] = await database
       .insert(portfolios)
@@ -491,6 +493,7 @@ export function createImportRoutes(db?: DB) {
         name: parsed.data.name,
         baseCurrency,
         cashBaseCurrencyOnly: parsed.data.cashBaseCurrencyOnly,
+        cashCurrency,
         externalSource: parsed.data.externalSource,
       })
       .onConflictDoNothing({ target: [portfolios.userId, portfolios.name] })
@@ -512,7 +515,7 @@ export function createImportRoutes(db?: DB) {
 
       const [updated] = await database
         .update(portfolios)
-        .set({ baseCurrency, cashBaseCurrencyOnly: parsed.data.cashBaseCurrencyOnly, updatedAt: new Date() })
+        .set({ baseCurrency, cashBaseCurrencyOnly: parsed.data.cashBaseCurrencyOnly, cashCurrency, updatedAt: new Date() })
         .where(
           and(
             eq(portfolios.id, existing.id),

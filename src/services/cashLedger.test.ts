@@ -11,6 +11,7 @@ import {
   cashBalanceSeries,
   dailyExternalFlows,
   externalCashInvested,
+  ledgerCurrency,
 } from "./cashLedger.js"
 
 beforeEach(() => mockInstrumentsFx({ table: { USD: 1.08, EUR: 1.08, PLN: 4.3 }, asOf: "2024-12-31" }))
@@ -210,7 +211,7 @@ describe("cashBalances", () => {
     expect(history.get("2024-01-04")).toBeCloseTo(current.get("PLN")!, 8)
   })
 
-  it("#46: manual fee FX converts fee currency to trade currency, with same-currency fees at 1:1", async () => {
+  it("#46: manual fee FX is the fee currency's rate to the base currency, with same-currency fees at 1:1", async () => {
     mockInstrumentsFx({ table: { USD: 1, EUR: 2, GBP: 2, CHF: 1, PLN: 4 }, asOf: "2024-01-03" })
     await h.db.update(portfolios).set({ cashBaseCurrencyOnly: true }).where(eq(portfolios.id, portfolioId))
     await trade({
@@ -231,10 +232,14 @@ describe("cashBalances", () => {
 
     const current = await cashBalances(h.db, null, portfolioId)
     const history = await cashBalanceSeries(h.db, null, portfolioId, "2024-01-01", "2024-01-03", "PLN")
-    // BUY: -100 USD × 4 - (2 EUR × 1.2 EUR→USD × 4 USD→PLN).
+    // The stored manual fee rate is PLN per unit of the FEE currency (sheets-sync
+    // col 32 "Kurs waluty opłaty"), not fee → trade currency: row 233 of the
+    // workbook books a 1.25 USD commission on a EUR SAP.DE sale at 4.44, which is
+    // the PLN/USD quote of that day, not USD per EUR.
+    // BUY: -100 USD × 4 - 2 EUR × 1.2 PLN/EUR.
     // SELL: +10 USD × 4 - 1 USD × 4; the same-currency fee rate is 1, not 999.
-    // Final BUY: -10 GBP × event-date 2 and -2 CHF × manual .5 CHF→GBP × event-date 2.
-    expect(current.get("PLN")).toBeCloseTo(-395.6, 8)
+    // Final BUY: -10 GBP × event-date 2 and -2 CHF × 0.5 PLN/CHF.
+    expect(current.get("PLN")).toBeCloseTo(-387.4, 8)
     expect(history.get("2024-01-03")).toBeCloseTo(current.get("PLN")!, 8)
   })
 
@@ -253,7 +258,7 @@ describe("cashBalances", () => {
       feesSettled: 19, feeCurrency: "PLN", feeExchangeRate: 1, feeRateSource: "manual",
       executedAt: "2024-01-02T10:00:00.000Z",
     })
-    // A third-currency fee still chains fee → trade → base.
+    // A third-currency fee converts by its own PLN rate, not through the trade.
     await trade({
       type: "BUY", totalAmount: 10, currency: "GBP", exchangeRate: 9, rateSource: "manual",
       feesSettled: 2, feeCurrency: "CHF", feeExchangeRate: 0.5, feeRateSource: "manual",
@@ -262,11 +267,11 @@ describe("cashBalances", () => {
 
     const current = await cashBalances(h.db, null, portfolioId)
     const history = await cashBalanceSeries(h.db, null, portfolioId, "2024-01-01", "2024-01-03", "PLN")
-    // BUY: -625.8 × 5.3913 - 35.87.  SELL: +100 × 4 - 19.  Final BUY: -10 × 9 - 2 × 0.5 × 9.
-    const expected = -625.8 * 5.3913 - 35.87 + 400 - 19 - 90 - 9
+    // BUY: -625.8 × 5.3913 - 35.87.  SELL: +100 × 4 - 19.  Final BUY: -10 × 9 - 2 × 0.5.
+    const expected = -625.8 * 5.3913 - 35.87 + 400 - 19 - 90 - 1
     expect(current.get("PLN")).toBeCloseTo(expected, 8)
     expect(history.get("2024-01-01")).toBeCloseTo(-625.8 * 5.3913 - 35.87, 8)
-    expect(history.get("2024-01-02")).toBeCloseTo(current.get("PLN")! + 99, 8)
+    expect(history.get("2024-01-02")).toBeCloseTo(current.get("PLN")! + 91, 8)
     expect(history.get("2024-01-03")).toBeCloseTo(current.get("PLN")!, 8)
   })
 
@@ -332,6 +337,83 @@ describe("cashBalances", () => {
     await expect(
       cashBalanceSeries(h.db, null, portfolioId, "2024-06-01", "2024-06-02", "PLN"),
     ).rejects.toThrow(/instruments answered 404/u)
+  })
+})
+
+describe("cashCurrency: a single settlement currency", () => {
+  beforeEach(async () => {
+    h = await makeHarness()
+    await seedPortfolio()
+  })
+
+  it("ledgerCurrency: the settlement currency wins over the base-currency flag", () => {
+    expect(ledgerCurrency(null)).toBe(null)
+    expect(ledgerCurrency({ baseCurrency: "PLN" })).toBe(null)
+    expect(ledgerCurrency({ baseCurrency: "PLN", cashBaseCurrencyOnly: true })).toBe("PLN")
+    expect(ledgerCurrency({ baseCurrency: "PLN", cashBaseCurrencyOnly: true, cashCurrency: "usd" })).toBe("USD")
+    expect(ledgerCurrency({ baseCurrency: "PLN", cashCurrency: "USD" })).toBe("USD")
+    expect(ledgerCurrency({ baseCurrency: "PLN", cashCurrency: null })).toBe(null)
+    expect(ledgerCurrency({ baseCurrency: "", cashBaseCurrencyOnly: true })).toBe(null)
+  })
+
+  it("replays every leg into the settlement currency and returns exactly one balance", async () => {
+    const tablesByDate = { "2024-01-01": { USD: 1.08, PLN: 4.3 } }
+    mockInstrumentsFx({ table: tablesByDate["2024-01-01"], tablesByDate, asOf: "2024-01-01" })
+    await h.db.update(portfolios).set({ cashCurrency: "USD" }).where(eq(portfolios.id, portfolioId))
+
+    // A EUR buy whose commission the sheet recorded in PLN (feeRateSource=manual,
+    // rate 1): the principal must not carry the fee, and the PLN fee must not be
+    // read as 10 USD.
+    await trade({
+      type: "BUY", totalAmount: 100, feesSettled: 10, currency: "EUR",
+      feeCurrency: "PLN", feeExchangeRate: 1, feeRateSource: "manual",
+      executedAt: "2024-01-01T10:00:00.000Z",
+    })
+    await ext({ type: "DEPOSIT", amount: 215, currency: "PLN", transactionDate: "2024-01-01" })
+
+    const plnToUsd = 1.08 / 4.3
+    const balances = await cashBalances(h.db, null, portfolioId)
+    expect([...balances.keys()]).toEqual(["USD"])
+    expect(balances.get("USD")).toBeCloseTo(-108 - 10 * plnToUsd + 215 * plnToUsd, 6)
+  })
+
+  it("the balance stays in the settlement currency and is revalued to the display base per day", async () => {
+    const tablesByDate = {
+      "2024-01-01": { USD: 1, PLN: 4 },
+      "2024-01-02": { USD: 1, PLN: 5 },
+    }
+    mockInstrumentsFx({ table: tablesByDate["2024-01-02"], tablesByDate, asOf: "2024-01-02" })
+    await h.db.update(portfolios).set({ cashCurrency: "USD" }).where(eq(portfolios.id, portfolioId))
+    await trade({ type: "SELL", totalAmount: 100, currency: "USD", executedAt: "2024-01-01T10:00:00.000Z" })
+
+    const balances = await cashBalances(h.db, null, portfolioId)
+    expect(balances.get("USD")).toBe(100)
+
+    const history = await cashBalanceSeries(h.db, null, portfolioId, "2024-01-01", "2024-01-02", "PLN")
+    expect(history.get("2024-01-01")).toBe(400)
+    expect(history.get("2024-01-02")).toBe(500)
+  })
+
+  it("a manual trade rate is used only when the ledger is the base currency", async () => {
+    // IBKR-shaped row: EUR principal, the sheet's own 2-dp PLN rate, USD ledger.
+    mockInstrumentsFx({ table: { USD: 1.1, PLN: 4.4 }, asOf: "2024-01-03" })
+    await h.db.update(portfolios).set({ cashBaseCurrencyOnly: true, cashCurrency: "USD" }).where(eq(portfolios.id, portfolioId))
+    await trade({
+      type: "SELL", totalAmount: 100, currency: "EUR", exchangeRate: 4.3, rateSource: "manual",
+      executedAt: "2024-01-03T10:00:00.000Z",
+    })
+    const balances = await cashBalances(h.db, null, portfolioId)
+    // 100 EUR x 1.1, not 100 EUR x 4.3 (which would be 4.3/1.1 = 3.909 USD).
+    expect(balances.get("USD")).toBeCloseTo(110, 8)
+  })
+
+  it("cashBaseCurrencyOnly alone still replays into the base currency", async () => {
+    mockInstrumentsFx({ table: { USD: 1.1, PLN: 4.4 }, asOf: "2024-01-03" })
+    await h.db.update(portfolios).set({ cashBaseCurrencyOnly: true }).where(eq(portfolios.id, portfolioId))
+    await trade({ type: "SELL", totalAmount: 100, currency: "USD", executedAt: "2024-01-03T10:00:00.000Z" })
+    const balances = await cashBalances(h.db, null, portfolioId)
+    expect([...balances.keys()]).toEqual(["PLN"])
+    expect(balances.get("PLN")).toBeCloseTo(400, 8)
   })
 })
 

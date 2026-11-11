@@ -85,6 +85,7 @@ describe("portfolios cash schema (§62)", () => {
     expect(p.name).toBe("Top10")
     expect(p.baseCurrency).toBe("USD")
     expect(p.cashBaseCurrencyOnly).toBe(false)
+    expect(p.cashCurrency).toBeNull()
     expect(Number(p.totalInvested)).toBe(0)
     expect(p.isPublic).toBe(false)
   })
@@ -110,6 +111,9 @@ describe("portfolios cash schema (§62)", () => {
     expect(String(policy.d)).toMatch(/cash/i)
     expect(String(policy.d)).toMatch(/base currency/i)
     expect(String(policy.d)).toMatch(/investment/i)
+    const settlement = cols.rows.find((r: any) => r.attname === "cash_currency") as any
+    expect(String(settlement.d)).toMatch(/denominated/i)
+    expect(String(settlement.d)).toMatch(/revalued/i)
   })
 
   it("dropped strategy/type/margin columns are gone", async () => {
