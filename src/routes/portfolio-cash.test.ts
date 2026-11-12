@@ -562,9 +562,10 @@ describe("GET /:id/cash/transactions (62.3)", () => {
     expect(correction.balanceAfter).toBe(1139.5) // 100 + 1100 − 60.5
     expect(conversion.balanceAfter).toBe(-1000)
 
-    const cash = await (await h.app.request(`/api/portfolios/${pf}/cash`, { headers: h.headers })).json()
-    expect(cash.balances.find((b) => b.currency === "USD").balance).toBe(1139.5)
-    expect(cash.balances.find((b) => b.currency === "EUR").balance).toBe(-1000)
+    const cash: { balances: Array<{ currency: string; balance: number }> } =
+      await (await h.app.request(`/api/portfolios/${pf}/cash`, { headers: h.headers })).json()
+    expect(cash.balances.find((b) => b.currency === "USD")!.balance).toBe(1139.5)
+    expect(cash.balances.find((b) => b.currency === "EUR")!.balance).toBe(-1000)
   })
 
   it("filters by ?labels= (AND)", async () => {
