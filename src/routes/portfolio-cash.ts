@@ -20,7 +20,7 @@ import {
   portfolioTransactions,
   labels,
 } from "../db/schema.js"
-import { cashBalances, cashBalanceSeries, ledgerCurrency, toDateStr, tradeCashEffects } from "../services/cashLedger.js"
+import { cashBalances, cashBalanceSeries, ledgerCurrency, normalizeConversionLegs, toDateStr, tradeCashEffects } from "../services/cashLedger.js"
 import { fxTo } from "../services/instruments-fx.js"
 import { ISO_CURRENCY } from "../services/currency.js"
 import {
@@ -594,10 +594,18 @@ export function createPortfolioCashRoutes(db?: DB) {
     if (portfolio.isVirtual) return c.json({ error: "ReadOnlyPortfolio", message: "Virtual portfolios are read-only" }, 409)
 
     const body = parsed.data
-    const from = body.currency.toUpperCase()
-    const to = (body.toCurrency ?? body.currency).toUpperCase()
+    const legs = normalizeConversionLegs({
+      currency: body.currency,
+      amount: body.amount,
+      toCurrency: body.toCurrency,
+      toAmount: body.toAmount,
+    })
+    if (!legs) {
+      return c.json({ error: "ValidationError", message: "this conversion changes nothing — both legs are zero" }, 422)
+    }
+    const to = legs.toCurrency ?? legs.currency
     const ledger = ledgerCurrency(portfolio)
-    if (ledger && from !== ledger && to !== ledger) {
+    if (ledger && legs.currency !== ledger && to !== ledger) {
       return c.json({
         error: "ValidationError",
         message: `A conversion in a ${ledger}-settled portfolio must involve ${ledger}`,
@@ -608,11 +616,11 @@ export function createPortfolioCashRoutes(db?: DB) {
     // the leg it belongs to — the sheets-sync mapper does, and this route
     // refuses a charge that belongs to neither leg rather than quietly dropping it.
     if (body.fees != null && Math.abs(body.fees) > 0) {
-      const chargeCcy = (body.feeCurrency ?? from).toUpperCase()
-      if (chargeCcy !== from && chargeCcy !== to) {
+      const chargeCcy = (body.feeCurrency ?? legs.currency).toUpperCase()
+      if (chargeCcy !== legs.currency && chargeCcy !== to) {
         return c.json({
           error: "ValidationError",
-          message: `A conversion charge in ${chargeCcy} belongs to neither leg (${from} handed over, ${to} received)`,
+          message: `A conversion charge in ${chargeCcy} belongs to neither leg (${legs.currency} handed over, ${to} received)`,
         }, 422)
       }
     }
@@ -623,13 +631,13 @@ export function createPortfolioCashRoutes(db?: DB) {
         userId: identity.id,
         portfolioId: portfolio.id,
         type: "FX_CONVERSION",
-        amount: scale8(body.amount),
-        currency: from,
-        toCurrency: to,
-        toAmount: scale8(Math.abs(body.toAmount)),
+        amount: scale8(legs.amount),
+        currency: legs.currency,
+        toCurrency: legs.toCurrency,
+        toAmount: legs.toAmount != null ? scale8(legs.toAmount) : null,
         description: body.description ?? null,
         transactionDate: body.transactionDate ?? null,
-        ...fxFields(body as Record<string, unknown>, from),
+        ...fxFields(body as Record<string, unknown>, legs.currency),
       })
       .returning()
 
@@ -726,7 +734,9 @@ export function createPortfolioCashRoutes(db?: DB) {
     return c.json(serializeCash(debit, { labels: [] }), 201)
   })
 
-  // GET /cash/recent-transactions — cross-portfolio feed (external rows only)
+  // GET /cash/recent-transactions — cross-portfolio feed: every cash row, the
+  // internal kinds (interest, charges, conversions) included. "External" is a
+  // property of the flow math, not of this list.
   routes.get("/cash/recent-transactions", async (c) => {
     const identity = c.get("userIdentity")
     const database = getDb()
@@ -792,12 +802,29 @@ export function createPortfolioCashRoutes(db?: DB) {
       })
       .from(portfolios)
       .where(eq(portfolios.id, existing.portfolioId))
-    const ledger = ledgerCurrency(portfolio)
     const isConversion = existing.type === "FX_CONVERSION"
+    const b = parsed.data
+    // Legs are edited as one unit. Two legs in the same currency are not an
+    // exchange but a correction of one balance, and `ck_pctx_amount_nonzero`
+    // forbids a zero amount — so the degenerate shapes collapse to the single
+    // signed leg they are equivalent to (see normalizeConversionLegs).
+    const legs = isConversion
+      ? normalizeConversionLegs({
+          currency: b.currency ?? existing.currency,
+          amount: b.amount ?? existing.amount,
+          toCurrency: b.toCurrency ?? existing.toCurrency,
+          toAmount: b.toAmount ?? existing.toAmount,
+        })
+      : null
+    if (isConversion && !legs) {
+      return c.json({ error: "ValidationError", message: "the legs cancel out — delete the row instead" }, 422)
+    }
+
+    const ledger = ledgerCurrency(portfolio)
     if (ledger) {
       const existingCurrency = existing.currency.toUpperCase()
-      const nextCurrency = (parsed.data.currency ?? existing.currency).toUpperCase()
-      const nextTo = (parsed.data.toCurrency ?? existing.toCurrency ?? existing.currency).toUpperCase()
+      const nextCurrency = legs ? legs.currency : (b.currency ?? existing.currency).toUpperCase()
+      const nextTo = legs ? legs.toCurrency ?? legs.currency : (b.toCurrency ?? existing.toCurrency ?? existing.currency).toUpperCase()
       if (!isConversion && existingCurrency !== ledger) {
         return c.json({ error: "ValidationError", message: `Non-${ledger} cash rows cannot be edited while cash is limited to ${ledger}` }, 422)
       }
@@ -812,26 +839,28 @@ export function createPortfolioCashRoutes(db?: DB) {
       }
     }
 
-    const b = parsed.data
-    if (b.amount != null && b.amount === 0) {
-      return c.json({ error: "ValidationError", message: "amount must be non-zero (delete the row instead)" }, 422)
-    }
     const updates: Partial<typeof portfolioCashTransactions.$inferInsert> = { updatedAt: new Date() }
-    if (b.amount != null && b.amount !== 0) {
-      // Re-apply the §58.3 sign clamp for the kinds where the sign is not a fact
-      // (the modal ships magnitudes). INTEREST, FEE and FX_CONVERSION are signed
-      // as sent: a debit-interest row and a net-credit borrow fee are real
-      // postings, and flipping them would double-count the difference.
-      let amount = b.amount
-      if (existing.type === "DEPOSIT") amount = Math.abs(amount)
-      if (existing.type === "WITHDRAWAL") amount = -Math.abs(amount)
-      updates.amount = scale8(amount)
+    if (isConversion && legs) {
+      updates.amount = scale8(legs.amount)
+      updates.currency = legs.currency
+      updates.toCurrency = legs.toCurrency
+      updates.toAmount = legs.toAmount != null ? scale8(legs.toAmount) : null
+    } else {
+      if (b.amount != null && b.amount === 0) {
+        return c.json({ error: "ValidationError", message: "amount must be non-zero (delete the row instead)" }, 422)
+      }
+      if (b.amount != null) {
+        // Re-apply the §58.3 sign clamp for the kinds where the sign is not a fact
+        // (the modal ships magnitudes). INTEREST and FEE are signed as sent: a
+        // debit-interest row and a net-credit borrow fee are real postings, and
+        // flipping them would move the balance the wrong way twice.
+        let amount = b.amount
+        if (existing.type === "DEPOSIT") amount = Math.abs(amount)
+        if (existing.type === "WITHDRAWAL") amount = -Math.abs(amount)
+        updates.amount = scale8(amount)
+      }
     }
-    if (isConversion) {
-      if (b.toAmount != null) updates.toAmount = b.toAmount === 0 ? null : scale8(Math.abs(b.toAmount))
-      if (b.toCurrency != null) updates.toCurrency = b.toCurrency.toUpperCase()
-    }
-    if (b.currency != null && existing.type !== "TRANSFER") {
+    if (b.currency != null && !isConversion && existing.type !== "TRANSFER") {
       // Transfers keep their currency (the paired leg is denominated in it).
       updates.currency = b.currency.toUpperCase()
       // A currency change orphans the fee leg — reset the fee to the new

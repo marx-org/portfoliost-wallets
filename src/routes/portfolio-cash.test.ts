@@ -297,6 +297,47 @@ describe("POST interest / fees / conversions (#245)", () => {
     expect(ok.status).toBe(201)
   })
 
+  it("a conversion can be patched to a zero first leg — the correction is the second leg", async () => {
+    const h = await boot()
+    const pf = crypto.randomUUID()
+    await h.db.insert(portfolios).values({ userId: "user-1", id: pf, name: "IBKR", baseCurrency: "PLN", cashCurrency: "USD" })
+
+    const created = await post(h, `/api/portfolios/${pf}/cash/conversions`, {
+      amount: -0.93, currency: "USD", toAmount: 0, description: "FX USD/SEK - net in base",
+    })
+    const id = (await created.json()).id
+
+    const patched = await h.app.request(`/api/portfolios/cash/transactions/${id}`, {
+      method: "PATCH",
+      headers: { ...h.headers, "content-type": "application/json" },
+      body: JSON.stringify({ amount: 0, toAmount: 5.12 }),
+    })
+    expect(patched.status).toBe(200)
+    const body = await patched.json()
+    // Same-currency legs collapse into one signed amount: the row is a
+    // correction of one balance, not two legs.
+    expect(Number(body.amount)).toBe(5.12)
+    expect(body.toAmount).toBeNull()
+
+    mockInstrumentsFx({ table: { USD: 1, EUR: 1, PLN: 4 }, asOf: "2024-01-01" })
+    try {
+      const cash = await (await h.app.request(`/api/portfolios/${pf}/cash`, { headers: h.headers })).json()
+      expect(cash.balances).toEqual([{ currency: "USD", balance: 5.12 }])
+    } finally {
+      unmockInstrumentsFx()
+    }
+
+    // …but a zero amount on a deposit is still a delete-the-row signal.
+    const dep = await post(h, `/api/portfolios/${pf}/cash/deposits`, { amount: 10, currency: "USD" })
+    const depId = (await dep.json()).id
+    const bad = await h.app.request(`/api/portfolios/cash/transactions/${depId}`, {
+      method: "PATCH",
+      headers: { ...h.headers, "content-type": "application/json" },
+      body: JSON.stringify({ amount: 0 }),
+    })
+    expect(bad.status).toBe(422)
+  })
+
   it("virtual portfolios are read-only for the new kinds", async () => {
     const h = await boot()
     const pf = crypto.randomUUID()

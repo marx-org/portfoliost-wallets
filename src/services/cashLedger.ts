@@ -129,6 +129,36 @@ export function cashRowLegs(row: {
   return out
 }
 
+/**
+ * Canonical form of a conversion row before it is written.
+ *
+ * `ck_pctx_amount_nonzero` forbids a zero `amount`, so the two degenerate shapes
+ * have to be collapsed rather than stored:
+ *   - both legs the same currency — not an exchange at all, one balance moved by
+ *     the sum of the legs (IBKR's "Net Amount in Base from Forex Trade");
+ *   - nothing handed over — a one-sided credit, which belongs in the currency
+ *     that actually receives money.
+ * Returns null when the row would change nothing at all.
+ */
+export function normalizeConversionLegs(row: {
+  currency: string | null
+  amount: string | number | null
+  toCurrency?: string | null
+  toAmount?: string | number | null
+}): { currency: string; amount: number; toCurrency: string | null; toAmount: number | null } | null {
+  const from = (row.currency ?? "").toUpperCase()
+  const to = (row.toCurrency ?? row.currency ?? "").toUpperCase()
+  const handed = Number(row.amount ?? 0)
+  const received = Math.abs(Number(row.toAmount ?? 0))
+  if (!from || !to) return null
+  if (from === to) {
+    const net = handed + received
+    return net === 0 ? null : { currency: from, amount: net, toCurrency: to, toAmount: null }
+  }
+  if (handed === 0) return received === 0 ? null : { currency: to, amount: received, toCurrency: null, toAmount: null }
+  return { currency: from, amount: handed, toCurrency: to, toAmount: received }
+}
+
 async function cashPolicy(db: DB, portfolioId: string) {
   const [portfolio] = await db
     .select({

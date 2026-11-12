@@ -4,6 +4,7 @@ import { z } from "zod"
 import { randomUUID } from "node:crypto"
 import { userIdentityMiddleware } from "../auth.js"
 import { LOT_QUANTITY_TYPES, POSITION_TX_TYPES, CASH_TX_TYPES } from "../transaction-types.js"
+import { normalizeConversionLegs } from "../services/cashLedger.js"
 import { getDb, type DB } from "../db/index.js"
 import { capitalBasisInvested } from "../services/transferFlows.js"
 import { drawLots, openLots, openQuantity, type LotTx } from "../services/openLots.js"
@@ -1049,15 +1050,27 @@ async function insertImportPortfolioCashTx(
   // A cash row's `fees` is metadata: the replay reads the amounts, so a charge
   // that belongs to no leg is simply lost. A conversion charge must belong to
   // one of the two legs — the one it is netted against — or the row is wrong.
-  if (c.type === "FX_CONVERSION" && c.fees != null && Math.abs(c.fees) > 0) {
-    const chargeCcy = (c.feeCurrency ?? ccy).toUpperCase()
-    const to = (c.toCurrency ?? c.currency).toUpperCase()
-    if (chargeCcy !== ccy && chargeCcy !== to) {
-      throw new ImportRowError(
-        "invalid_fee_currency",
-        row.externalId,
-        `conversion charge in ${chargeCcy} belongs to neither leg (${ccy} handed over, ${to} received)`,
-      )
+  // The same normalization the interactive route applies collapses the
+  // degenerate conversion shapes (both legs one currency, or nothing handed
+  // over) into the single signed leg they are equivalent to, which is also what
+  // keeps `ck_pctx_amount_nonzero` satisfied.
+  const legs = c.type === "FX_CONVERSION"
+    ? normalizeConversionLegs({ currency: ccy, amount, toCurrency: c.toCurrency, toAmount: c.toAmount })
+    : null
+  if (c.type === "FX_CONVERSION") {
+    if (!legs) {
+      throw new ImportRowError("empty_conversion", row.externalId, "a conversion whose legs cancel out changes nothing")
+    }
+    if (c.fees != null && Math.abs(c.fees) > 0) {
+      const chargeCcy = (c.feeCurrency ?? legs.currency).toUpperCase()
+      const to = legs.toCurrency ?? legs.currency
+      if (chargeCcy !== legs.currency && chargeCcy !== to) {
+        throw new ImportRowError(
+          "invalid_fee_currency",
+          row.externalId,
+          `conversion charge in ${chargeCcy} belongs to neither leg (${legs.currency} handed over, ${to} received)`,
+        )
+      }
     }
   }
 
@@ -1067,11 +1080,11 @@ async function insertImportPortfolioCashTx(
   const baseRow = {
     userId,
     type: c.type,
-    currency: ccy,
+    currency: legs ? legs.currency : ccy,
     // Only a conversion carries a second leg. A conversion with no second leg,
     // or with the second leg in the same currency, is a balance correction.
-    toCurrency: c.type === "FX_CONVERSION" ? (c.toCurrency ?? c.currency).toUpperCase() : null,
-    toAmount: c.type === "FX_CONVERSION" && c.toAmount != null ? scale8(Math.abs(c.toAmount)) : null,
+    toCurrency: legs ? legs.toCurrency : null,
+    toAmount: legs && legs.toAmount != null ? scale8(legs.toAmount) : null,
     description: c.description ?? null,
     transactionDate: c.transactionDate ?? null,
     fees: c.fees != null ? scale8(c.fees) : null,
@@ -1091,7 +1104,7 @@ async function insertImportPortfolioCashTx(
       .values({
         ...baseRow,
         portfolioId,
-        amount: scale8(amount),
+        amount: scale8(legs ? legs.amount : amount),
         externalId: row.externalId,
         // §87.2 — set in the SAME transaction as the insert, so a partial import
         // cannot leave the leg unlinked. The mapper emits the trade leg first, so
