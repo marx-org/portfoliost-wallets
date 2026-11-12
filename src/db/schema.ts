@@ -15,10 +15,10 @@ import {
   uuid,
 } from "drizzle-orm/pg-core"
 import { sql } from "drizzle-orm"
-import { POSITION_TX_TYPES } from "../transaction-types.js"
+import { POSITION_TX_TYPES, CASH_TX_TYPES } from "../transaction-types.js"
 import { check } from "drizzle-orm/pg-core"
 
-const TX_TYPES = ["DEPOSIT", "WITHDRAWAL", "TRANSFER"] as const
+const cashTxTypeIn = sql.raw(CASH_TX_TYPES.map((v) => `'${v}'`).join(","))
 
 // Inlined, not parameterised: a CHECK constraint cannot contain bind
 // parameters, so `sql.join` would emit `$1, $2, ...` and Postgres rejects it
@@ -192,8 +192,8 @@ export const portfolioCashTransactions = portfoliosSchema.table(
     portfolioId: uuid("portfolio_id")
       .notNull()
       .references(() => portfolios.id, { onDelete: "cascade" }),
-    // cash event kind: DEPOSIT | WITHDRAWAL | TRANSFER
-    type: text("type", { enum: TX_TYPES }).notNull(),
+    // cash event kind: see CASH_TX_TYPES
+    type: text("type", { enum: CASH_TX_TYPES }).notNull(),
     // signed in the row's own currency: DEPOSIT +, WITHDRAWAL −, TRANSFER as sent
     amount: numeric("amount", { precision: 28, scale: 8 }).notNull(),
     // the row's own currency (ISO-4217), independent of the portfolio base
@@ -210,6 +210,14 @@ export const portfolioCashTransactions = portfoliosSchema.table(
     feeCurrency: char("fee_currency", { length: 3 }),
     // TRANSFER destination portfolio (null for non-transfer rows)
     toPortfolioId: uuid("to_portfolio_id").references(() => portfolios.id, { onDelete: "cascade" }),
+    /**
+     * FX_CONVERSION second leg: the currency received and the amount received.
+     * Both null when the row is not a conversion. When `toCurrency` equals
+     * `currency` the row is not an exchange but a correction of the balance —
+     * the net effect is `amount + toAmount` in that one currency.
+     */
+    toCurrency: char("to_currency", { length: 3 }),
+    toAmount: numeric("to_amount", { precision: 28, scale: 8 }),
     // the paired cash leg for a cross-currency transfer (D22); null otherwise
     linkedTxId: uuid("linked_tx_id"),
     /**
@@ -259,7 +267,7 @@ export const portfolioCashTransactions = portfoliosSchema.table(
     index("idx_pctx_user_recent").on(t.userId, t.createdAt.desc()),
     index("portfolio_cash_transactions_linked_trade_id_idx").on(t.linkedTradeId),
     uniqueIndex("uq_pctx_external").on(t.externalSource, t.externalId).where(sql`${t.externalId} is not null`),
-    check("ck_pctx_type", sql`${t.type} in ('DEPOSIT','WITHDRAWAL','TRANSFER')`),
+    check("ck_pctx_type", sql`${t.type} in (${cashTxTypeIn})`),
     check("ck_pctx_fees_type", sql`${t.feesType} in ('fixed','pct')`),
     check("ck_pctx_rate_source", sql`${t.rateSource} in ('automatic','manual')`),
     check("ck_pctx_fee_rate_source", sql`${t.feeRateSource} in ('automatic','manual')`),

@@ -77,3 +77,48 @@ export function quantitySign(type: string): 1 | -1 | 0 {
   if ((LOT_CLOSING_TYPES as readonly string[]).includes(type)) return -1
   return 0
 }
+
+/**
+ * Every value `portfolio_cash_transactions.type` may hold.
+ *
+ * The same drift `POSITION_TX_TYPES` exists to prevent: before this, the cash
+ * enum was written twice — `TX_TYPES` in `db/schema.ts` and `CASH_TX_TYPES` in
+ * `routes/import.ts` — and nothing proved they agreed.
+ */
+export const CASH_TX_TYPES = [
+  "DEPOSIT",
+  "WITHDRAWAL",
+  "TRANSFER",
+  "INTEREST",
+  "FEE",
+  "FX_CONVERSION",
+] as const
+
+export type CashTxType = (typeof CASH_TX_TYPES)[number]
+
+/**
+ * The cash rows that mean money crossed the boundary of the account.
+ *
+ * `INTEREST`, `FEE` and `FX_CONVERSION` move the balance but are internal: they
+ * are neither money put in nor money taken out, so they must never enter
+ * `externalCashInvested` or the daily flow series. Conflating "money put in"
+ * with "cost incurred" is the §89.5 `ADJUSTMENT` mistake.
+ *
+ * `TRANSFER` stays here because it has been counted this way since §68.2;
+ * whether a transfer between two of the user's own portfolios should count as
+ * external is a separate question, not one this change settles.
+ */
+export const EXTERNAL_CASH_TX_TYPES = ["DEPOSIT", "WITHDRAWAL", "TRANSFER"] as const
+
+export function isExternalFlow(type: string): boolean {
+  return (EXTERNAL_CASH_TX_TYPES as readonly string[]).includes(type)
+}
+
+/**
+ * A conversion is two legs in two currencies plus one fee. When both legs are
+ * the same currency it is not an exchange at all — it is a correction of the
+ * balance, which is how a broker's own conversion residual is booked.
+ */
+export function isConversionType(type: string): boolean {
+  return type === "FX_CONVERSION"
+}
