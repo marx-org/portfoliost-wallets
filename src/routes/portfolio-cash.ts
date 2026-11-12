@@ -20,7 +20,7 @@ import {
   portfolioTransactions,
   labels,
 } from "../db/schema.js"
-import { cashBalances, cashBalanceSeries, ledgerCurrency, normalizeConversionLegs, toDateStr, tradeCashEffects } from "../services/cashLedger.js"
+import { cashBalances, cashBalanceSeries, cashRowLegs, ledgerCurrency, normalizeConversionLegs, toDateStr, tradeCashEffects } from "../services/cashLedger.js"
 import { fxTo } from "../services/instruments-fx.js"
 import { ISO_CURRENCY } from "../services/currency.js"
 import {
@@ -162,9 +162,11 @@ async function buildPortfolioCash(
 }
 
 /**
- * balanceAfter per external row: running window sum of the row's own-currency
- * balance (trade effects + external effects ordered by transactionDate,
- * createdAt). No storage — recomputed per request from the ledger.
+ * balanceAfter per cash row: running window sum of the row's own-currency
+ * balance (trade effects + cash effects ordered by transactionDate, createdAt).
+ * No storage — recomputed per request from the ledger. A conversion has two
+ * legs, so the running sum takes both; the row is reported in the currency of
+ * the leg handed over, which is the one the user reads against the row.
  */
 async function balanceAfterByRow(
   db: DB,
@@ -205,8 +207,11 @@ async function balanceAfterByRow(
   const exts = await db
     .select({
       id: portfolioCashTransactions.id,
+      type: portfolioCashTransactions.type,
       amount: portfolioCashTransactions.amount,
       currency: portfolioCashTransactions.currency,
+      toCurrency: portfolioCashTransactions.toCurrency,
+      toAmount: portfolioCashTransactions.toAmount,
       transactionDate: portfolioCashTransactions.transactionDate,
       createdAt: portfolioCashTransactions.createdAt,
     })
@@ -218,7 +223,7 @@ async function balanceAfterByRow(
     events.push({
       day: toDateStr(r.transactionDate) ?? "1970-01-01",
       createdAt: r.createdAt,
-      deltas: new Map([[ccy, Number(r.amount ?? 0)]]),
+      deltas: cashRowLegs(r),
       extId: r.id,
       extCcy: ccy,
     })
