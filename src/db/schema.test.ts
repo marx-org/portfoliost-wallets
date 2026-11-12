@@ -11,6 +11,7 @@ import { insertPosition } from "../routes/test-utils.js"
 import { positionInPortfolio } from "./position-membership.js"
 import {
   POSITION_TX_TYPES, TRADE_CASH_TYPES, TRANSFER_TX_TYPES, isTradeCashType,
+  CASH_TX_TYPES,
 } from "../transaction-types.js"
 import { TransactionCreateSchema } from "../routes/portfolio-transactions.js"
 import { ImportPortfolioTxSchema } from "../routes/import.js"
@@ -353,6 +354,12 @@ describe("the transaction type set cannot drift from the SQL check", () => {
 
   it("ck_ptx_type declares exactly POSITION_TX_TYPES, in order", async () => {
     expect(await constraintValues("ck_ptx_type")).toEqual([...POSITION_TX_TYPES])
+  })
+
+  it("ck_pctx_type declares exactly CASH_TX_TYPES, in order", async () => {
+    // The cash enum used to be written twice (schema.ts and import.ts) with
+    // nothing proving they agreed. Same trap, same guard.
+    expect(await constraintValues("ck_pctx_type")).toEqual([...CASH_TX_TYPES])
   })
 
   it("every Zod route enum is the full set, so no route rejects a valid type", async () => {

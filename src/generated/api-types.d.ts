@@ -1596,6 +1596,63 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/portfolios/{id}/cash/interest": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: components["parameters"]["portfolioId"];
+            };
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Record broker interest credited or charged on the account */
+        post: operations["addInterestCash"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/portfolios/{id}/cash/fees": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: components["parameters"]["portfolioId"];
+            };
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Record an account charge that belongs to no transaction */
+        post: operations["addFeeCash"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/portfolios/{id}/cash/conversions": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: components["parameters"]["portfolioId"];
+            };
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Record a currency conversion, or a balance correction when both legs are the same currency */
+        post: operations["addConversionCash"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/portfolios/cash/recent-transactions": {
         parameters: {
             query?: never;
@@ -3300,7 +3357,9 @@ export interface components {
             capitalBasis: number;
             /**
              * @description Money actually put in and taken out: DEPOSIT − WITHDRAWAL only, each at its own
-             *     historical rate. EXCLUDES in-kind stock transfers, which move no money.
+             *     historical rate. EXCLUDES in-kind stock transfers, which move no money, and the
+             *     internal kinds INTEREST, FEE and FX_CONVERSION, which move the balance but are
+             *     never contributions.
              *
              *     The counterpart to `capitalBasis`, not a variant of it. Keep them apart —
              *     conflating "money put in" with "capital at risk" is what got `ADJUSTMENT` into
@@ -3736,7 +3795,7 @@ export interface components {
             cashValue: number;
             /** @description Capital BASIS: external contributions plus the cost of anything transferred in or out, signed. At COST — see PortfolioTotalMetrics.capitalBasis. */
             capitalBasis: number;
-            /** @description Money actually put in and taken out: DEPOSIT − WITHDRAWAL only. EXCLUDES in-kind stock transfers, which move no money. The counterpart to `capitalBasis`, not a variant — conflating the two is what got ADJUSTMENT into trouble (§89.5). */
+            /** @description Money actually put in and taken out: DEPOSIT − WITHDRAWAL only. EXCLUDES in-kind stock transfers, which move no money, and the internal kinds INTEREST, FEE and FX_CONVERSION. The counterpart to `capitalBasis`, not a variant — conflating the two is what got ADJUSTMENT into trouble (§89.5). */
             externalContributions?: number | null;
             /** @description (totalValue − capitalBasis) / capitalBasis, and 0 when capitalBasis ≤ 0 — a non-positive basis would otherwise report a signed nonsense figure. */
             simpleReturnPercent: number;
@@ -3834,7 +3893,7 @@ export interface components {
             feeCurrency?: string | null;
             /** @enum {string|null} */
             feeRateSource?: "automatic" | "manual" | null;
-            /** @description Fee-currency -> transaction-currency rate for settlement. */
+            /** @description Fee-currency -> portfolio base-currency rate. Omitted when the fee is already in the base currency (identity) or in the transaction currency (the trade's own rate applies). */
             feeExchangeRate?: number | null;
         };
         CreateTransactionRequest: components["schemas"]["FeeFxFields"] & {
@@ -3879,6 +3938,33 @@ export interface components {
             targetAmount?: number | null;
             targetFxRate?: number | null;
         };
+        InterestCashRequest: components["schemas"]["FeeFxFields"] & {
+            /** @description Signed: positive = interest credited, negative = interest charged */
+            amount: number;
+            /** @description Defaults to the portfolio's cash currency */
+            currency?: string;
+            description?: string;
+            transactionDate?: string;
+        };
+        FeeCashRequest: components["schemas"]["FeeFxFields"] & {
+            /** @description Magnitude of the charge; the server books it as a debit */
+            amount: number;
+            /** @description Defaults to the portfolio's cash currency */
+            currency?: string;
+            description?: string;
+            transactionDate?: string;
+        };
+        ConversionCashRequest: components["schemas"]["FeeFxFields"] & {
+            /** @description Signed leg handed over (negative for an outflow). For a pure correction this is the correction itself. */
+            amount: number;
+            currency: string;
+            /** @description Currency received. Omitted or equal to `currency` means a balance correction rather than an exchange. */
+            toCurrency?: string | null;
+            /** @description Amount received */
+            toAmount: number;
+            description?: string;
+            transactionDate?: string;
+        };
         CurrencyInfo: {
             /** @description ISO 4217 code */
             code: string;
@@ -3895,9 +3981,14 @@ export interface components {
             id: string;
             /** Format: uuid */
             portfolioId: string;
-            type: string;
+            /** @enum {string} */
+            type: "DEPOSIT" | "WITHDRAWAL" | "TRANSFER" | "INTEREST" | "FEE" | "FX_CONVERSION";
             amount: number;
             currency: string;
+            /** @description FX_CONVERSION only: the currency received */
+            toCurrency?: string | null;
+            /** @description FX_CONVERSION only: the amount received, positive */
+            toAmount?: number | null;
             /** Format: date-time */
             createdAt: string;
             description?: string | null;
@@ -4007,11 +4098,18 @@ export interface components {
             portfolioTx?: components["schemas"]["ImportPortfolioTx"];
         };
         ImportPortfolioCashTx: components["schemas"]["FeeFxFields"] & {
-            /** @enum {string} */
-            type: "DEPOSIT" | "WITHDRAWAL" | "TRANSFER";
-            /** @description Signed; negative = cash out */
+            /**
+             * @description DEPOSIT/WITHDRAWAL are external: money crossing the boundary of the account. INTEREST, FEE and FX_CONVERSION are internal - they move the balance but are never contributions, so they are excluded from externalContributions and from the capital basis. FX_CONVERSION with `toCurrency` equal to `currency` (or absent) is a balance correction.
+             * @enum {string}
+             */
+            type: "DEPOSIT" | "WITHDRAWAL" | "TRANSFER" | "INTEREST" | "FEE" | "FX_CONVERSION";
+            /** @description Signed; negative = cash out. For FX_CONVERSION this is the leg handed over. */
             amount: number;
             currency: string;
+            /** @description FX_CONVERSION only: the currency received. Absent or equal to `currency` means a correction, not an exchange. */
+            toCurrency?: string | null;
+            /** @description FX_CONVERSION only: the amount received, positive. The row's net effect is amount + toAmount. */
+            toAmount?: number | null;
             description?: string | null;
             /** Format: date */
             transactionDate?: string | null;
@@ -6764,6 +6862,84 @@ export interface operations {
         };
         responses: {
             /** @description Transferred */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CashTransaction"];
+                };
+            };
+        };
+    };
+    addInterestCash: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: components["parameters"]["portfolioId"];
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["InterestCashRequest"];
+            };
+        };
+        responses: {
+            /** @description Recorded */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CashTransaction"];
+                };
+            };
+        };
+    };
+    addFeeCash: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: components["parameters"]["portfolioId"];
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["FeeCashRequest"];
+            };
+        };
+        responses: {
+            /** @description Recorded */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CashTransaction"];
+                };
+            };
+        };
+    };
+    addConversionCash: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: components["parameters"]["portfolioId"];
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ConversionCashRequest"];
+            };
+        };
+        responses: {
+            /** @description Recorded */
             201: {
                 headers: {
                     [name: string]: unknown;
