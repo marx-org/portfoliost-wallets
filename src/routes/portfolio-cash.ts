@@ -603,6 +603,19 @@ export function createPortfolioCashRoutes(db?: DB) {
         message: `A conversion in a ${ledger}-settled portfolio must involve ${ledger}`,
       }, 422)
     }
+    // A cash row's `fees` is metadata: the replay reads the amounts (see
+    // cashRowLegs). Whoever writes the row therefore has to net the charge into
+    // the leg it belongs to — the sheets-sync mapper does, and this route
+    // refuses a charge that belongs to neither leg rather than quietly dropping it.
+    if (body.fees != null && Math.abs(body.fees) > 0) {
+      const chargeCcy = (body.feeCurrency ?? from).toUpperCase()
+      if (chargeCcy !== from && chargeCcy !== to) {
+        return c.json({
+          error: "ValidationError",
+          message: `A conversion charge in ${chargeCcy} belongs to neither leg (${from} handed over, ${to} received)`,
+        }, 422)
+      }
+    }
 
     const [inserted] = await database
       .insert(portfolioCashTransactions)

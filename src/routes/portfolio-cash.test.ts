@@ -279,6 +279,24 @@ describe("POST interest / fees / conversions (#245)", () => {
     }
   })
 
+  it("a conversion charge in a currency neither leg is in is rejected", async () => {
+    const h = await boot()
+    const pf = await makePf(h, "IBKR", "PLN")
+    const res = await post(h, `/api/portfolios/${pf}/cash/conversions`, {
+      amount: -1000, currency: "EUR", toCurrency: "USD", toAmount: 1150.4,
+      fees: 5, feesType: "fixed", feeCurrency: "PLN",
+    })
+    expect(res.status).toBe(422)
+    expect((await res.json()).message).toMatch(/belongs to neither leg/)
+
+    // The charge in the leg received is accepted; the writer nets it there.
+    const ok = await post(h, `/api/portfolios/${pf}/cash/conversions`, {
+      amount: -1000, currency: "EUR", toCurrency: "USD", toAmount: 1145.4,
+      fees: 5, feesType: "fixed", feeCurrency: "USD",
+    })
+    expect(ok.status).toBe(201)
+  })
+
   it("virtual portfolios are read-only for the new kinds", async () => {
     const h = await boot()
     const pf = crypto.randomUUID()

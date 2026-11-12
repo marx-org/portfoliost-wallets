@@ -1046,6 +1046,21 @@ async function insertImportPortfolioCashTx(
         ? -Math.abs(c.amount)
         : c.amount
 
+  // A cash row's `fees` is metadata: the replay reads the amounts, so a charge
+  // that belongs to no leg is simply lost. A conversion charge must belong to
+  // one of the two legs — the one it is netted against — or the row is wrong.
+  if (c.type === "FX_CONVERSION" && c.fees != null && Math.abs(c.fees) > 0) {
+    const chargeCcy = (c.feeCurrency ?? ccy).toUpperCase()
+    const to = (c.toCurrency ?? c.currency).toUpperCase()
+    if (chargeCcy !== ccy && chargeCcy !== to) {
+      throw new ImportRowError(
+        "invalid_fee_currency",
+        row.externalId,
+        `conversion charge in ${chargeCcy} belongs to neither leg (${ccy} handed over, ${to} received)`,
+      )
+    }
+  }
+
   // labels → ids (unknown name → row error, §58.3)
   const labelIds = await resolveImportLabelIds(tx, userId, c.labels ?? [], row.externalId)
 

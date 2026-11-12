@@ -1157,6 +1157,26 @@ describe("POST /api/import/transactions (§23.4)", () => {
     expect(await h.db.select().from(portfolioCashTransactions)).toHaveLength(2)
   })
 
+  it("rejects a conversion charge in a currency neither leg is in", async () => {
+    const h = await boot()
+    await seedPortfolio(h)
+    const res = await postTransactions(h, [
+      {
+        externalId: "c3", portfolioName: "Transakcje", executedAt: "2026-05-04T00:00:00.000Z",
+        cashTx: {
+          type: "FX_CONVERSION", amount: -1000, currency: "EUR", toCurrency: "USD", toAmount: 1150.4,
+          fees: 5, feesType: "fixed", feeCurrency: "PLN",
+        },
+      },
+    ])
+    expect(res.status).toBe(200)
+    const body = await res.json()
+    expect(body.inserted).toBe(0)
+    expect(body.errors[0].error).toBe("invalid_fee_currency")
+    expect(body.errors[0].message).toMatch(/belongs to neither leg/)
+    expect(await h.db.select().from(portfolioCashTransactions)).toHaveLength(0)
+  })
+
   it("rejects a cash type outside CASH_TX_TYPES", async () => {
     const h = await boot()
     await seedPortfolio(h)
