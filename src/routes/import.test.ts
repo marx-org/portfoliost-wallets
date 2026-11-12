@@ -1090,6 +1090,82 @@ describe("POST /api/import/transactions (§23.4)", () => {
     expect(Number(agg.sum)).toBe(700)
   })
 
+  /**
+   * #245 — the kinds the IBKR sheet needs. Each is a cash row only: no
+   * portfolio transaction, no position, no instrument.
+   */
+  it("imports INTEREST, FEE and FX_CONVERSION as cash rows with no position leg", async () => {
+    const h = await boot()
+    const { portfolioId } = await seedPortfolio(h)
+
+    const res = await postTransactions(h, [
+      {
+        externalId: "i1", portfolioName: "Transakcje", executedAt: "2024-04-03T00:00:00.000Z",
+        cashTx: { type: "INTEREST", amount: 0.7, currency: "USD", transactionDate: "2024-04-03", description: "USD IBKR Managed Securities (SYEP) Interest" },
+      },
+      {
+        externalId: "i2", portfolioName: "Transakcje", executedAt: "2024-06-05T00:00:00.000Z",
+        cashTx: { type: "INTEREST", amount: -0.26, currency: "USD", transactionDate: "2024-06-05", description: "SEK Debit Interest" },
+      },
+      {
+        externalId: "f1", portfolioName: "Transakcje", executedAt: "2026-01-12T00:00:00.000Z",
+        cashTx: { type: "FEE", amount: -1.25, currency: "USD", transactionDate: "2026-01-12", description: "ADR fee" },
+      },
+      {
+        externalId: "f2", portfolioName: "Transakcje", executedAt: "2022-06-03T00:00:00.000Z",
+        cashTx: { type: "FEE", amount: 0.85752, currency: "EUR", transactionDate: "2022-06-03", description: "Net Stock Borrow And Loan Fee" },
+      },
+      {
+        externalId: "c1", portfolioName: "Transakcje", executedAt: "2026-05-04T00:00:00.000Z",
+        cashTx: { type: "FX_CONVERSION", amount: -1000, currency: "EUR", toCurrency: "USD", toAmount: 1150.4, transactionDate: "2026-05-04", fees: 1.2, feesType: "fixed", feeCurrency: "USD" },
+      },
+      {
+        externalId: "c2", portfolioName: "Transakcje", executedAt: "2026-01-12T00:00:00.000Z",
+        cashTx: { type: "FX_CONVERSION", amount: -0.930874, currency: "USD", transactionDate: "2026-01-12", description: "FX USD/SEK - net in base" },
+      },
+    ])
+    expect(res.status).toBe(200)
+    expect((await res.json()).inserted).toBe(6)
+
+    const rows = await h.db.select().from(portfolioCashTransactions).where(eq(portfolioCashTransactions.portfolioId, portfolioId))
+    const byId = Object.fromEntries(rows.map((r) => [r.externalId, r]))
+    expect(Number(byId.i1.amount)).toBe(0.7)          // credited
+    expect(Number(byId.i2.amount)).toBe(-0.26)        // charged — the sign is the fact
+    expect(Number(byId.f1.amount)).toBe(-1.25)        // a charge
+    expect(Number(byId.f2.amount)).toBe(0.85752)      // a borrow fee can net to a credit
+    expect(Number(byId.c1.amount)).toBe(-1000)
+    expect(byId.c1.toCurrency).toBe("USD")
+    expect(Number(byId.c1.toAmount)).toBe(1150.4)
+    expect(byId.c2.toCurrency).toBe("USD")            // same ccy → a correction, not an exchange
+    expect(byId.c2.toAmount).toBeNull()
+
+    expect(await h.db.select().from(portfolioTransactions)).toHaveLength(0)
+    expect(await h.db.select().from(positions)).toHaveLength(0)
+  })
+
+  it("re-importing an interest, fee or conversion row inserts nothing", async () => {
+    const h = await boot()
+    await seedPortfolio(h)
+    const payload = [
+      { externalId: "i1", portfolioName: "Transakcje", executedAt: "2024-04-03T00:00:00.000Z", cashTx: { type: "INTEREST", amount: 0.7, currency: "USD" } },
+      { externalId: "c1", portfolioName: "Transakcje", executedAt: "2026-05-04T00:00:00.000Z", cashTx: { type: "FX_CONVERSION", amount: -1000, currency: "EUR", toCurrency: "USD", toAmount: 1150.4 } },
+    ]
+    const first = await postTransactions(h, payload)
+    const second = await postTransactions(h, payload)
+    expect((await first.json()).inserted).toBe(2)
+    expect((await second.json()).inserted).toBe(0)
+    expect(await h.db.select().from(portfolioCashTransactions)).toHaveLength(2)
+  })
+
+  it("rejects a cash type outside CASH_TX_TYPES", async () => {
+    const h = await boot()
+    await seedPortfolio(h)
+    const res = await postTransactions(h, [
+      { externalId: "x1", portfolioName: "Transakcje", executedAt: "2024-01-01T00:00:00.000Z", cashTx: { type: "DONATION", amount: 10, currency: "USD" } },
+    ])
+    expect(res.status).toBe(422)
+  })
+
   it("upserts a sync_runs row with correct counters and reuses it across batches", async () => {
     const h = await boot()
     const { portfolioId } = await seedPortfolio(h)

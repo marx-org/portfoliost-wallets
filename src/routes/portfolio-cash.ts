@@ -47,6 +47,9 @@ const DISPLAY_LABELS: Record<string, string> = {
   DEPOSIT: "Deposit",
   WITHDRAWAL: "Withdrawal",
   TRANSFER: "Transfer",
+  INTEREST: "Interest",
+  FEE: "Fee",
+  FX_CONVERSION: "Conversion",
 }
 
 const PERIOD_DAYS: Record<string, number | null> = {
@@ -92,10 +95,32 @@ const TransferCashSchema = FeeFxFieldsSchema.extend({
   feesType: z.enum(["fixed", "pct"]).nullable().optional(),
 }).strict()
 
+/**
+ * INTEREST / FEE share the deposit shape. `amount` is signed for INTEREST —
+ * broker interest is credited on long balances and charged on borrowed ones, so
+ * the sign is the fact being recorded, not noise to clamp. FEE takes a
+ * magnitude and is always booked as a debit: a charge is never a credit.
+ */
+const InterestCashSchema = DepositCashSchema
+const FeeCashSchema = DepositCashSchema
+
+const ConversionCashSchema = FeeFxFieldsSchema.extend({
+  amount: z.number(),
+  currency: z.string().regex(ISO_CURRENCY),
+  toCurrency: z.string().regex(ISO_CURRENCY).nullable().optional(),
+  toAmount: z.number(),
+  description: z.string().nullable().optional(),
+  transactionDate: z.string().nullable().optional(),
+  fees: z.number().nonnegative().nullable().optional(),
+  feesType: z.enum(["fixed", "pct"]).nullable().optional(),
+}).strict()
+
 const CashPatchSchema = z
   .object({
     amount: z.number().optional(),
     currency: z.string().regex(ISO_CURRENCY).optional(),
+    toCurrency: z.string().regex(ISO_CURRENCY).nullable().optional(),
+    toAmount: z.number().nullable().optional(),
     description: z.string().nullable().optional(),
     date: z.string().nullable().optional(),
     fees: z.number().nonnegative().nullable().optional(),
@@ -220,6 +245,8 @@ function serializeCash(
     type: r.type,
     amount: Number(r.amount),
     currency: r.currency,
+    toCurrency: r.toCurrency,
+    toAmount: r.toAmount != null ? Number(r.toAmount) : null,
     createdAt: r.createdAt.toISOString(),
     description: r.description,
     transactionDate: r.transactionDate,
@@ -239,6 +266,14 @@ function serializeCash(
   } satisfies CashTransaction
 }
 
+function displayLabelFor(r: typeof portfolioCashTransactions.$inferSelect): string {
+  if (r.type === "FX_CONVERSION") {
+    const to = (r.toCurrency ?? r.currency ?? "").toUpperCase()
+    return to === (r.currency ?? "").toUpperCase() ? "Correction" : "Conversion"
+  }
+  return DISPLAY_LABELS[r.type] ?? r.type
+}
+
 function serializeRecent(
   r: typeof portfolioCashTransactions.$inferSelect,
   opts: { portfolioName?: string | null; labels: Label[] },
@@ -248,9 +283,11 @@ function serializeRecent(
     portfolioId: r.portfolioId,
     portfolioName: opts.portfolioName ?? null,
     type: r.type,
-    displayLabel: DISPLAY_LABELS[r.type] ?? r.type,
+    displayLabel: displayLabelFor(r),
     amount: Number(r.amount).toFixed(8),
     currency: r.currency,
+    toCurrency: r.toCurrency,
+    toAmount: r.toAmount != null ? Number(r.toAmount) : null,
     exchangeRate: r.exchangeRate != null ? Number(r.exchangeRate) : null,
     reference: r.reference,
     date: r.transactionDate ?? r.createdAt.toISOString().slice(0, 10),
@@ -490,6 +527,102 @@ export function createPortfolioCashRoutes(db?: DB) {
   routes.post("/:id/cash/deposits", (c) => movement(c, "DEPOSIT"))
   routes.post("/:id/cash/withdrawals", (c) => movement(c, "WITHDRAWAL"))
 
+  // POST /:id/cash/interest | /:id/cash/fees
+  //
+  // Neither is money crossing the boundary of the account: interest is what the
+  // broker pays or charges on the balance already there, a fee is a charge
+  // attached to no transaction. Both move the balance and neither is a
+  // contribution — see EXTERNAL_CASH_TX_TYPES.
+  async function internalCash(c: Context, kind: "INTEREST" | "FEE") {
+    const parsed = (kind === "INTEREST" ? InterestCashSchema : FeeCashSchema).safeParse(
+      await c.req.json().catch(() => ({})),
+    )
+    if (!parsed.success) {
+      return c.json({ error: "ValidationError", message: parsed.error.issues[0]?.message }, 422)
+    }
+    const identity = c.get("userIdentity")
+    const database = getDb()
+    const portfolio = await loadPortfolio(database, c.req.param("id") ?? "", identity.id)
+    if (!portfolio) return c.json({ error: "NotFound", message: "Portfolio not found" }, 404)
+    if (portfolio.isVirtual) return c.json({ error: "ReadOnlyPortfolio", message: "Virtual portfolios are read-only" }, 409)
+
+    const body = parsed.data
+    const ccy = (body.currency ?? portfolio.baseCurrency).toUpperCase()
+    const ledger = ledgerCurrency(portfolio)
+    if (ledger && ccy !== ledger) {
+      return c.json({ error: "ValidationError", message: `Cash currency must be ${ledger}` }, 422)
+    }
+    // INTEREST keeps the caller's sign — a debit interest is a real fact.
+    // FEE is a magnitude booked as a debit, like a commission.
+    const amount = kind === "INTEREST" ? body.amount : -Math.abs(body.amount)
+    const baseRow = fxFields(body as Record<string, unknown>, ccy)
+
+    const [inserted] = await database
+      .insert(portfolioCashTransactions)
+      .values({
+        userId: identity.id,
+        portfolioId: portfolio.id,
+        type: kind,
+        amount: scale8(amount),
+        currency: ccy,
+        description: body.description ?? null,
+        transactionDate: body.transactionDate ?? null,
+        ...baseRow,
+      })
+      .returning()
+
+    return c.json(serializeCash(inserted, { labels: [] }), 201)
+  }
+  routes.post("/:id/cash/interest", (c) => internalCash(c, "INTEREST"))
+  routes.post("/:id/cash/fees", (c) => internalCash(c, "FEE"))
+
+  // POST /:id/cash/conversions
+  //
+  // Two legs, one row: `amount` is the signed leg handed over in `currency`,
+  // `toAmount` the magnitude received in `toCurrency`. When `toCurrency` is
+  // omitted or equal to `currency` the row is not an exchange but a correction of
+  // one balance — the case that closes a broker's own conversion residual.
+  routes.post("/:id/cash/conversions", async (c) => {
+    const parsed = ConversionCashSchema.safeParse(await c.req.json().catch(() => ({})))
+    if (!parsed.success) {
+      return c.json({ error: "ValidationError", message: parsed.error.issues[0]?.message }, 422)
+    }
+    const identity = c.get("userIdentity")
+    const database = getDb()
+    const portfolio = await loadPortfolio(database, c.req.param("id") ?? "", identity.id)
+    if (!portfolio) return c.json({ error: "NotFound", message: "Portfolio not found" }, 404)
+    if (portfolio.isVirtual) return c.json({ error: "ReadOnlyPortfolio", message: "Virtual portfolios are read-only" }, 409)
+
+    const body = parsed.data
+    const from = body.currency.toUpperCase()
+    const to = (body.toCurrency ?? body.currency).toUpperCase()
+    const ledger = ledgerCurrency(portfolio)
+    if (ledger && from !== ledger && to !== ledger) {
+      return c.json({
+        error: "ValidationError",
+        message: `A conversion in a ${ledger}-settled portfolio must involve ${ledger}`,
+      }, 422)
+    }
+
+    const [inserted] = await database
+      .insert(portfolioCashTransactions)
+      .values({
+        userId: identity.id,
+        portfolioId: portfolio.id,
+        type: "FX_CONVERSION",
+        amount: scale8(body.amount),
+        currency: from,
+        toCurrency: to,
+        toAmount: scale8(Math.abs(body.toAmount)),
+        description: body.description ?? null,
+        transactionDate: body.transactionDate ?? null,
+        ...fxFields(body as Record<string, unknown>, from),
+      })
+      .returning()
+
+    return c.json(serializeCash(inserted, { labels: [] }), 201)
+  })
+
   // POST /:id/cash/transfers
   routes.post("/:id/cash/transfers", async (c) => {
     const parsed = TransferCashSchema.safeParse(await c.req.json().catch(() => ({})))
@@ -647,13 +780,21 @@ export function createPortfolioCashRoutes(db?: DB) {
       .from(portfolios)
       .where(eq(portfolios.id, existing.portfolioId))
     const ledger = ledgerCurrency(portfolio)
+    const isConversion = existing.type === "FX_CONVERSION"
     if (ledger) {
       const existingCurrency = existing.currency.toUpperCase()
       const nextCurrency = (parsed.data.currency ?? existing.currency).toUpperCase()
-      if (existingCurrency !== ledger) {
+      const nextTo = (parsed.data.toCurrency ?? existing.toCurrency ?? existing.currency).toUpperCase()
+      if (!isConversion && existingCurrency !== ledger) {
         return c.json({ error: "ValidationError", message: `Non-${ledger} cash rows cannot be edited while cash is limited to ${ledger}` }, 422)
       }
-      if (nextCurrency !== ledger) {
+      // A conversion's first leg is by definition foreign to the settlement
+      // currency — that is the point of a conversion. What must not happen is a
+      // conversion where neither leg touches the currency the account holds.
+      if (isConversion && nextCurrency !== ledger && nextTo !== ledger) {
+        return c.json({ error: "ValidationError", message: `A conversion in a ${ledger}-settled portfolio must involve ${ledger}` }, 422)
+      }
+      if (!isConversion && nextCurrency !== ledger) {
         return c.json({ error: "ValidationError", message: `Cash currency must be ${ledger}` }, 422)
       }
     }
@@ -664,11 +805,18 @@ export function createPortfolioCashRoutes(db?: DB) {
     }
     const updates: Partial<typeof portfolioCashTransactions.$inferInsert> = { updatedAt: new Date() }
     if (b.amount != null && b.amount !== 0) {
-      // Re-apply the §58.3 sign clamp (the modal ships magnitudes).
+      // Re-apply the §58.3 sign clamp for the kinds where the sign is not a fact
+      // (the modal ships magnitudes). INTEREST, FEE and FX_CONVERSION are signed
+      // as sent: a debit-interest row and a net-credit borrow fee are real
+      // postings, and flipping them would double-count the difference.
       let amount = b.amount
       if (existing.type === "DEPOSIT") amount = Math.abs(amount)
       if (existing.type === "WITHDRAWAL") amount = -Math.abs(amount)
       updates.amount = scale8(amount)
+    }
+    if (isConversion) {
+      if (b.toAmount != null) updates.toAmount = b.toAmount === 0 ? null : scale8(Math.abs(b.toAmount))
+      if (b.toCurrency != null) updates.toCurrency = b.toCurrency.toUpperCase()
     }
     if (b.currency != null && existing.type !== "TRANSFER") {
       // Transfers keep their currency (the paired leg is denominated in it).

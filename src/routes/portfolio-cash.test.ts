@@ -180,6 +180,114 @@ describe("POST deposits / withdrawals (62.3)", () => {
   })
 })
 
+describe("POST interest / fees / conversions (#245)", () => {
+  it("interest keeps its sign: credited positive, charged negative", async () => {
+    const h = await boot()
+    const pf = await makePf(h, "IBKR", "PLN")
+
+    const credited = await post(h, `/api/portfolios/${pf}/cash/interest`, { amount: 0.7, currency: "USD", transactionDate: "2024-04-03" })
+    const charged = await post(h, `/api/portfolios/${pf}/cash/interest`, { amount: -0.26, currency: "USD", transactionDate: "2024-06-05" })
+    expect(credited.status).toBe(201)
+    expect((await credited.json()).amount).toBe(0.7)
+    expect((await charged.json()).amount).toBe(-0.26)
+
+    const cash = await (await h.app.request(`/api/portfolios/${pf}/cash`, { headers: h.headers })).json()
+    expect(cash.balances.find((b: any) => b.currency === "USD").balance).toBeCloseTo(0.44, 6)
+  })
+
+  it("a fee is always booked as a debit, whatever sign the caller sends", async () => {
+    const h = await boot()
+    const pf = await makePf(h, "IBKR", "PLN")
+    const res = await post(h, `/api/portfolios/${pf}/cash/fees`, { amount: 1.25, currency: "USD", description: "ADR fee" })
+    expect(res.status).toBe(201)
+    const body = await res.json()
+    expect(body.type).toBe("FEE")
+    expect(body.amount).toBe(-1.25)
+  })
+
+  it("a conversion stores both legs and moves both balances", async () => {
+    const h = await boot()
+    const pf = await makePf(h, "P1", "PLN")
+    const res = await post(h, `/api/portfolios/${pf}/cash/conversions`, {
+      amount: -1000, currency: "EUR", toCurrency: "USD", toAmount: 1150.4, transactionDate: "2024-01-03",
+    })
+    expect(res.status).toBe(201)
+    const body = await res.json()
+    expect(body.type).toBe("FX_CONVERSION")
+    expect(body.amount).toBe(-1000)
+    expect(body.toCurrency).toBe("USD")
+    expect(body.toAmount).toBe(1150.4)
+
+    const cash = await (await h.app.request(`/api/portfolios/${pf}/cash`, { headers: h.headers })).json()
+    expect(cash.balances.find((b: any) => b.currency === "EUR").balance).toBe(-1000)
+    expect(cash.balances.find((b: any) => b.currency === "USD").balance).toBe(1150.4)
+  })
+
+  it("a conversion with no second leg is a correction of one balance", async () => {
+    const h = await boot()
+    const pf = await makePf(h, "IBKR", "PLN", false)
+    await post(h, `/api/portfolios/${pf}/cash/deposits`, { amount: 100, currency: "USD" })
+    const res = await post(h, `/api/portfolios/${pf}/cash/conversions`, {
+      amount: -60.515636, currency: "USD", toAmount: 0, description: "FX USD/SEK - net in base",
+    })
+    expect(res.status).toBe(201)
+    const body = await res.json()
+    expect(body.toCurrency).toBe("USD")
+
+    const recent = await (await h.app.request(`/api/portfolios/cash/recent-transactions?limit=10`, { headers: h.headers })).json()
+    const label = recent.data.find((r: any) => r.type === "FX_CONVERSION")?.displayLabel
+    expect(label).toBe("Correction")
+  })
+
+  it("a settlement-currency portfolio rejects a conversion between two foreign currencies", async () => {
+    const h = await boot()
+    const pf = crypto.randomUUID()
+    await h.db.insert(portfolios).values({ userId: "user-1", id: pf, name: "IBKR", baseCurrency: "PLN", cashCurrency: "USD" })
+
+    const bad = await post(h, `/api/portfolios/${pf}/cash/conversions`, { amount: -100, currency: "EUR", toCurrency: "SEK", toAmount: 110 })
+    expect(bad.status).toBe(422)
+
+    const ok = await post(h, `/api/portfolios/${pf}/cash/conversions`, { amount: -100, currency: "EUR", toCurrency: "USD", toAmount: 110 })
+    expect(ok.status).toBe(201)
+  })
+
+  it("PATCH edits the second leg of a conversion and keeps the correction invariant", async () => {
+    const h = await boot()
+    const pf = crypto.randomUUID()
+    await h.db.insert(portfolios).values({ userId: "user-1", id: pf, name: "IBKR", baseCurrency: "PLN", cashCurrency: "USD" })
+
+    const created = await post(h, `/api/portfolios/${pf}/cash/conversions`, { amount: -1000, currency: "EUR", toCurrency: "USD", toAmount: 1150.4 })
+    const id = (await created.json()).id
+
+    const patched = await h.app.request(`/api/portfolios/cash/transactions/${id}`, {
+      method: "PATCH",
+      headers: { ...h.headers, "content-type": "application/json" },
+      body: JSON.stringify({ toAmount: 1151 }),
+    })
+    expect(patched.status).toBe(200)
+    const body = await patched.json()
+    expect(body.toAmount).toBe(1151)
+    expect(body.toCurrency).toBe("USD")
+
+    mockInstrumentsFx({ table: { USD: 1, EUR: 1, PLN: 4 }, asOf: "2024-01-01" })
+    try {
+      const cash = await (await h.app.request(`/api/portfolios/${pf}/cash`, { headers: h.headers })).json()
+      // 1 000 EUR handed over at 1:1, 1 151 USD received → +151 USD
+      expect(cash.balances).toEqual([{ currency: "USD", balance: 151 }])
+    } finally {
+      unmockInstrumentsFx()
+    }
+  })
+
+  it("virtual portfolios are read-only for the new kinds", async () => {
+    const h = await boot()
+    const pf = crypto.randomUUID()
+    await h.db.insert(portfolios).values({ userId: "user-1", id: pf, name: "Virtual", baseCurrency: "PLN", isVirtual: true })
+    const res = await post(h, `/api/portfolios/${pf}/cash/interest`, { amount: 1 })
+    expect(res.status).toBe(409)
+  })
+})
+
 describe("POST transfers (62.3)", () => {
   it("same-ccy transfer inserts a paired legs with linkedTxId both ways and both balances move", async () => {
     const h = await boot()
