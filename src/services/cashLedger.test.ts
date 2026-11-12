@@ -8,6 +8,7 @@ import { crossRate } from "@marx-org/contracts/fx"
 import {
   tradeCashEffects,
   cashRowLegs,
+  normalizeConversionLegs,
   cashBalances,
   cashBalanceSeries,
   dailyExternalFlows,
@@ -141,6 +142,30 @@ describe("cashRowLegs (pure)", () => {
 
   it("a zero leg does not invent a currency", () => {
     expect(cashRowLegs({ type: "FX_CONVERSION", amount: 0, currency: "USD", toCurrency: "PLN", toAmount: 0 }).size).toBe(0)
+  })
+})
+
+describe("normalizeConversionLegs (pure)", () => {
+  it("a real exchange keeps two legs", () => {
+    expect(normalizeConversionLegs({ currency: "eur", amount: -1000, toCurrency: "usd", toAmount: 1150.4 }))
+      .toEqual({ currency: "EUR", amount: -1000, toCurrency: "USD", toAmount: 1150.4 })
+  })
+
+  it("same-currency legs collapse into one signed amount", () => {
+    const n = normalizeConversionLegs({ currency: "USD", amount: -1093.53, toCurrency: "USD", toAmount: 1094.44 })
+    expect(n?.currency).toBe("USD")
+    expect(n?.toAmount).toBeNull()
+    expect(n?.amount).toBeCloseTo(0.91, 8)
+  })
+
+  it("nothing handed over means the credit belongs to the currency that receives it", () => {
+    expect(normalizeConversionLegs({ currency: "USD", amount: 0, toCurrency: "EUR", toAmount: 5 }))
+      .toEqual({ currency: "EUR", amount: 5, toCurrency: null, toAmount: null })
+  })
+
+  it("legs that cancel out are not a row at all", () => {
+    expect(normalizeConversionLegs({ currency: "USD", amount: 0, toAmount: 0 })).toBeNull()
+    expect(normalizeConversionLegs({ currency: "USD", amount: -5, toCurrency: "USD", toAmount: 5 })).toBeNull()
   })
 })
 

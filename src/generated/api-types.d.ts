@@ -4016,6 +4016,10 @@ export interface components {
             displayLabel: string;
             amount: string;
             currency: string;
+            /** @description FX_CONVERSION only: the currency received. Absent or equal to `currency` means the row is a balance correction. */
+            toCurrency?: string | null;
+            /** @description FX_CONVERSION only: the amount received, positive. */
+            toAmount?: number | null;
             exchangeRate?: number | null;
             reference?: string | null;
             date: string;

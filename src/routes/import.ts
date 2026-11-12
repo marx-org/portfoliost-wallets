@@ -3,7 +3,8 @@ import { and, desc, eq, inArray, like, notInArray, or, sql } from "drizzle-orm"
 import { z } from "zod"
 import { randomUUID } from "node:crypto"
 import { userIdentityMiddleware } from "../auth.js"
-import { LOT_QUANTITY_TYPES, POSITION_TX_TYPES } from "../transaction-types.js"
+import { LOT_QUANTITY_TYPES, POSITION_TX_TYPES, CASH_TX_TYPES } from "../transaction-types.js"
+import { normalizeConversionLegs } from "../services/cashLedger.js"
 import { getDb, type DB } from "../db/index.js"
 import { capitalBasisInvested } from "../services/transferFlows.js"
 import { drawLots, openLots, openQuantity, type LotTx } from "../services/openLots.js"
@@ -82,13 +83,18 @@ export const ImportLabelBootstrapRequestSchema = ExternalSourceSchema.extend({
   labels: z.array(z.string().trim().min(1).max(40)).min(1).max(200),
 }).strict()
 
-const CASH_TX_TYPES = ["DEPOSIT", "WITHDRAWAL", "TRANSFER"] as const
-
 const ImportPortfolioCashTxSchema = z
   .object({
     type: z.enum(CASH_TX_TYPES),
     amount: z.number(),
     currency: z.string().regex(ISO_CURRENCY, "currency must be an ISO 4217 code"),
+    /**
+     * FX_CONVERSION second leg. Absent, or equal to `currency`, means the row is
+     * a correction of one balance rather than an exchange — the shape IBKR's
+     * "Net Amount in Base from Forex Trade" postings have.
+     */
+    toCurrency: z.string().regex(ISO_CURRENCY, "toCurrency must be an ISO 4217 code").nullable().optional(),
+    toAmount: z.number().nullable().optional(),
     description: z.string().nullable().optional(),
     transactionDate: z.string().nullable().optional(),
     fees: z.number().nonnegative().nullable().optional(),
@@ -1027,16 +1033,46 @@ async function insertImportPortfolioCashTx(
   if (!c) return { inserted: false }
   const ccy = c.currency.toUpperCase()
 
-  // sign clamp (§58.3): the importer may send the sheet's signed value. A
-  // TRANSFER is a debit out of the source — stored negated (magnitude kept
-  // positive) so the paired legs match the interactive route (§62.3): the
-  // source leg is negative, the destination leg positive.
+  // sign clamp (§58.3): DEPOSIT is always a credit; WITHDRAWAL and TRANSFER are
+  // always debits (a TRANSFER is a debit out of the source, stored negated with
+  // the magnitude kept so the paired legs match the interactive route, §62.3).
+  // INTEREST, FEE and FX_CONVERSION keep the caller's sign, because for these the
+  // sheet's own signed flow IS the fact: IBKR charges debit interest on borrowed
+  // balances, and a "Net Stock Borrow And Loan Fee" posting can be a net credit.
+  // Clamping them to a debit would invert 21 of the 195 IBKR rows.
   const amount =
     c.type === "DEPOSIT"
       ? Math.abs(c.amount)
-      : c.type === "WITHDRAWAL"
+      : c.type === "WITHDRAWAL" || c.type === "TRANSFER"
         ? -Math.abs(c.amount)
-        : -Math.abs(c.amount)
+        : c.amount
+
+  // A cash row's `fees` is metadata: the replay reads the amounts, so a charge
+  // that belongs to no leg is simply lost. A conversion charge must belong to
+  // one of the two legs — the one it is netted against — or the row is wrong.
+  // The same normalization the interactive route applies collapses the
+  // degenerate conversion shapes (both legs one currency, or nothing handed
+  // over) into the single signed leg they are equivalent to, which is also what
+  // keeps `ck_pctx_amount_nonzero` satisfied.
+  const legs = c.type === "FX_CONVERSION"
+    ? normalizeConversionLegs({ currency: ccy, amount, toCurrency: c.toCurrency, toAmount: c.toAmount })
+    : null
+  if (c.type === "FX_CONVERSION") {
+    if (!legs) {
+      throw new ImportRowError("empty_conversion", row.externalId, "a conversion whose legs cancel out changes nothing")
+    }
+    if (c.fees != null && Math.abs(c.fees) > 0) {
+      const chargeCcy = (c.feeCurrency ?? legs.currency).toUpperCase()
+      const to = legs.toCurrency ?? legs.currency
+      if (chargeCcy !== legs.currency && chargeCcy !== to) {
+        throw new ImportRowError(
+          "invalid_fee_currency",
+          row.externalId,
+          `conversion charge in ${chargeCcy} belongs to neither leg (${legs.currency} handed over, ${to} received)`,
+        )
+      }
+    }
+  }
 
   // labels → ids (unknown name → row error, §58.3)
   const labelIds = await resolveImportLabelIds(tx, userId, c.labels ?? [], row.externalId)
@@ -1044,7 +1080,11 @@ async function insertImportPortfolioCashTx(
   const baseRow = {
     userId,
     type: c.type,
-    currency: ccy,
+    currency: legs ? legs.currency : ccy,
+    // Only a conversion carries a second leg. A conversion with no second leg,
+    // or with the second leg in the same currency, is a balance correction.
+    toCurrency: legs ? legs.toCurrency : null,
+    toAmount: legs && legs.toAmount != null ? scale8(legs.toAmount) : null,
     description: c.description ?? null,
     transactionDate: c.transactionDate ?? null,
     fees: c.fees != null ? scale8(c.fees) : null,
@@ -1064,7 +1104,7 @@ async function insertImportPortfolioCashTx(
       .values({
         ...baseRow,
         portfolioId,
-        amount: scale8(amount),
+        amount: scale8(legs ? legs.amount : amount),
         externalId: row.externalId,
         // §87.2 — set in the SAME transaction as the insert, so a partial import
         // cannot leave the leg unlinked. The mapper emits the trade leg first, so
