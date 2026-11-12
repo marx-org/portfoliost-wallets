@@ -526,6 +526,47 @@ describe("GET /:id/cash/transactions (62.3)", () => {
     expect(body.items[0].balanceAfter).toBe(500)
   })
 
+  it("a conversion's balanceAfter counts both legs (#245)", async () => {
+    const h = await boot()
+    const pf = await makePf(h, "P1", "USD")
+    await h.db.insert(portfolioCashTransactions).values([
+      { userId: "user-1", portfolioId: pf, type: "DEPOSIT", amount: "100", currency: "USD", transactionDate: "2024-01-01" },
+      {
+        userId: "user-1",
+        portfolioId: pf,
+        type: "FX_CONVERSION",
+        amount: "-1000",
+        currency: "EUR",
+        toCurrency: "USD",
+        toAmount: "1100",
+        transactionDate: "2024-01-02",
+      },
+      {
+        userId: "user-1",
+        portfolioId: pf,
+        type: "FX_CONVERSION",
+        amount: "-60.5",
+        currency: "USD",
+        toCurrency: "USD",
+        toAmount: null,
+        transactionDate: "2024-01-03",
+      },
+    ])
+
+    const res = await h.app.request(`/api/portfolios/${pf}/cash/transactions`, { headers: h.headers })
+    const body = await res.json()
+    const [correction, conversion] = body.items
+    // The row is reported in the currency of its own leg, and the running sum
+    // must carry the received leg too — otherwise the correction below is
+    // reported against a balance that never existed.
+    expect(correction.balanceAfter).toBe(1139.5) // 100 + 1100 − 60.5
+    expect(conversion.balanceAfter).toBe(-1000)
+
+    const cash = await (await h.app.request(`/api/portfolios/${pf}/cash`, { headers: h.headers })).json()
+    expect(cash.balances.find((b) => b.currency === "USD").balance).toBe(1139.5)
+    expect(cash.balances.find((b) => b.currency === "EUR").balance).toBe(-1000)
+  })
+
   it("filters by ?labels= (AND)", async () => {
     const h = await boot()
     const pf = await makePf(h, "P1", "USD")
