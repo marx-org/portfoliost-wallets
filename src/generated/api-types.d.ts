@@ -1482,6 +1482,28 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/portfolios/{id}/transfers": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: components["parameters"]["portfolioId"];
+            };
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Move an instrument to another portfolio (in kind, no cash)
+         * @description The interactive counterpart of an import `TRANSFER_OUT` row. The quantity is drawn FIFO from the source portfolio's open lots for that symbol, producing one `TRANSFER_OUT` row per lot at that lot's own price and a matching `TRANSFER_IN` in the receiving portfolio. No cash moves, no realised P/L is booked, and the movement is not an external flow for return metrics.
+         */
+        post: operations["transferPosition"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/portfolios/{id}/cash": {
         parameters: {
             query?: never;
@@ -3913,21 +3935,97 @@ export interface components {
             /** Format: date-time */
             executedAt?: string;
         };
-        DepositCashRequest: components["schemas"]["FeeFxFields"] & {
+        TransferPositionRequest: {
+            /** @description Instrument to move, in canonical form (AAPL, SAP.DE). Case-insensitive; the server upper-cases it. The quantity is drawn FIFO from the source portfolio's open lots for this symbol, so it must not exceed what is open. */
+            symbol: string;
+            /** @description Shares/units to move, in the CURRENT (post-restatement) units the holding shows. */
+            quantity: number;
+            /**
+             * Format: uuid
+             * @description Receiving portfolio. Must belong to the same user and differ from the source.
+             */
+            toPortfolioId: string;
+            /**
+             * Format: date-time
+             * @description When the movement happened; defaults to now. Used for the FIFO draw and the split restatement.
+             */
+            executedAt?: string;
+            notes?: string | null;
+        };
+        TransferLeg: {
+            /** Format: uuid */
+            id: string;
+            /** Format: uuid */
+            portfolioId: string;
+            /** @enum {string} */
+            type: "TRANSFER_OUT" | "TRANSFER_IN";
+            instrumentSymbol: string;
+            instrumentName?: string | null;
+            quantity: number;
+            /** @description The source lot's own cost per unit, carried over unchanged. Not a market price. */
+            price: number;
+            /** @description quantity × price, informational only — nothing was bought or sold. */
+            totalAmount: number;
+            currency: string;
+            assetType?: string;
+            /** Format: date-time */
+            executedAt: string;
+            /** Format: uuid */
+            transferGroupId: string;
+            /**
+             * Format: uuid
+             * @description The id of the opposite leg of the same draw.
+             */
+            linkedTransferId?: string | null;
+            /**
+             * Format: uuid
+             * @description The lot-opening transaction this quantity came from (a BUY or an earlier TRANSFER_IN).
+             */
+            sourceTransactionId?: string | null;
+            notes?: string | null;
+        };
+        TransferPositionResponse: {
+            /**
+             * Format: uuid
+             * @description Shared by every leg of the movement. One draw produces one TRANSFER_OUT and one TRANSFER_IN; a position held in several lots produces several pairs.
+             */
+            transferGroupId: string;
+            /** @description TRANSFER_OUT and TRANSFER_IN rows, in draw order. */
+            legs: components["schemas"]["TransferLeg"][];
+            /** @description Echo of the quantity actually moved. */
+            quantity: number;
+            /**
+             * Format: uuid
+             * @description The position the instrument left (null when it left no open position).
+             */
+            sourcePositionId?: string | null;
+            /**
+             * Format: uuid
+             * @description The position the instrument arrived in.
+             */
+            targetPositionId?: string | null;
+        };
+        CashFeeFields: {
+            /** @description Charge attached to the movement. For a cash row it is metadata: the ledger replay reads the amounts, so a conversion charge must already be netted into the leg it is quoted in. */
+            fees?: number | null;
+            /** @enum {string|null} */
+            feesType?: "fixed" | "pct" | null;
+        };
+        DepositCashRequest: components["schemas"]["FeeFxFields"] & components["schemas"]["CashFeeFields"] & {
             amount: number;
             /** @description Defaults to the portfolio baseCurrency; any registry currency allowed */
             currency?: string;
             description?: string;
             transactionDate?: string;
         };
-        WithdrawCashRequest: components["schemas"]["FeeFxFields"] & {
+        WithdrawCashRequest: components["schemas"]["FeeFxFields"] & components["schemas"]["CashFeeFields"] & {
             amount: number;
             /** @description Defaults to the portfolio baseCurrency; any registry currency allowed */
             currency?: string;
             description?: string;
             transactionDate?: string;
         };
-        TransferCashRequest: components["schemas"]["FeeFxFields"] & {
+        TransferCashRequest: components["schemas"]["FeeFxFields"] & components["schemas"]["CashFeeFields"] & {
             amount: number;
             currency: string;
             description?: string;
@@ -3938,7 +4036,7 @@ export interface components {
             targetAmount?: number | null;
             targetFxRate?: number | null;
         };
-        InterestCashRequest: components["schemas"]["FeeFxFields"] & {
+        InterestCashRequest: components["schemas"]["FeeFxFields"] & components["schemas"]["CashFeeFields"] & {
             /** @description Signed: positive = interest credited, negative = interest charged */
             amount: number;
             /** @description Defaults to the portfolio's cash currency */
@@ -3946,7 +4044,7 @@ export interface components {
             description?: string;
             transactionDate?: string;
         };
-        FeeCashRequest: components["schemas"]["FeeFxFields"] & {
+        FeeCashRequest: components["schemas"]["FeeFxFields"] & components["schemas"]["CashFeeFields"] & {
             /** @description Magnitude of the charge; the server books it as a debit */
             amount: number;
             /** @description Defaults to the portfolio's cash currency */
@@ -3954,13 +4052,13 @@ export interface components {
             description?: string;
             transactionDate?: string;
         };
-        ConversionCashRequest: components["schemas"]["FeeFxFields"] & {
+        ConversionCashRequest: components["schemas"]["FeeFxFields"] & components["schemas"]["CashFeeFields"] & {
             /** @description Signed leg handed over (negative for an outflow). For a pure correction this is the correction itself. */
             amount: number;
             currency: string;
             /** @description Currency received. Omitted or equal to `currency` means a balance correction rather than an exchange. */
             toCurrency?: string | null;
-            /** @description Amount received */
+            /** @description Amount received, positive. Net effect = amount + toAmount. A conversion charge is netted into the leg it is quoted in by the writer — the ledger reads amounts and treats `fees` as metadata, and a charge in a third currency is rejected (422). */
             toAmount: number;
             description?: string;
             transactionDate?: string;
@@ -6718,6 +6816,59 @@ export interface operations {
                 };
                 content: {
                     "application/json": unknown;
+                };
+            };
+        };
+    };
+    transferPosition: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: components["parameters"]["portfolioId"];
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["TransferPositionRequest"];
+            };
+        };
+        responses: {
+            /** @description Legs created */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TransferPositionResponse"];
+                };
+            };
+            /** @description Source or target portfolio not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Source portfolio is virtual (read-only) */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Target is the source, or the quantity exceeds the open lots for the symbol */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
                 };
             };
         };
