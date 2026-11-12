@@ -7,6 +7,7 @@ import { mockInstrumentsFx, unmockInstrumentsFx } from "../test-fx-mock.js"
 import { crossRate } from "@marx-org/contracts/fx"
 import {
   tradeCashEffects,
+  cashRowLegs,
   cashBalances,
   cashBalanceSeries,
   dailyExternalFlows,
@@ -57,9 +58,11 @@ async function trade(row: {
 }
 
 async function ext(row: {
-  type: "DEPOSIT" | "WITHDRAWAL" | "TRANSFER"
+  type: "DEPOSIT" | "WITHDRAWAL" | "TRANSFER" | "INTEREST" | "FEE" | "FX_CONVERSION"
   amount: string | number
   currency: string
+  toCurrency?: string
+  toAmount?: string | number
   transactionDate: string
   exchangeRate?: string | number | null
   rateSource?: "automatic" | "manual"
@@ -70,6 +73,8 @@ async function ext(row: {
     type: row.type,
     amount: String(row.amount),
     currency: row.currency,
+    toCurrency: row.toCurrency ?? null,
+    toAmount: row.toAmount != null ? String(row.toAmount) : null,
     transactionDate: row.transactionDate,
     exchangeRate: row.exchangeRate != null ? String(row.exchangeRate) : null,
     rateSource: row.rateSource,
@@ -102,6 +107,117 @@ describe("tradeCashEffects (pure)", () => {
 
   it("empty notional + fee → empty map", () => {
     expect(tradeCashEffects({ type: "BUY", totalAmount: 0, feesSettled: 0, currency: "USD" }).size).toBe(0)
+  })
+})
+
+describe("cashRowLegs (pure)", () => {
+  it("a deposit, an interest credit and a charge are each one leg", () => {
+    expect(cashRowLegs({ type: "DEPOSIT", amount: 500, currency: "USD" })).toEqual(new Map([["USD", 500]]))
+    expect(cashRowLegs({ type: "INTEREST", amount: -0.26, currency: "USD" })).toEqual(new Map([["USD", -0.26]]))
+    expect(cashRowLegs({ type: "FEE", amount: -1.25, currency: "USD" })).toEqual(new Map([["USD", -1.25]]))
+  })
+
+  it("a conversion is two legs, in two currencies", () => {
+    const m = cashRowLegs({ type: "FX_CONVERSION", amount: -1000, currency: "EUR", toCurrency: "USD", toAmount: 1150.4 })
+    expect(m.get("EUR")).toBe(-1000)
+    expect(m.get("USD")).toBe(1150.4)
+    expect(m.size).toBe(2)
+  })
+
+  it("a conversion with no second leg is a correction: the amount is the whole effect", () => {
+    expect(cashRowLegs({ type: "FX_CONVERSION", amount: -60.515636, currency: "USD" })).toEqual(new Map([["USD", -60.515636]]))
+  })
+
+  it("a same-currency conversion nets both legs into one balance", () => {
+    // IBKR's "Net Amount in Base from Forex Trade": the account never held the
+    // foreign currency, so the broker's own conversion residual is a correction
+    // of the one balance it does hold.
+    const m = cashRowLegs({
+      type: "FX_CONVERSION", amount: -1093.53, currency: "USD", toCurrency: "USD", toAmount: 1094.44,
+    })
+    expect(m.size).toBe(1)
+    expect(m.get("USD")).toBeCloseTo(0.91, 8)
+  })
+
+  it("a zero leg does not invent a currency", () => {
+    expect(cashRowLegs({ type: "FX_CONVERSION", amount: 0, currency: "USD", toCurrency: "PLN", toAmount: 0 }).size).toBe(0)
+  })
+})
+
+describe("#64: INTEREST, FEE and FX_CONVERSION in the replay", () => {
+  beforeEach(async () => {
+    h = await makeHarness()
+    await seedPortfolio()
+  })
+
+  it("a conversion moves both currencies in a multi-currency ledger", async () => {
+    await ext({ type: "INTEREST", amount: 25, currency: "USD", transactionDate: "2024-01-01" })
+    await ext({ type: "FEE", amount: -5, currency: "EUR", transactionDate: "2024-01-02" })
+    await ext({ type: "FX_CONVERSION", amount: -1000, currency: "EUR", toCurrency: "USD", toAmount: 1150.4, transactionDate: "2024-01-03" })
+
+    const b = await cashBalances(h.db, null, portfolioId)
+    expect(b.get("USD")).toBeCloseTo(25 + 1150.4, 8)
+    expect(b.get("EUR")).toBeCloseTo(-5 - 1000, 8)
+  })
+
+  it("a correction lands on the one balance it names", async () => {
+    await ext({ type: "DEPOSIT", amount: 100, currency: "USD", transactionDate: "2024-01-01" })
+    await ext({ type: "FX_CONVERSION", amount: -60.515636, currency: "USD", transactionDate: "2024-01-02" })
+
+    const b = await cashBalances(h.db, null, portfolioId)
+    expect(b.get("USD")).toBeCloseTo(39.484364, 6)
+  })
+
+  it("both legs of a conversion reach the settlement currency at the event date", async () => {
+    // EUR/USD = 1.1504, so 1 000 EUR handed over buys 1 151 USD: the row nets
+    // 0.6 USD, which is the point of booking a conversion at all.
+    mockInstrumentsFx({ table: { USD: 1.1504, EUR: 1, PLN: 4.6 }, asOf: "2024-01-03" })
+    await h.db.update(portfolios).set({ cashCurrency: "USD" }).where(eq(portfolios.id, portfolioId))
+    await ext({ type: "FX_CONVERSION", amount: -1000, currency: "EUR", toCurrency: "USD", toAmount: 1151, transactionDate: "2024-01-03" })
+
+    const b = await cashBalances(h.db, null, portfolioId)
+    expect([...b.keys()]).toEqual(["USD"])
+    expect(b.get("USD")).toBeCloseTo(-1000 * 1.1504 + 1151, 6)
+  })
+
+  it("the row's manual rate applies to its own currency only, not the leg received", async () => {
+    // The sheet stores one rate: EUR -> PLN, 4.6. Applying it to the USD leg too
+    // would value 1 150.40 USD at 4.6 PLN, inventing 691.84 PLN out of a row that
+    // nets 1.6 PLN.
+    mockInstrumentsFx({ table: { USD: 1.15, EUR: 1, PLN: 4.6 }, asOf: "2024-01-03" })
+    await h.db.update(portfolios).set({ cashBaseCurrencyOnly: true }).where(eq(portfolios.id, portfolioId))
+    await ext({
+      type: "FX_CONVERSION", amount: -1000, currency: "EUR", toCurrency: "USD", toAmount: 1150.4,
+      transactionDate: "2024-01-03", exchangeRate: 4.6, rateSource: "manual",
+    })
+
+    const b = await cashBalances(h.db, null, portfolioId)
+    expect(b.get("PLN")).toBeCloseTo(-1000 * 4.6 + 1150.4 * (4.6 / 1.15), 6)
+  })
+
+  it("the daily series carries a conversion through every day of the window", async () => {
+    await ext({ type: "FX_CONVERSION", amount: -1000, currency: "EUR", toCurrency: "USD", toAmount: 1150.4, transactionDate: "2024-01-03" })
+    const s = await cashBalanceSeries(h.db, null, portfolioId, "2024-01-01", "2024-01-05", "PLN")
+    expect(s.get("2024-01-02")).toBe(0)
+    // EUR is the implicit 1 in the mock table, so EUR→PLN is 4.3 and USD→PLN is 4.3/1.08.
+    const total = -1000 * 4.3 + 1150.4 * (4.3 / 1.08)
+    expect(s.get("2024-01-03")).toBeCloseTo(total, 4)
+    expect(s.get("2024-01-05")).toBeCloseTo(total, 4)
+  })
+
+  it("adding interest, a fee and a conversion leaves the capital basis untouched", async () => {
+    await ext({ type: "DEPOSIT", amount: 1000, currency: "USD", transactionDate: "2024-01-01" })
+    const before = await externalCashInvested(h.db, null, portfolioId, "PLN")
+
+    await ext({ type: "INTEREST", amount: 29.248076, currency: "USD", transactionDate: "2024-02-01" })
+    await ext({ type: "FEE", amount: -6.831295, currency: "USD", transactionDate: "2024-02-02" })
+    await ext({ type: "FX_CONVERSION", amount: -14.908623, currency: "USD", transactionDate: "2024-02-03" })
+
+    expect(await externalCashInvested(h.db, null, portfolioId, "PLN")).toBeCloseTo(before, 8)
+
+    // …but the balance they belong to did move.
+    const balances = await cashBalances(h.db, null, portfolioId)
+    expect(balances.get("USD")).toBeCloseTo(1000 + 29.248076 - 6.831295 - 14.908623, 6)
   })
 })
 
@@ -498,6 +614,18 @@ describe("dailyExternalFlows", () => {
   it("empty rows → empty map", async () => {
     const f = await dailyExternalFlows(h.db, null, portfolioId, "2024-01-01", "2024-01-31", "PLN")
     expect(f.size).toBe(0)
+  })
+
+  it("INTEREST, FEE and FX_CONVERSION are not flows", async () => {
+    await ext({ type: "DEPOSIT", amount: 1000, currency: "USD", transactionDate: "2024-01-01" })
+    await ext({ type: "INTEREST", amount: 29.248076, currency: "USD", transactionDate: "2024-01-15" })
+    await ext({ type: "FEE", amount: -6.831295, currency: "USD", transactionDate: "2024-01-15" })
+    await ext({ type: "FX_CONVERSION", amount: -14.908623, currency: "USD", transactionDate: "2024-01-15" })
+
+    const usdPln = 4.3 / 1.08
+    const f = await dailyExternalFlows(h.db, null, portfolioId, "2024-01-01", "2024-01-31", "PLN")
+    expect(f.get("2024-01-01")).toBeCloseTo(1000 * usdPln, 4)
+    expect(f.get("2024-01-15")).toBeUndefined()
   })
 })
 

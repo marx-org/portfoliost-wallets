@@ -14,7 +14,12 @@
  *       `tx.feeCurrency ?? tx.currency`; and
  *   (b) external rows (portfolio_cash_transactions: DEPOSIT +, WITHDRAWAL −,
  *       TRANSFER as sent — the stored amount is already the row's signed
- *       own-currency effect).
+ *       own-currency effect). INTEREST and FEE are the row's signed amount in
+ *       its own currency. FX_CONVERSION is two legs: `amount` in `currency` for
+ *       the leg handed over and `toAmount` in `toCurrency` for the leg received.
+ *       When `toCurrency` is absent or equals `currency` the row is not an
+ *       exchange but a correction of one balance, and both legs land in that
+ *       currency.
  *
  * Splits/ADJUSTMENT have no cash effect. Negative balances are allowed
  * (replay fidelity — real ledgers dip negative before a deposit lands).
@@ -31,7 +36,7 @@
 import { and, eq, inArray, sql } from "drizzle-orm"
 import type { DB } from "../db/index.js"
 import { portfolioCashTransactions, portfolioTransactions, portfolios } from "../db/schema.js"
-import { TRADE_CASH_TYPES as CASH_EFFECTING_TX_TYPES } from "../transaction-types.js"
+import { TRADE_CASH_TYPES as CASH_EFFECTING_TX_TYPES, EXTERNAL_CASH_TX_TYPES, isConversionType } from "../transaction-types.js"
 import { FxRateUnavailableError, fxToOnDay, resolvedFxRate } from "./instruments-fx.js"
 import { debugEnabled, debugLog, fmtCcyMap, fmtCcyRateMap } from "./debug.js"
 
@@ -83,6 +88,43 @@ export function tradeCashEffects(tx: {
   if (fee !== 0) {
     const feeCcy = (tx.feeCurrency ?? tx.currency ?? "").toUpperCase()
     if (feeCcy) out.set(feeCcy, (out.get(feeCcy) ?? 0) - Math.abs(fee))
+  }
+  return out
+}
+
+/**
+ * Signed per-currency legs of one `portfolio_cash_transactions` row.
+ *
+ * Everything except FX_CONVERSION is a single leg: the stored `amount` is already
+ * the row's signed effect in its own currency. A conversion is two legs — what
+ * is handed over (`amount`, signed) and what is received (`toAmount`) — and the
+ * second leg is in `toCurrency`. A conversion with no second leg, or with the
+ * second leg in the same currency, is a correction of one balance: the two legs
+ * simply add.
+ *
+ * `fees` on a cash row is metadata, as it has always been: the replay reads the
+ * amounts. A conversion charge is therefore netted into `toAmount` by whoever
+ * writes the row, exactly as a bank wire charge is netted into a deposit's amount.
+ * Splitting it out would double-count it the moment the row is also the only
+ * record of the event.
+ */
+export function cashRowLegs(row: {
+  type: string
+  amount: string | number | null
+  currency: string | null
+  toCurrency?: string | null
+  toAmount?: string | number | null
+}): Map<string, number> {
+  const out = new Map<string, number>()
+  const add = (ccy: string, value: number) => {
+    if (!ccy || value === 0) return
+    out.set(ccy, (out.get(ccy) ?? 0) + value)
+  }
+  const from = (row.currency ?? "").toUpperCase()
+  add(from, Number(row.amount ?? 0))
+  if (isConversionType(row.type)) {
+    const to = (row.toCurrency ?? row.currency ?? "").toUpperCase()
+    add(to, Number(row.toAmount ?? 0))
   }
   return out
 }
@@ -281,12 +323,21 @@ async function tradeCashDeltaInCurrency(
  * External cash-row exchangeRate is stored directly as row-currency -> base.
  * Against a different settlement currency the row converts through the
  * event-date pair instead.
+ *
+ * An FX_CONVERSION's second leg is quoted in a different currency, so the row's
+ * stored manual rate cannot apply to it: that rate is the sheet's own-currency
+ * quote, and chaining it into a second currency would compound two quotes into
+ * one number nobody chose. The second leg is therefore always resolved at the
+ * event date.
  */
-async function externalCashDeltaInCurrency(
+async function cashRowDeltaInCurrency(
   authToken: string | null,
   row: {
+    type: string
     amount: string | number | null
     currency: string | null
+    toCurrency?: string | null
+    toAmount?: string | number | null
     exchangeRate?: string | number | null
     rateSource?: string | null
   },
@@ -295,20 +346,27 @@ async function externalCashDeltaInCurrency(
   day: string,
   cache: Map<string, number>,
 ): Promise<number> {
-  const currency = (row.currency ?? "").toUpperCase()
-  if (!currency) return 0
-  const rate = await cashLegRateTo(
-    authToken,
-    currency,
-    ledger,
-    baseCurrency,
-    day,
-    row.rateSource,
-    row.exchangeRate,
-    cache,
-    "exchangeRate",
-  )
-  return Number(row.amount ?? 0) * rate
+  const legs = cashRowLegs(row)
+  if (legs.size === 0) return 0
+  const rowCcy = (row.currency ?? "").toUpperCase()
+  let delta = 0
+  for (const [ccy, amount] of legs) {
+    const own = ccy === rowCcy
+    delta += amount * (
+      await cashLegRateTo(
+        authToken,
+        ccy,
+        ledger,
+        baseCurrency,
+        day,
+        own ? row.rateSource : "automatic",
+        own ? row.exchangeRate : null,
+        cache,
+        own ? "exchangeRate" : "toCurrency",
+      )
+    )
+  }
+  return delta
 }
 
 /**
@@ -376,8 +434,11 @@ export async function cashBalances(
   )
   const ext = await db
     .select({
+      type: portfolioCashTransactions.type,
       amount: portfolioCashTransactions.amount,
       currency: portfolioCashTransactions.currency,
+      toCurrency: portfolioCashTransactions.toCurrency,
+      toAmount: portfolioCashTransactions.toAmount,
       exchangeRate: portfolioCashTransactions.exchangeRate,
       rateSource: portfolioCashTransactions.rateSource,
       transactionDate: portfolioCashTransactions.transactionDate,
@@ -387,14 +448,15 @@ export async function cashBalances(
     .where(extWhere)
 
   for (const r of ext) {
-    const ccy = (r.currency ?? "").toUpperCase()
     const day = toDateStr(r.transactionDate) ?? toDateStr(r.createdAt)
     if (ledger) {
-      if (!day) throw new Error(`cash event in ${ccy} has no event date for single-currency replay`)
-      const delta = await externalCashDeltaInCurrency(authToken, r, ledger, base, day, eventRates)
+      if (!day) throw new Error(`cash event in ${(r.currency ?? "").toUpperCase()} has no event date for single-currency replay`)
+      const delta = await cashRowDeltaInCurrency(authToken, r, ledger, base, day, eventRates)
       balances.set(ledger, (balances.get(ledger) ?? 0) + delta)
-    } else if (ccy) {
-      balances.set(ccy, (balances.get(ccy) ?? 0) + Number(r.amount ?? 0))
+    } else {
+      for (const [ccy, delta] of cashRowLegs(r)) {
+        balances.set(ccy, (balances.get(ccy) ?? 0) + delta)
+      }
     }
   }
 
@@ -492,8 +554,11 @@ export async function cashBalanceSeries(
 
   const ext = await db
     .select({
+      type: portfolioCashTransactions.type,
       amount: portfolioCashTransactions.amount,
       currency: portfolioCashTransactions.currency,
+      toCurrency: portfolioCashTransactions.toCurrency,
+      toAmount: portfolioCashTransactions.toAmount,
       exchangeRate: portfolioCashTransactions.exchangeRate,
       rateSource: portfolioCashTransactions.rateSource,
       transactionDate: portfolioCashTransactions.transactionDate,
@@ -505,16 +570,18 @@ export async function cashBalanceSeries(
 
   for (const r of ext) {
     const day = toDateStr(r.transactionDate) ?? (ledger ? toDateStr(r.createdAt) : null)
-    if (!day || !(r.currency ?? "")) continue
+    if (!day) continue
+    const legs = cashRowLegs(r)
+    if (legs.size === 0) continue
     if (ledger) {
       events.push({
         day,
         ccy: ledger,
         delta: 0,
-        ledgerDelta: () => externalCashDeltaInCurrency(authToken, r, ledger, base, day, eventRates),
+        ledgerDelta: () => cashRowDeltaInCurrency(authToken, r, ledger, base, day, eventRates),
       })
     } else {
-      events.push({ day, ccy: (r.currency ?? "").toUpperCase(), delta: Number(r.amount ?? 0) })
+      for (const [ccy, delta] of legs) events.push({ day, ccy, delta })
     }
   }
 
@@ -574,6 +641,11 @@ export async function cashBalanceSeries(
  * flows of several portfolios into one aggregate benchmark. It owns the
  * external-only rule and the per-day historical rate, so a second flow reader
  * written for `/merged` would get both subtly wrong.
+ *
+ * The external-only rule is a query predicate, not a convention: INTEREST, FEE
+ * and FX_CONVERSION rows move the balance but are not money crossing the
+ * boundary of the account, and they are excluded here at the WHERE clause so no
+ * caller has to remember to filter them.
  */
 export async function dailyExternalFlows(
   db: DB,
@@ -596,9 +668,12 @@ export async function dailyExternalFlows(
     })
     .from(portfolioCashTransactions)
     .where(
-      ids.length === 1
-        ? eq(portfolioCashTransactions.portfolioId, ids[0])
-        : inArray(portfolioCashTransactions.portfolioId, ids),
+      and(
+        inArray(portfolioCashTransactions.type, [...EXTERNAL_CASH_TX_TYPES]),
+        ids.length === 1
+          ? eq(portfolioCashTransactions.portfolioId, ids[0])
+          : inArray(portfolioCashTransactions.portfolioId, ids),
+      ),
     )
     .orderBy(portfolioCashTransactions.transactionDate)
 
@@ -650,15 +725,18 @@ export async function rateToBase(
  * Trade rows (BUY/SELL/DIVIDEND) are internal cash↔position moves and are
  * excluded — only the cash-ledger external rows count, mirroring
  * {@link dailyExternalFlows}. The sign convention is the cash ledger's:
- * DEPOSIT >0, WITHDRAWAL <0.
+ * DEPOSIT >0, WITHDRAWAL <0. INTEREST, FEE and FX_CONVERSION are filtered out by
+ * the query: they change the balance but are not money put in or taken out, so
+ * letting them through here would inflate the capital basis with income and
+ * costs.
  *
  * **An in-kind transfer contributes nothing here, and that is not a filter.**
- * This function sums every cash-ledger row whatever its type, so a `TRANSFER`
- * row WOULD count (§68.2's tests rely on that). But the in-kind transfer write
- * path deliberately writes **no** cash-ledger row — stock changing custody is
- * not a payment — so in production there is no term to sum and the basis never
- * moved. This docstring used to promise "± TRANSFER legs" and three call sites
- * repeated the claim; the promise was unfulfillable as written.
+ * The query admits every row whose type is external, so a `TRANSFER` row WOULD
+ * count (§68.2's tests rely on that). But the in-kind transfer write path
+ * deliberately writes **no** cash-ledger row — stock changing custody is not a
+ * payment — so in production there is no term to sum and the basis never moved.
+ * This docstring used to promise "± TRANSFER legs" and three call sites repeated
+ * the claim; the promise was unfulfillable as written.
  *
  * **`total_invested` is not this number.** The capital basis that
  * `totalInvested`/`simpleReturnPercent` report adds the transferred cost, and
@@ -678,12 +756,18 @@ export async function externalCashInvested(
   const base = baseCurrency.toUpperCase()
   const rows = await db
     .select({
+      type: portfolioCashTransactions.type,
       amount: portfolioCashTransactions.amount,
       currency: portfolioCashTransactions.currency,
       transactionDate: portfolioCashTransactions.transactionDate,
     })
     .from(portfolioCashTransactions)
-    .where(eq(portfolioCashTransactions.portfolioId, portfolioId))
+    .where(
+      and(
+        eq(portfolioCashTransactions.portfolioId, portfolioId),
+        inArray(portfolioCashTransactions.type, [...EXTERNAL_CASH_TX_TYPES]),
+      ),
+    )
 
   let total = 0
   const legs = new Map<string, { amount: number; rate: number }>()
