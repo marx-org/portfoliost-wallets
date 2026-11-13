@@ -7,6 +7,11 @@ updates:
     schedule:
       interval: "weekly"
     open-pull-requests-limit: 10
+    # openapi-typescript 7.x pins its peer to typescript ^5.x, so a group bump of
+    # typescript to 7 makes `npm ci` fail with ERESOLVE before the build ever runs.
+    # Keep it out of the groups until openapi-typescript supports TS 7.
+    ignore:
+      - dependency-name: "typescript"
     groups:
       all-dependencies:
         patterns:
