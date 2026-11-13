@@ -20,7 +20,7 @@ import {
   portfolioTransactions,
   labels,
 } from "../db/schema.js"
-import { cashBalances, cashBalanceSeries, cashRowLegs, ledgerCurrency, normalizeConversionLegs, toDateStr, tradeCashEffects } from "../services/cashLedger.js"
+import { cashBalances, cashBalanceSeries, cashRowLegs, ledgerCurrency, ledgerMode, normalizeConversionLegs, toDateStr, tradeCashEffects } from "../services/cashLedger.js"
 import { fxTo } from "../services/instruments-fx.js"
 import { ISO_CURRENCY } from "../services/currency.js"
 import {
@@ -141,6 +141,22 @@ async function loadPortfolio(db: DB, id: string, userId: string) {
     .from(portfolios)
     .where(and(eq(portfolios.id, id), eq(portfolios.userId, userId)))
   return row
+}
+
+/**
+ * Currencies a cash movement may use. `single` = the one ledger; `settlement+base`
+ * = both the settlement and the base (the base-only flag is false); `native` =
+ * any currency (empty list means unrestricted).
+ */
+function cashMovementCurrencies(p: {
+  baseCurrency: string
+  cashBaseCurrencyOnly?: boolean
+  cashCurrency?: string | null
+}): string[] {
+  const mode = ledgerMode(p)
+  if (mode.kind === "single") return [mode.currency]
+  if (mode.kind === "settlement+base") return [mode.settlement, mode.base]
+  return []
 }
 
 /** Per-currency balance → PortfolioCash, base total via fxTo(base). */
@@ -506,9 +522,9 @@ export function createPortfolioCashRoutes(db?: DB) {
 
     const body = parsed.data
     const ccy = (body.currency ?? portfolio.baseCurrency).toUpperCase()
-    const ledger = ledgerCurrency(portfolio)
-    if (ledger && ccy !== ledger) {
-      return c.json({ error: "ValidationError", message: `Cash currency must be ${ledger}` }, 422)
+    const allowed = cashMovementCurrencies(portfolio)
+    if (allowed.length > 0 && !allowed.includes(ccy)) {
+      return c.json({ error: "ValidationError", message: `Cash currency must be one of ${allowed.join(", ")}` }, 422)
     }
     const amount = kind === "DEPOSIT" ? Math.abs(body.amount) : -Math.abs(body.amount)
     const baseRow = fxFields(body as Record<string, unknown>, ccy)
@@ -553,9 +569,9 @@ export function createPortfolioCashRoutes(db?: DB) {
 
     const body = parsed.data
     const ccy = (body.currency ?? portfolio.baseCurrency).toUpperCase()
-    const ledger = ledgerCurrency(portfolio)
-    if (ledger && ccy !== ledger) {
-      return c.json({ error: "ValidationError", message: `Cash currency must be ${ledger}` }, 422)
+    const allowed = cashMovementCurrencies(portfolio)
+    if (allowed.length > 0 && !allowed.includes(ccy)) {
+      return c.json({ error: "ValidationError", message: `Cash currency must be one of ${allowed.join(", ")}` }, 422)
     }
     // INTEREST keeps the caller's sign — a debit interest is a real fact.
     // FEE is a magnitude booked as a debit, like a commission.
@@ -609,11 +625,11 @@ export function createPortfolioCashRoutes(db?: DB) {
       return c.json({ error: "ValidationError", message: "this conversion changes nothing — both legs are zero" }, 422)
     }
     const to = legs.toCurrency ?? legs.currency
-    const ledger = ledgerCurrency(portfolio)
-    if (ledger && legs.currency !== ledger && to !== ledger) {
+    const allowed = cashMovementCurrencies(portfolio)
+    if (allowed.length > 0 && !allowed.includes(legs.currency) && !allowed.includes(to)) {
       return c.json({
         error: "ValidationError",
-        message: `A conversion in a ${ledger}-settled portfolio must involve ${ledger}`,
+        message: `A conversion in a ${allowed.join("/")}-settled portfolio must involve one of them`,
       }, 422)
     }
     // A cash row's `fees` is metadata: the replay reads the amounts (see
@@ -825,22 +841,22 @@ export function createPortfolioCashRoutes(db?: DB) {
       return c.json({ error: "ValidationError", message: "the legs cancel out — delete the row instead" }, 422)
     }
 
-    const ledger = ledgerCurrency(portfolio)
-    if (ledger) {
+    const allowed = cashMovementCurrencies(portfolio)
+    if (allowed.length > 0) {
       const existingCurrency = existing.currency.toUpperCase()
       const nextCurrency = legs ? legs.currency : (b.currency ?? existing.currency).toUpperCase()
       const nextTo = legs ? legs.toCurrency ?? legs.currency : (b.toCurrency ?? existing.toCurrency ?? existing.currency).toUpperCase()
-      if (!isConversion && existingCurrency !== ledger) {
-        return c.json({ error: "ValidationError", message: `Non-${ledger} cash rows cannot be edited while cash is limited to ${ledger}` }, 422)
+      if (!isConversion && !allowed.includes(existingCurrency)) {
+        return c.json({ error: "ValidationError", message: `Non-${allowed.join("/")} cash rows cannot be edited while cash is limited to ${allowed.join("/")}` }, 422)
       }
       // A conversion's first leg is by definition foreign to the settlement
       // currency — that is the point of a conversion. What must not happen is a
-      // conversion where neither leg touches the currency the account holds.
-      if (isConversion && nextCurrency !== ledger && nextTo !== ledger) {
-        return c.json({ error: "ValidationError", message: `A conversion in a ${ledger}-settled portfolio must involve ${ledger}` }, 422)
+      // conversion where neither leg touches a currency the account holds.
+      if (isConversion && !allowed.includes(nextCurrency) && !allowed.includes(nextTo)) {
+        return c.json({ error: "ValidationError", message: `A conversion in a ${allowed.join("/")}-settled portfolio must involve one of them` }, 422)
       }
-      if (!isConversion && nextCurrency !== ledger) {
-        return c.json({ error: "ValidationError", message: `Cash currency must be ${ledger}` }, 422)
+      if (!isConversion && !allowed.includes(nextCurrency)) {
+        return c.json({ error: "ValidationError", message: `Cash currency must be one of ${allowed.join(", ")}` }, 422)
       }
     }
 
