@@ -1556,8 +1556,15 @@ export function createTransactionRoutes(db?: DB) {
       return c.json({ error: "NotFound", message: "Position not found" }, 404)
     }
 
-    // D58: enrich with live quote so 201 response has current price/market value
-    await refreshQuotes(database, identity.id, portfolioId, c.req.header("Authorization") ?? "")
+    // #77 — the write must not wait on the provider. `refreshQuotes` already
+    // enqueues the pricing pass on the serialized backfill runner; awaiting it
+    // made the 201 wait for a quote+profile fetch per holding (10-54 s in
+    // local compose, because the upstream call has no timeout). Fire it and
+    // answer with the stored price; the refresh lands on the next read. Same
+    // move §76.1 made for GET /:id/positions — do not re-await it here.
+    void refreshQuotes(database, identity.id, portfolioId, c.req.header("Authorization") ?? "").catch(
+      () => undefined,
+    )
     await recomputePortfolioTotals(database, c.req.header("Authorization") ?? null, identity.id, portfolioId)
 
     const [fresh] = await database
