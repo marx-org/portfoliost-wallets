@@ -57,6 +57,8 @@ export interface TransferLegInput {
   positionLabelIds: string[]
   sourceBaseCurrency: string
   targetBaseCurrency: string
+  /** Free-text note stamped on both legs; null for a sheet row. */
+  notes?: string | null
   sector?: string | null
   industry?: string | null
   country?: string | null
@@ -100,6 +102,7 @@ export async function buildTransferLegs(tx: DB, input: TransferLegInput) {
     positionLabelIds,
     sourceBaseCurrency,
     targetBaseCurrency,
+    notes,
     sector,
     industry,
     country,
@@ -163,10 +166,13 @@ export async function buildTransferLegs(tx: DB, input: TransferLegInput) {
   }
 
   const transferGroupId = randomUUID()
-  let firstOut: typeof portfolioTransactions.$inferInsert | null = null
+  let firstOut: typeof portfolioTransactions.$inferSelect | null = null
   let sourcePositionId: string | null = null
   let targetPositionId: string | null = null
-  const legs: Array<{ out: typeof portfolioTransactions.$inferInsert; in: typeof portfolioTransactions.$inferInsert }> = []
+  const legs: Array<{
+    out: typeof portfolioTransactions.$inferSelect
+    in: typeof portfolioTransactions.$inferSelect
+  }> = []
 
   for (const [i, draw] of draws.entries()) {
     const total = round2(draw.quantity * draw.price)
@@ -197,6 +203,7 @@ export async function buildTransferLegs(tx: DB, input: TransferLegInput) {
         // Indexed so a re-import produces byte-identical suffixes and the
         // insert-only sync does not orphan the previous group.
         externalId: externalId ? `${externalId}#x${i}` : null,
+        notes: notes ?? null,
         executedAt,
       })
       .returning()
@@ -226,6 +233,7 @@ export async function buildTransferLegs(tx: DB, input: TransferLegInput) {
         sourceTransactionId: draw.txId,
         externalSource,
         externalId: externalId ? `${externalId}#xi${i}` : null,
+        notes: notes ?? null,
         executedAt,
       })
       .returning()

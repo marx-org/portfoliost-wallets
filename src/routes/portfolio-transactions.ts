@@ -26,6 +26,7 @@ import {
 import { convert } from "@marx-org/contracts/fx"
 import { refreshQuotes } from "../services/quotes.js"
 import { notifyTransactionsChanged } from "../services/recalc-queue.js"
+import { buildTransferLegs, TransferError } from "../services/transferLegs.js"
 import { positionMembershipKey, realizedGainLossByMembership } from "../services/realizedGainLoss.js"
 import {
   groupPositionMembershipRows,
@@ -99,6 +100,20 @@ const TransactionPatchSchema = z.object({
   taxes: z.number().nonnegative().nullable().optional(),
   notes: z.string().max(2000).nullable().optional(),
   executedAt: z.string().optional(),
+})
+
+/**
+ * `POST /:id/transfers` (§74). Mirrors `TransferPositionRequest` in the contract;
+ * the quantity is the CURRENT (post-restatement) holding the user sees, because the
+ * FIFO queue is already restated — asking the caller to pre-apply a split factor
+ * would be the one place a user could get it wrong.
+ */
+const TransferPositionSchema = z.object({
+  symbol: z.string().min(1).max(20),
+  quantity: z.number().positive(),
+  toPortfolioId: z.string().uuid(),
+  executedAt: z.string().optional(),
+  notes: z.string().max(2000).nullable().optional(),
 })
 
 async function loadPortfolio(db: DB, id: string, userId: string) {
@@ -754,6 +769,137 @@ export function createTransactionRoutes(db?: DB) {
       { ...result.transaction, position: result.position ?? null, cashLeg: result.cashLeg ?? null },
       201,
     )
+  })
+
+  // POST /:id/transfers — move an instrument to another portfolio, in kind (§74).
+  // Not a trade: no cash leg, no realised P/L, and the rows are not external flows.
+  // The quantity is drawn FIFO from the sender's open lots, so one request can
+  // produce several OUT/IN pairs — one per lot — and the whole group is atomic.
+  routes.post("/:id/transfers", async (c) => {
+    const identity = c.get("userIdentity")
+    const database = getDb()!
+    const portfolioId = c.req.param("id") as string
+
+    const parsed = TransferPositionSchema.safeParse(await c.req.json().catch(() => ({})))
+    if (!parsed.success) {
+      return c.json({ error: "ValidationError", message: parsed.error.issues[0]?.message }, 422)
+    }
+    const body = parsed.data
+
+    const portfolio = await loadPortfolio(database, portfolioId, identity.id)
+    if (!portfolio) return c.json({ error: "NotFound", message: "Portfolio not found" }, 404)
+    if (portfolio.isVirtual) {
+      return c.json({ error: "ReadOnlyPortfolio", message: "Virtual portfolios are read-only" }, 409)
+    }
+
+    const target = await loadPortfolio(database, body.toPortfolioId, identity.id)
+    if (!target) return c.json({ error: "NotFound", message: "Target portfolio not found" }, 404)
+    if (target.id === portfolioId) {
+      return c.json({ error: "ValidationError", message: "A portfolio cannot transfer to itself" }, 422)
+    }
+    if (target.isVirtual) {
+      return c.json({ error: "ReadOnlyPortfolio", message: "The target portfolio is virtual and read-only" }, 409)
+    }
+
+    const symbol = body.symbol.toUpperCase()
+    // The instrument's own currency is the row currency: 10 SAP.DE shares are
+    // denominated in EUR whichever wallet they left. When the position carries no
+    // listing currency, fall back to the sender's base so the rate is 1:1 rather
+    // than a guess.
+    const [srcPosition] = await database
+      .select({
+        instrumentName: positions.companyName,
+        assetType: positions.assetType,
+        instrumentCurrency: positions.instrumentCurrency,
+        sector: positions.sector,
+        industry: positions.industry,
+        country: positions.country,
+      })
+      .from(positions)
+      .where(
+        and(
+          eq(positions.userId, identity.id),
+          positionInPortfolio(portfolioId),
+          eq(positions.symbol, symbol),
+          eq(positions.isOpen, true),
+        ),
+      )
+    const txCcy = (srcPosition?.instrumentCurrency ?? portfolio.baseCurrency).toUpperCase()
+
+    const authToken = c.req.header("Authorization") ?? ""
+    const fx = await resolveFeeFx(authToken, {}, txCcy, { notional: 0, displayCcy: portfolio.baseCurrency })
+    if (!fx.ok) return c.json({ error: "ValidationError", message: fx.message }, 422)
+
+    const executedAt = body.executedAt ? new Date(body.executedAt) : new Date()
+
+    const result = await database.transaction(async (tx) => {
+      try {
+        const group = await buildTransferLegs(tx, {
+          userId: identity.id,
+          sourcePortfolioId: portfolioId,
+          targetPortfolioId: target.id,
+          symbol,
+          instrumentName: srcPosition?.instrumentName ?? null,
+          assetType: srcPosition?.assetType ?? "STOCK",
+          quantity: body.quantity,
+          executedAt,
+          txCcy,
+          listingCcy: txCcy,
+          rate: fx.fields.exchangeRate,
+          externalSource: null,
+          externalId: null,
+          positionLabelIds: [],
+          sourceBaseCurrency: portfolio.baseCurrency,
+          targetBaseCurrency: target.baseCurrency,
+          notes: body.notes ?? null,
+          sector: srcPosition?.sector ?? null,
+          industry: srcPosition?.industry ?? null,
+          country: srcPosition?.country ?? null,
+        })
+        // Both sides' capital basis changes: the sender loses the cost of what
+        // left, the receiver gains the cost of what arrived (#37).
+        await recomputePortfolioTotals(tx, authToken || null, identity.id, portfolioId)
+        await recomputePortfolioTotals(tx, authToken || null, identity.id, target.id)
+        return group
+      } catch (err) {
+        if (err instanceof TransferError) return { error: err }
+        throw err
+      }
+    })
+
+    if ("error" in result) {
+      return c.json({ error: "ValidationError", code: result.error.code, message: result.error.message }, 422)
+    }
+
+    notifyTransactionsChanged(database, portfolioId, authToken)
+    notifyTransactionsChanged(database, target.id, authToken)
+
+    const toLeg = (row: typeof portfolioTransactions.$inferSelect): components["schemas"]["TransferLeg"] => ({
+      id: row.id,
+      portfolioId: row.portfolioId,
+      type: row.type as "TRANSFER_OUT" | "TRANSFER_IN",
+      instrumentSymbol: row.instrumentSymbol!,
+      instrumentName: row.instrumentName ?? null,
+      quantity: Number(row.quantity),
+      price: Number(row.price),
+      totalAmount: Number(row.totalAmount ?? 0),
+      currency: row.currency,
+      assetType: row.assetType,
+      executedAt: row.executedAt.toISOString(),
+      transferGroupId: row.transferGroupId!,
+      linkedTransferId: row.linkedTransferId ?? null,
+      sourceTransactionId: row.sourceTransactionId ?? null,
+      notes: row.notes ?? null,
+    })
+
+    const response: components["schemas"]["TransferPositionResponse"] = {
+      transferGroupId: result.transferGroupId,
+      quantity: result.quantity,
+      sourcePositionId: result.sourcePositionId,
+      targetPositionId: result.targetPositionId,
+      legs: result.legs.flatMap(({ out, in: legIn }) => [toLeg(out), toLeg(legIn)]),
+    }
+    return c.json(response, 201)
   })
 
   // PATCH /:id/transactions/:txId — update transaction + recompute
