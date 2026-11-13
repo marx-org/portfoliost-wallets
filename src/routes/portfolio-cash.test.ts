@@ -146,7 +146,7 @@ describe("POST deposits / withdrawals (62.3)", () => {
     try {
       const h = await boot()
       const pf = crypto.randomUUID()
-      await h.db.insert(portfolios).values({ userId: "user-1", id: pf, name: "IBKR", baseCurrency: "PLN", cashCurrency: "USD" })
+      await h.db.insert(portfolios).values({ userId: "user-1", id: pf, name: "IBKR", baseCurrency: "PLN", cashBaseCurrencyOnly: true, cashCurrency: "USD" })
 
       const rejected = await post(h, `/api/portfolios/${pf}/cash/deposits`, { amount: 100, currency: "PLN" })
       expect(rejected.status).toBe(422)
@@ -242,7 +242,7 @@ describe("POST interest / fees / conversions (#245)", () => {
   it("a settlement-currency portfolio rejects a conversion between two foreign currencies", async () => {
     const h = await boot()
     const pf = crypto.randomUUID()
-    await h.db.insert(portfolios).values({ userId: "user-1", id: pf, name: "IBKR", baseCurrency: "PLN", cashCurrency: "USD" })
+    await h.db.insert(portfolios).values({ userId: "user-1", id: pf, name: "IBKR", baseCurrency: "PLN", cashBaseCurrencyOnly: true, cashCurrency: "USD" })
 
     const bad = await post(h, `/api/portfolios/${pf}/cash/conversions`, { amount: -100, currency: "EUR", toCurrency: "SEK", toAmount: 110 })
     expect(bad.status).toBe(422)
@@ -254,7 +254,7 @@ describe("POST interest / fees / conversions (#245)", () => {
   it("PATCH edits the second leg of a conversion and keeps the correction invariant", async () => {
     const h = await boot()
     const pf = crypto.randomUUID()
-    await h.db.insert(portfolios).values({ userId: "user-1", id: pf, name: "IBKR", baseCurrency: "PLN", cashCurrency: "USD" })
+    await h.db.insert(portfolios).values({ userId: "user-1", id: pf, name: "IBKR", baseCurrency: "PLN", cashBaseCurrencyOnly: true, cashCurrency: "USD" })
 
     const created = await post(h, `/api/portfolios/${pf}/cash/conversions`, { amount: -1000, currency: "EUR", toCurrency: "USD", toAmount: 1150.4 })
     const id = (await created.json()).id
@@ -300,7 +300,7 @@ describe("POST interest / fees / conversions (#245)", () => {
   it("a conversion can be patched to a zero first leg — the correction is the second leg", async () => {
     const h = await boot()
     const pf = crypto.randomUUID()
-    await h.db.insert(portfolios).values({ userId: "user-1", id: pf, name: "IBKR", baseCurrency: "PLN", cashCurrency: "USD" })
+    await h.db.insert(portfolios).values({ userId: "user-1", id: pf, name: "IBKR", baseCurrency: "PLN", cashBaseCurrencyOnly: true, cashCurrency: "USD" })
 
     const created = await post(h, `/api/portfolios/${pf}/cash/conversions`, {
       amount: -0.93, currency: "USD", toAmount: 0, description: "FX USD/SEK - net in base",

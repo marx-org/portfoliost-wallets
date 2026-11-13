@@ -194,6 +194,46 @@ export function ledgerCurrency(
   return null
 }
 
+/**
+ * How a portfolio's cash balances are shaped.
+ *
+ * - `single` — one balance, every leg converted into it (the old settlement
+ *   model; `cashBaseCurrencyOnly: true`, or a settlement with no display base).
+ * - `settlement+base` — the account holds the settlement currency **and** the
+ *   display base: every non-base leg converts into the settlement at its event
+ *   date, while base-currency legs stay native. This is IBKR's real shape
+ *   (USD settlement, PLN also held), selected by `cashBaseCurrencyOnly: false`
+ *   with a `cashCurrency` set.
+ * - `native` — one balance per currency, no conversion.
+ *
+ * `cashBaseCurrencyOnly` is the switch the owner named: when it is false the base
+ * is not the only available cash, so a settlement currency no longer collapses
+ * the ledger to one balance. `ledgerCurrency()` still returns the settlement for
+ * the cash-entry/conversion rules; it is not the balance shape.
+ */
+export type LedgerMode =
+  | { kind: "single"; currency: string }
+  | { kind: "settlement+base"; settlement: string; base: string }
+  | { kind: "native" }
+
+export function ledgerMode(
+  policy: { baseCurrency?: string | null; cashBaseCurrencyOnly?: boolean; cashCurrency?: string | null } | null,
+): LedgerMode {
+  if (!policy) return { kind: "native" }
+  const base = (policy.baseCurrency ?? "").trim().toUpperCase()
+  const settlement = (policy.cashCurrency ?? "").trim().toUpperCase()
+  if (policy.cashBaseCurrencyOnly === true) {
+    const single = settlement || base
+    return single ? { kind: "single", currency: single } : { kind: "native" }
+  }
+  if (settlement) {
+    return base && base !== settlement
+      ? { kind: "settlement+base", settlement, base }
+      : { kind: "single", currency: settlement }
+  }
+  return { kind: "native" }
+}
+
 async function eventRateTo(
   authToken: string | null,
   from: string,
@@ -400,6 +440,26 @@ async function cashRowDeltaInCurrency(
 }
 
 /**
+ * The settlement-currency value of a trade/row whose total was converted into
+ * the settlement, with the base-currency leg(s) removed. `total` includes the
+ * base leg converted at the event-date base→settlement rate; the base balance
+ * must carry the native amount instead, so subtract its settlement value.
+ */
+async function settlementExBase(
+  authToken: string | null,
+  total: number,
+  baseDelta: number,
+  base: string,
+  settlement: string,
+  day: string,
+  cache: Map<string, number>,
+): Promise<number> {
+  if (baseDelta === 0 || base === settlement) return total
+  const rate = await eventRateTo(authToken, base, settlement, day, cache)
+  return total - baseDelta * rate
+}
+
+/**
  * Cash balances as of `asOf` (YYYY-MM-DD; trades with `executedAt ≤ asOf
  * end-of-day`, external rows with `transaction_date ≤ asOf` — no asOf = latest).
  * A portfolio with a settlement currency returns a single balance in that
@@ -416,9 +476,14 @@ export async function cashBalances(
   const balances = new Map<string, number>()
   const policy = await cashPolicy(db, portfolioId)
   const base = policy?.baseCurrency.toUpperCase() ?? ""
-  const ledger = ledgerCurrency(policy)
+  const mode = ledgerMode(policy)
+  const dated = mode.kind !== "native"
   const eventRates = new Map<string, number>()
-  if (ledger) balances.set(ledger, 0)
+  if (mode.kind === "single") balances.set(mode.currency, 0)
+  if (mode.kind === "settlement+base") {
+    balances.set(mode.settlement, 0)
+    if (mode.base !== mode.settlement) balances.set(mode.base, 0)
+  }
 
   const tradeWhere = and(
     eq(portfolioTransactions.portfolioId, portfolioId),
@@ -443,10 +508,17 @@ export async function cashBalances(
 
   for (const tx of trades) {
     const day = toDateStr(tx.executedAt)
-    if (ledger) {
+    if (mode.kind === "single") {
       if (!day) throw new Error(`cash trade has no event date for single-currency replay`)
-      const delta = await tradeCashDeltaInCurrency(authToken, tx, ledger, base, day, eventRates)
-      balances.set(ledger, (balances.get(ledger) ?? 0) + delta)
+      const delta = await tradeCashDeltaInCurrency(authToken, tx, mode.currency, base, day, eventRates)
+      balances.set(mode.currency, (balances.get(mode.currency) ?? 0) + delta)
+    } else if (mode.kind === "settlement+base") {
+      if (!day) throw new Error(`cash trade has no event date for settlement replay`)
+      const total = await tradeCashDeltaInCurrency(authToken, tx, mode.settlement, base, day, eventRates)
+      const baseDelta = tradeCashEffects(tx).get(mode.base) ?? 0
+      const settlementDelta = await settlementExBase(authToken, total, baseDelta, mode.base, mode.settlement, day, eventRates)
+      balances.set(mode.settlement, (balances.get(mode.settlement) ?? 0) + settlementDelta)
+      if (baseDelta !== 0) balances.set(mode.base, (balances.get(mode.base) ?? 0) + baseDelta)
     } else {
       for (const [ccy, delta] of tradeCashEffects(tx)) {
         balances.set(ccy, (balances.get(ccy) ?? 0) + delta)
@@ -457,7 +529,7 @@ export async function cashBalances(
   const extWhere = and(
     eq(portfolioCashTransactions.portfolioId, portfolioId),
     asOf
-      ? ledger
+      ? dated
         ? sql`coalesce(${portfolioCashTransactions.transactionDate}, date(${portfolioCashTransactions.createdAt})) <= ${asOf}`
         : sql`${portfolioCashTransactions.transactionDate} <= ${asOf}`
       : undefined,
@@ -479,10 +551,17 @@ export async function cashBalances(
 
   for (const r of ext) {
     const day = toDateStr(r.transactionDate) ?? toDateStr(r.createdAt)
-    if (ledger) {
+    if (mode.kind === "single") {
       if (!day) throw new Error(`cash event in ${(r.currency ?? "").toUpperCase()} has no event date for single-currency replay`)
-      const delta = await cashRowDeltaInCurrency(authToken, r, ledger, base, day, eventRates)
-      balances.set(ledger, (balances.get(ledger) ?? 0) + delta)
+      const delta = await cashRowDeltaInCurrency(authToken, r, mode.currency, base, day, eventRates)
+      balances.set(mode.currency, (balances.get(mode.currency) ?? 0) + delta)
+    } else if (mode.kind === "settlement+base") {
+      if (!day) throw new Error(`cash event in ${(r.currency ?? "").toUpperCase()} has no event date for settlement replay`)
+      const total = await cashRowDeltaInCurrency(authToken, r, mode.settlement, base, day, eventRates)
+      const baseDelta = cashRowLegs(r).get(mode.base) ?? 0
+      const settlementDelta = await settlementExBase(authToken, total, baseDelta, mode.base, mode.settlement, day, eventRates)
+      balances.set(mode.settlement, (balances.get(mode.settlement) ?? 0) + settlementDelta)
+      if (baseDelta !== 0) balances.set(mode.base, (balances.get(mode.base) ?? 0) + baseDelta)
     } else {
       for (const [ccy, delta] of cashRowLegs(r)) {
         balances.set(ccy, (balances.get(ccy) ?? 0) + delta)
@@ -535,7 +614,8 @@ export async function cashBalanceSeries(
   opts: { strict?: boolean } = {},
 ): Promise<Map<string, number>> {
   const policy = await cashPolicy(db, portfolioId)
-  const ledger = ledgerCurrency(policy)
+  const mode = ledgerMode(policy)
+  const ledger = mode.kind === "single" ? mode.currency : null
   const base = baseCurrency.toUpperCase()
   const days = enumerateDays(from, to)
   if (days.length === 0) return new Map()
@@ -570,13 +650,25 @@ export async function cashBalanceSeries(
   for (const tx of trades) {
     const day = toDateStr(tx.executedAt)
     if (!day) continue
-    if (ledger) {
+    if (mode.kind === "single") {
       events.push({
         day,
-        ccy: ledger,
+        ccy: mode.currency,
         delta: 0,
-        ledgerDelta: () => tradeCashDeltaInCurrency(authToken, tx, ledger, base, day, eventRates),
+        ledgerDelta: () => tradeCashDeltaInCurrency(authToken, tx, mode.currency, base, day, eventRates),
       })
+    } else if (mode.kind === "settlement+base") {
+      const baseDelta = tradeCashEffects(tx).get(mode.base) ?? 0
+      events.push({
+        day,
+        ccy: mode.settlement,
+        delta: 0,
+        ledgerDelta: async () => {
+          const total = await tradeCashDeltaInCurrency(authToken, tx, mode.settlement, base, day, eventRates)
+          return settlementExBase(authToken, total, baseDelta, mode.base, mode.settlement, day, eventRates)
+        },
+      })
+      if (baseDelta !== 0) events.push({ day, ccy: mode.base, delta: baseDelta })
     } else {
       for (const [ccy, delta] of tradeCashEffects(tx)) events.push({ day, ccy, delta })
     }
@@ -599,17 +691,29 @@ export async function cashBalanceSeries(
     .orderBy(portfolioCashTransactions.transactionDate)
 
   for (const r of ext) {
-    const day = toDateStr(r.transactionDate) ?? (ledger ? toDateStr(r.createdAt) : null)
+    const day = toDateStr(r.transactionDate) ?? (mode.kind !== "native" ? toDateStr(r.createdAt) : null)
     if (!day) continue
     const legs = cashRowLegs(r)
     if (legs.size === 0) continue
-    if (ledger) {
+    if (mode.kind === "single") {
       events.push({
         day,
-        ccy: ledger,
+        ccy: mode.currency,
         delta: 0,
-        ledgerDelta: () => cashRowDeltaInCurrency(authToken, r, ledger, base, day, eventRates),
+        ledgerDelta: () => cashRowDeltaInCurrency(authToken, r, mode.currency, base, day, eventRates),
       })
+    } else if (mode.kind === "settlement+base") {
+      const baseDelta = legs.get(mode.base) ?? 0
+      events.push({
+        day,
+        ccy: mode.settlement,
+        delta: 0,
+        ledgerDelta: async () => {
+          const total = await cashRowDeltaInCurrency(authToken, r, mode.settlement, base, day, eventRates)
+          return settlementExBase(authToken, total, baseDelta, mode.base, mode.settlement, day, eventRates)
+        },
+      })
+      if (baseDelta !== 0) events.push({ day, ccy: mode.base, delta: baseDelta })
     } else {
       for (const [ccy, delta] of legs) events.push({ day, ccy, delta })
     }
@@ -625,15 +729,11 @@ export async function cashBalanceSeries(
   for (const day of days) {
     while (ei < events.length && events[ei].day <= day) {
       const e = events[ei]
-      if (ledger) {
-        // Convert once at the event's date, then carry the resulting ledger delta
-        // forward rather than applying FX again to the running balance. The day's
-        // total revalues that balance into the display base below.
-        const delta = e.ledgerDelta ? await e.ledgerDelta() : e.delta
-        running.set(ledger, (running.get(ledger) ?? 0) + delta)
-      } else {
-        running.set(e.ccy, (running.get(e.ccy) ?? 0) + e.delta)
-      }
+      // Convert once at the event's date, then carry the resulting delta forward
+      // rather than applying FX again to the running balance. The day's total
+      // revalues each balance into the display base below.
+      const delta = e.ledgerDelta ? await e.ledgerDelta() : e.delta
+      running.set(e.ccy, (running.get(e.ccy) ?? 0) + delta)
       ei += 1
     }
     perDayBal.set(day, new Map(running))

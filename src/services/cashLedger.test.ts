@@ -14,6 +14,7 @@ import {
   dailyExternalFlows,
   externalCashInvested,
   ledgerCurrency,
+  ledgerMode,
 } from "./cashLedger.js"
 
 beforeEach(() => mockInstrumentsFx({ table: { USD: 1.08, EUR: 1.08, PLN: 4.3 }, asOf: "2024-12-31" }))
@@ -197,7 +198,7 @@ describe("#64: INTEREST, FEE and FX_CONVERSION in the replay", () => {
     // EUR/USD = 1.1504, so 1 000 EUR handed over buys 1 151 USD: the row nets
     // 0.6 USD, which is the point of booking a conversion at all.
     mockInstrumentsFx({ table: { USD: 1.1504, EUR: 1, PLN: 4.6 }, asOf: "2024-01-03" })
-    await h.db.update(portfolios).set({ cashCurrency: "USD" }).where(eq(portfolios.id, portfolioId))
+    await h.db.update(portfolios).set({ cashBaseCurrencyOnly: true, cashCurrency: "USD" }).where(eq(portfolios.id, portfolioId))
     await ext({ type: "FX_CONVERSION", amount: -1000, currency: "EUR", toCurrency: "USD", toAmount: 1151, transactionDate: "2024-01-03" })
 
     const b = await cashBalances(h.db, null, portfolioId)
@@ -500,7 +501,7 @@ describe("cashCurrency: a single settlement currency", () => {
   it("replays every leg into the settlement currency and returns exactly one balance", async () => {
     const tablesByDate = { "2024-01-01": { USD: 1.08, PLN: 4.3 } }
     mockInstrumentsFx({ table: tablesByDate["2024-01-01"], tablesByDate, asOf: "2024-01-01" })
-    await h.db.update(portfolios).set({ cashCurrency: "USD" }).where(eq(portfolios.id, portfolioId))
+    await h.db.update(portfolios).set({ cashBaseCurrencyOnly: true, cashCurrency: "USD" }).where(eq(portfolios.id, portfolioId))
 
     // A EUR buy whose commission the sheet recorded in PLN (feeRateSource=manual,
     // rate 1): the principal must not carry the fee, and the PLN fee must not be
@@ -524,7 +525,7 @@ describe("cashCurrency: a single settlement currency", () => {
       "2024-01-02": { USD: 1, PLN: 5 },
     }
     mockInstrumentsFx({ table: tablesByDate["2024-01-02"], tablesByDate, asOf: "2024-01-02" })
-    await h.db.update(portfolios).set({ cashCurrency: "USD" }).where(eq(portfolios.id, portfolioId))
+    await h.db.update(portfolios).set({ cashBaseCurrencyOnly: true, cashCurrency: "USD" }).where(eq(portfolios.id, portfolioId))
     await trade({ type: "SELL", totalAmount: 100, currency: "USD", executedAt: "2024-01-01T10:00:00.000Z" })
 
     const balances = await cashBalances(h.db, null, portfolioId)
@@ -555,7 +556,7 @@ describe("cashCurrency: a single settlement currency", () => {
     // it through fee -> base -> ledger would debit 4.44 / 1.0518 = 4.22 USD.
     const eurToUsd = 4.67 / 4.44
     mockInstrumentsFx({ table: { EUR: 1, USD: eurToUsd, PLN: 4.67 }, asOf: "2022-06-20" })
-    await h.db.update(portfolios).set({ cashCurrency: "USD" }).where(eq(portfolios.id, portfolioId))
+    await h.db.update(portfolios).set({ cashBaseCurrencyOnly: true, cashCurrency: "USD" }).where(eq(portfolios.id, portfolioId))
     await trade({
       type: "SELL", totalAmount: 2069.95, currency: "EUR", exchangeRate: 4.67, rateSource: "manual",
       feesSettled: 1.25, feeCurrency: "USD", feeExchangeRate: 4.44, feeRateSource: "manual",
@@ -574,6 +575,57 @@ describe("cashCurrency: a single settlement currency", () => {
     const balances = await cashBalances(h.db, null, portfolioId)
     expect([...balances.keys()]).toEqual(["PLN"])
     expect(balances.get("PLN")).toBeCloseTo(400, 8)
+  })
+})
+
+describe("settlement + base (cashBaseCurrencyOnly=false)", () => {
+  beforeEach(async () => {
+    h = await makeHarness()
+    await seedPortfolio()
+    await h.db.update(portfolios).set({ cashCurrency: "USD", cashBaseCurrencyOnly: false }).where(eq(portfolios.id, portfolioId))
+  })
+
+  it("ledgerMode: the base-only flag false with a settlement means settlement+base", () => {
+    expect(ledgerMode({ baseCurrency: "PLN", cashBaseCurrencyOnly: false, cashCurrency: "USD" }))
+      .toEqual({ kind: "settlement+base", settlement: "USD", base: "PLN" })
+    expect(ledgerMode({ baseCurrency: "PLN", cashBaseCurrencyOnly: true, cashCurrency: "USD" }))
+      .toEqual({ kind: "single", currency: "USD" })
+    expect(ledgerMode({ baseCurrency: "PLN", cashBaseCurrencyOnly: false }))
+      .toEqual({ kind: "native" })
+  })
+
+  it("returns the settlement and the base; foreign currencies convert to the settlement", async () => {
+    mockInstrumentsFx({ table: { USD: 1.1, PLN: 4.4, EUR: 1 }, asOf: "2024-01-01" })
+    await ext({ type: "DEPOSIT", amount: 100, currency: "PLN", transactionDate: "2024-01-01" })
+    await trade({ type: "SELL", totalAmount: 50, currency: "USD", executedAt: "2024-01-01T10:00:00.000Z" })
+    await trade({ type: "SELL", totalAmount: 100, currency: "EUR", executedAt: "2024-01-01T11:00:00.000Z" })
+
+    const b = await cashBalances(h.db, null, portfolioId)
+    expect([...b.keys()].sort()).toEqual(["PLN", "USD"])
+    expect(b.get("USD")).toBeCloseTo(50 + 100 * 1.1, 6)
+    expect(b.get("PLN")).toBeCloseTo(100, 6)
+  })
+
+  it("a base-currency withdrawal reduces the base, not the settlement", async () => {
+    mockInstrumentsFx({ table: { USD: 1.1, PLN: 4.4 }, asOf: "2024-01-01" })
+    await ext({ type: "DEPOSIT", amount: 100, currency: "PLN", transactionDate: "2024-01-01" })
+    await ext({ type: "WITHDRAWAL", amount: -30, currency: "PLN", transactionDate: "2024-01-02" })
+    const b = await cashBalances(h.db, null, portfolioId)
+    expect(b.get("PLN")).toBeCloseTo(70, 6)
+  })
+
+  it("cashBalanceSeries: settlement revalued at the day's rate + native base", async () => {
+    const tablesByDate = {
+      "2024-01-01": { USD: 1.1, PLN: 4.4 },
+      "2024-01-02": { USD: 1.1, PLN: 5.5 },
+    }
+    mockInstrumentsFx({ table: tablesByDate["2024-01-02"], tablesByDate, asOf: "2024-01-02" })
+    await ext({ type: "DEPOSIT", amount: 100, currency: "PLN", transactionDate: "2024-01-01" })
+    await trade({ type: "SELL", totalAmount: 50, currency: "USD", executedAt: "2024-01-01T10:00:00.000Z" })
+
+    const s = await cashBalanceSeries(h.db, null, portfolioId, "2024-01-01", "2024-01-02", "PLN")
+    expect(s.get("2024-01-01")).toBeCloseTo(50 * 4 + 100, 4)
+    expect(s.get("2024-01-02")).toBeCloseTo(50 * 5 + 100, 4)
   })
 })
 
