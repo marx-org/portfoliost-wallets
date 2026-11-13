@@ -178,4 +178,10 @@ export function __resetBackfillRunnerForTests(): void {
   }
   for (const t of queued) finishTask(t)
   queued.length = 0
+  // `pump` may still be parked on a run fn that never settles (a test that
+  // stubs a fetch to hang, e.g. #77). Clearing active/queued without this
+  // leaves `pumping` true forever, so every later enqueue is a silent no-op and
+  // the next test times out. The parked pump never resumes, so a fresh pump is
+  // safe to start.
+  pumping = false
 }

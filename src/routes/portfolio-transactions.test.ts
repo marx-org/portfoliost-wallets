@@ -6,6 +6,8 @@ import { createPublicShareRoutes } from "./portfolios.js"
 import { createCrossPortfolioTransactionsRoute, openPositionsValueByPortfolio } from "./portfolio-transactions.js"
 import { makeHarness, priceOpenPositions } from "./test-utils.js"
 import { mockInstrumentsFx, unmockInstrumentsFx } from "../test-fx-mock.js"
+import { __resetRecalcQueueForTests } from "../services/recalc-queue.js"
+import { __resetQuoteCachesForTests } from "../services/quotes.js"
 import { crossRate } from "@marx-org/contracts/fx"
 import {
   portfolios,
@@ -1474,6 +1476,48 @@ describe("Position CRUD (§15 D4.2–D4.8)", () => {
     const list = await listRes.json()
     expect(list.length).toBe(1)
     expect(list[0].id).toBe(p.id)
+  })
+
+  it("POST /:id/positions — responds without waiting on a hanging quote (#77)", async () => {
+    process.env.INSTRUMENTS_URL = "http://instruments:3000"
+    __resetQuoteCachesForTests()
+    try {
+      // Build the portfolio with the normal fetch first — portfolio creation
+      // resolves its base currency through the users service, and a global hang
+      // would stall setup rather than the route under test.
+      const { h, a, portfolio } = await setup()
+
+      // Instruments never answers: the 10-54 s upstream from the bug report. A
+      // route that awaited the pricing pass would hang until vitest's timeout;
+      // the write must return on the stored row instead.
+      vi.stubGlobal(
+        "fetch",
+        vi.fn(() => new Promise<Response>(() => {})),
+      )
+
+      const started = Date.now()
+      const res = await a.request(`/api/portfolios/${portfolio.id}/positions`, {
+        method: "POST",
+        headers: h.headers,
+        body: JSON.stringify({ symbol: "TSLA", quantity: 4, price: 250, fees: 0, assetType: "STOCK" }),
+      })
+      const elapsed = Date.now() - started
+
+      expect(res.status).toBe(201)
+      const p = await res.json()
+      expect(p.symbol).toBe("TSLA")
+      expect(p.quantity).toBe(4)
+      // Two seconds is generous for the local DB work; an awaited quote would
+      // blow past it. This is the independence assertion #77 asks for.
+      expect(elapsed).toBeLessThan(2000)
+    } finally {
+      vi.unstubAllGlobals()
+      delete process.env.INSTRUMENTS_URL
+      // The route armed a deferred recalc; drop it so it cannot leak into the
+      // next test or hold the fork open.
+      __resetRecalcQueueForTests()
+      __resetQuoteCachesForTests()
+    }
   })
 
   it("POST /:id/positions — same symbol merges into existing position", async () => {
