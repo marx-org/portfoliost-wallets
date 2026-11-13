@@ -1,14 +1,12 @@
 import { Hono, type Context } from "hono"
 import { and, desc, eq, inArray, like, notInArray, or, sql } from "drizzle-orm"
 import { z } from "zod"
-import { randomUUID } from "node:crypto"
 import { userIdentityMiddleware } from "../auth.js"
 import { LOT_QUANTITY_TYPES, POSITION_TX_TYPES, CASH_TX_TYPES } from "../transaction-types.js"
 import { normalizeConversionLegs } from "../services/cashLedger.js"
 import { getDb, type DB } from "../db/index.js"
 import { capitalBasisInvested } from "../services/transferFlows.js"
-import { drawLots, openLots, openQuantity, type LotTx } from "../services/openLots.js"
-import { loadCumFactor, optionPremiumLegIds } from "../services/splitFactors.js"
+import { loadCumFactor } from "../services/splitFactors.js"
 import {
   portfolios,
   portfolioCashTransactions,
@@ -30,11 +28,10 @@ import { preferredBaseCurrency } from "../services/preferences.js"
 import { nextPaletteColor } from "./labels.js"
 import { ISO_CURRENCY } from "../services/currency.js"
 import { notifyTransactionsChanged } from "../services/recalc-queue.js"
-import { transferCloseForDate } from "../services/backfill.js"
-import { resolveServiceToken } from "../services/instruments-fx.js"
 import { rateToBase } from "../services/cashLedger.js"
 import { convertTransactionFee } from "../services/fee-fx.js"
-import { samePositionInstrument } from "../services/positionGroups.js"
+import { buildTransferLegs, TransferError } from "../services/transferLegs.js"
+import { upsertImportPositionOnBuy } from "../services/positions.js"
 import type { components } from "../generated/api-types.js"
 
 type ImportPortfolioBootstrapResponse = components["schemas"]["ImportPortfolioBootstrapResponse"]
@@ -205,143 +202,6 @@ function validationError(c: Context, parsed: { error?: { issues?: { message?: st
   return c.json({ error: "ValidationError", message: parsed.error?.issues?.[0]?.message }, 422)
 }
 
-/**
- * Restate the position ledger for an imported position-creating row
- * (§23.4, §24.7): weighted-avg cost basis against the open lot with the same
- * symbol, mirroring the interactive route's `upsertPositionOnBuy`. A `SHORT`
- * lot (short option) is a distinct position from the same-symbol underlying
- * equity lot (direction NULL/LONG).
- */
-async function upsertImportPositionOnBuy(
-  tx: DB,
-  userId: string,
-  portfolioId: string,
-  body: {
-    symbol: string
-    instrumentName: string | null
-    quantity: number
-    price: number
-    currency: string
-    assetType: string
-    feeInTransactionCurrency: number
-    /** §72.8 — the instrument's listing currency when the importer resolved it. */
-    listingCurrency?: string | null
-    /** §72.13 — the TRADE's date, which is when the lot opened. */
-    executedAt: Date
-    direction?: "LONG" | "SHORT" | null
-    optionType?: "CALL" | "PUT" | null
-    contractSize?: number | null
-    strikePrice?: number | null
-    expirationDate?: string | null
-    sector?: string | null
-    industry?: string | null
-    country?: string | null
-  },
-) {
-  const symbol = body.symbol.toUpperCase()
-  const candidates = await tx
-    .select()
-    .from(positions)
-    .where(
-      and(
-        eq(positions.userId, userId),
-        positionInPortfolio(portfolioId),
-        eq(positions.symbol, symbol),
-        body.direction
-          ? eq(positions.direction, body.direction)
-          : sql`${positions.direction} is null or ${positions.direction} = 'LONG'`,
-      ),
-    )
-  const compatible = candidates.filter((candidate) => samePositionInstrument(candidate, { ...body, symbol }))
-  const existing = compatible.find((candidate) => candidate.isOpen)
-    ?? compatible.filter((candidate) => !candidate.isOpen)
-      .sort((a, b) => a.openedAt.getTime() - b.openedAt.getTime())[0]
-  // A LONG opening's settled cost includes its commission; a SHORT opening's
-  // recorded premium is net of that cost.
-  const feeSign = body.direction === "SHORT" ? -1 : 1
-  const costOfTrade = body.quantity * body.price + feeSign * body.feeInTransactionCurrency
-  const costPerUnit = round8(costOfTrade / body.quantity)
-
-  if (existing) {
-    const reopening = !existing.isOpen
-    const oldQty = reopening ? 0 : Number(existing.quantity)
-    const oldCost = Number(existing.averageCostBasis)
-    const newQty = oldQty + body.quantity
-    const newAvgCost = round2((oldQty * oldCost + costOfTrade) / newQty)
-
-    const [updated] = await tx
-      .update(positions)
-      .set({
-        // §72.13 — a later BUY must not push the lot's opening forward. Rows
-        // can arrive out of order, and the opening date is what the historical
-        // rebuild anchors the position's existence to.
-        openedAt:
-          body.executedAt < existing.openedAt ? body.executedAt : existing.openedAt,
-        quantity: String(newQty),
-        averageCostBasis: String(newAvgCost),
-        companyName: body.instrumentName ?? existing.companyName,
-        instrumentCurrency: body.listingCurrency?.toUpperCase() ?? body.currency,
-        assetType: body.assetType ?? existing.assetType,
-        contractSize: body.contractSize != null ? String(body.contractSize) : existing.contractSize,
-        optionType: body.optionType ?? existing.optionType,
-        strikePrice: body.strikePrice != null ? String(body.strikePrice) : existing.strikePrice,
-        expirationDate: body.expirationDate ?? existing.expirationDate,
-        sector: body.sector ?? existing.sector,
-        industry: body.industry ?? existing.industry,
-        country: body.country ?? existing.country,
-        ...(reopening
-          ? {
-              isOpen: true,
-              closedAt: null,
-              currentPrice: null,
-              priceAsOf: null,
-              marketValue: null,
-              unrealizedGainLoss: null,
-              dayChange: null,
-              dayChangePercent: null,
-            }
-          : {}),
-        updatedAt: new Date(),
-      })
-      .where(eq(positions.id, existing.id))
-      .returning()
-    return updated
-  }
-
-  const [created] = await tx
-    .insert(positions)
-    .values({
-      userId,
-      symbol,
-      companyName: body.instrumentName,
-      quantity: String(body.quantity),
-      averageCostBasis: String(costPerUnit),
-      instrumentCurrency: body.listingCurrency?.toUpperCase() ?? body.currency,
-      assetType: body.assetType,
-      contractSize: body.contractSize != null ? String(body.contractSize) : null,
-      direction: body.direction ?? null,
-      strikePrice: body.strikePrice != null ? String(body.strikePrice) : null,
-      expirationDate: body.expirationDate ?? null,
-      optionType: body.optionType ?? null,
-      sector: body.sector ?? "Other",
-      industry: body.industry ?? "Other",
-      country: body.country ?? "Other",
-      isOpen: true,
-      // §72.13 — was `new Date()`, i.e. the import's own timestamp. Every one of
-      // the 269 positions in the database opened on 2026-09-28, the day of the
-      // import, while their first trades go back to 2019. The rebuild computes
-      // what a position was worth on each day by testing whether it was open
-      // yet, so a lot that "opened" in 2026 contributed NOTHING to every
-      // snapshot before it — the whole series was cash-only, and the final day,
-      // priced by a different path, was the only point that included it. That
-      // is the spike on Equate+; it is on every portfolio, not just that one.
-      openedAt: body.executedAt,
-    })
-    .returning()
-  // #115 — ownership is the many-to-many membership, not a column on positions.
-  await tx.insert(positionPortfolios).values({ positionId: created.id, portfolioId })
-  return created
-}
 
 /**
  * Imported SELL (§23.4): reduce the open lot, close it when exhausted, and
@@ -1224,24 +1084,13 @@ async function insertImportPortfolioCashTx(
   return { inserted: Boolean(debit && credit) }
 }
 
-/** The types that move quantity, and so participate in the FIFO queue. */
-const LOT_TYPES = LOT_QUANTITY_TYPES
 
 /**
- * An in-kind transfer: the instrument, unchanged, moves from one portfolio to
- * another. It is NOT a sale — nothing is disposed of, so no realised P/L is
- * booked and no cash moves.
- *
- * The quantity is drawn FIFO from the sending portfolio's open lots, producing
- * one `TRANSFER_OUT` row per lot drawn at **that lot's own price**, each with a
- * derived `TRANSFER_IN` carrying the same price and quantity. A weighted average
- * would land on the same `averageCostBasis`; the difference is that these rows
- * name the lot they came from, so the receiving portfolio's FIFO queue is correct
- * without re-deriving anything.
- *
- * The whole group is one atomic unit. A failure on draw 3 of 5 must leave nothing
- * behind — stock that has left without its counterpart having arrived is the worst
- * state this table can hold.
+ * An in-kind transfer from a sheet row: resolve the counterparty the row names,
+ * then hand the derivation to the shared leg builder. The FIFO expansion itself
+ * lives in `services/transferLegs.ts` so the importer and the interactive
+ * `POST /portfolios/:id/transfers` (portfoliost#74) cannot disagree about what a
+ * transfer is.
  */
 async function insertImportTransfer(
   tx: DB,
@@ -1281,174 +1130,37 @@ async function insertImportTransfer(
     )
   }
 
-  const optionLegs = await optionPremiumLegIds(tx, ptx.portfolioId)
-  const cumFor = await loadCumFactor(tx, symbol)
-  const rows = await tx
-    .select({
-      id: portfolioTransactions.id,
-      type: portfolioTransactions.type,
-      executedAt: portfolioTransactions.executedAt,
-      quantity: portfolioTransactions.quantity,
-      price: portfolioTransactions.price,
-      originalQuantity: portfolioTransactions.originalQuantity,
-      originalPrice: portfolioTransactions.originalPrice,
-      externalId: portfolioTransactions.externalId,
-    })
-    .from(portfolioTransactions)
-    .where(
-      and(
-        eq(portfolioTransactions.userId, userId),
-        eq(portfolioTransactions.portfolioId, ptx.portfolioId),
-        eq(portfolioTransactions.instrumentSymbol, symbol),
-        inArray(portfolioTransactions.type, [...LOT_TYPES]),
-      ),
-    )
-
-  const lots = openLots(rows as unknown as LotTx[], cumFor, optionLegs)
-  const { draws, shortfall } = drawLots(lots, ptx.quantity)
-  if (shortfall > 1e-8) {
-    // Refuse the whole row rather than move less than was asked. A shortfall is
-    // not a partial transfer — it means the queue disagrees with the holding.
-    throw new ImportRowError(
-      "transfer_exceeds_open_lots",
-      row.externalId,
-      `TRANSFER_OUT of ${ptx.quantity} exceeds ${openQuantity(lots)} open in ${symbol}`,
-    )
-  }
-
-  const day = executedAt.toISOString().slice(0, 10)
-  for (const baseCurrency of new Set([portfolioBaseCurrency.toUpperCase(), target.baseCurrency.toUpperCase()])) {
-    let close: number | null
-    try {
-      close = await transferCloseForDate(symbol, day, resolveServiceToken(), baseCurrency, listingCcy)
-    } catch (err) {
-      throw new ImportRowError(
-        "transfer_price_source_unavailable",
-        row.externalId,
-        `${symbol} ${day} in ${baseCurrency}: ${err instanceof Error ? err.message : String(err)}`,
-      )
-    }
-    if (close == null || !Number.isFinite(close) || close <= 0) {
-      throw new ImportRowError(
-        "transfer_price_missing",
-        row.externalId,
-        `No historical close for transfer ${symbol} on or before ${day} in ${baseCurrency}`,
-      )
-    }
-  }
-
-  const transferGroupId = randomUUID()
-  let firstOut: typeof portfolioTransactions.$inferInsert | null = null
-  let sourcePositionId: string | null = null
-
-  for (const [i, draw] of draws.entries()) {
-    const total = round2(draw.quantity * draw.price)
-    const [out] = await tx
-      .insert(portfolioTransactions)
-      .values({
-        userId,
-        portfolioId: ptx.portfolioId,
-        type: "TRANSFER_OUT",
-        instrumentSymbol: symbol,
-        instrumentName: ptx.instrumentName ?? null,
-        quantity: scale8(draw.quantity),
-        price: scale8(draw.price),
-        originalQuantity: scale8(draw.quantity),
-        originalPrice: scale8(draw.price),
-        currency: txCcy,
-        instrumentCurrency: listingCcy,
-        assetType: ptx.assetType,
-        totalAmount: String(total),
-        // Nothing was disposed of, so there is no realised P/L to book.
-        realizedGainLoss: null,
-        exchangeRate: String(rate),
-        convertedTotalAmount: String(round2(total * rate)),
-        convertedPrice: String(round2(draw.price * rate)),
-        transferGroupId,
-        sourceTransactionId: draw.txId,
-        externalSource: source.externalSource,
-        // Indexed so a re-import produces byte-identical suffixes and the
-        // insert-only sync does not orphan the previous group.
-        externalId: `${row.externalId}#x${i}`,
-        executedAt,
-      })
-      .returning()
-
-    const [inRow] = await tx
-      .insert(portfolioTransactions)
-      .values({
-        userId,
-        portfolioId: target.id,
-        type: "TRANSFER_IN",
-        instrumentSymbol: symbol,
-        instrumentName: ptx.instrumentName ?? null,
-        quantity: scale8(draw.quantity),
-        price: scale8(draw.price),
-        originalQuantity: scale8(draw.quantity),
-        originalPrice: scale8(draw.price),
-        currency: txCcy,
-        instrumentCurrency: listingCcy,
-        assetType: ptx.assetType,
-        totalAmount: String(total),
-        realizedGainLoss: null,
-        exchangeRate: String(rate),
-        convertedTotalAmount: String(round2(total * rate)),
-        convertedPrice: String(round2(draw.price * rate)),
-        transferGroupId,
-        linkedTransferId: out.id,
-        sourceTransactionId: draw.txId,
-        externalSource: source.externalSource,
-        externalId: `${row.externalId}#xi${i}`,
-        executedAt,
-      })
-      .returning()
-
-    await tx
-      .update(portfolioTransactions)
-      .set({ linkedTransferId: inRow.id })
-      .where(eq(portfolioTransactions.id, out.id))
-
-    if (i === 0) {
-      firstOut = out
-      // Labels belong to the position the stock left, as a BUY's would.
-      const pos = await decrementTransferPosition(tx, userId, ptx.portfolioId, symbol, draw.quantity)
-      sourcePositionId = pos?.id ?? null
-      await tx
-        .update(portfolioTransactions)
-        .set({ positionId: sourcePositionId })
-        .where(eq(portfolioTransactions.id, out.id))
-    } else {
-      await decrementTransferPosition(tx, userId, ptx.portfolioId, symbol, draw.quantity)
-    }
-
-    // The receiving side takes the lot at its source cost, so the weighted
-    // formula lands on exactly the FIFO composition.
-    await upsertImportPositionOnBuy(tx, userId, target.id, {
+  let group
+  try {
+    group = await buildTransferLegs(tx, {
+      userId,
+      sourcePortfolioId: ptx.portfolioId,
+      targetPortfolioId: target.id,
       symbol,
       instrumentName: ptx.instrumentName ?? null,
-      quantity: draw.quantity,
-      price: draw.price,
-      currency: txCcy,
       assetType: ptx.assetType,
-      feeInTransactionCurrency: 0,
-      listingCurrency: ptx.listingCurrency,
+      quantity: ptx.quantity,
       executedAt,
+      txCcy,
+      listingCcy,
+      rate,
+      externalSource: source.externalSource,
+      externalId: row.externalId,
+      positionLabelIds,
+      sourceBaseCurrency: portfolioBaseCurrency,
+      targetBaseCurrency: target.baseCurrency,
       sector: ptx.sector ?? null,
       industry: ptx.industry ?? null,
       country: ptx.country ?? null,
     })
-  }
-
-  if (positionLabelIds.length > 0 && sourcePositionId) {
-    await tx.delete(positionLabels).where(eq(positionLabels.positionId, sourcePositionId))
-    await tx
-      .insert(positionLabels)
-      .values(positionLabelIds.map((labelId) => ({ positionId: sourcePositionId, labelId })))
+  } catch (err) {
+    if (err instanceof TransferError) throw new ImportRowError(err.code, row.externalId, err.message)
+    throw err
   }
 
   return {
-    ...firstOut!,
-    positionId: sourcePositionId,
+    ...group.firstOut,
+    positionId: group.sourcePositionId,
     // The receiving side's own `total_invested` changes too — its capital basis
     // rises by the cost of what arrived. The importer recomputes a portfolio's
     // totals only for portfolios it recorded an insert INTO, and a transfer
@@ -1458,47 +1170,6 @@ async function insertImportTransfer(
   }
 }
 
-/**
- * Decrement the sending portfolio's holding by `quantity`, leaving
- * `averageCostBasis` untouched — the cost basis travels with the shares, so it
- * is not recomputed against a partial sale. A transfer is not a disposal.
- */
-async function decrementTransferPosition(
-  tx: DB,
-  userId: string,
-  portfolioId: string,
-  symbol: string,
-  quantity: number,
-) {
-  const [pos] = await tx
-    .select()
-    .from(positions)
-    .where(
-      and(
-        eq(positions.userId, userId),
-        positionInPortfolio(portfolioId),
-        eq(positions.symbol, symbol),
-        eq(positions.isOpen, true),
-        sql`${positions.direction} is null or ${positions.direction} = 'LONG'`,
-      ),
-    )
-  if (!pos) return null
-
-  const newQty = round8(Number(pos.quantity) - quantity)
-  if (newQty <= 1e-8) {
-    await tx
-      .update(positions)
-      .set({ quantity: "0", isOpen: false, updatedAt: new Date() })
-      .where(eq(positions.id, pos.id))
-    return pos
-  }
-  // averageCostBasis deliberately not in the SET: unchanged by a transfer.
-  await tx
-    .update(positions)
-    .set({ quantity: String(newQty), updatedAt: new Date() })
-    .where(eq(positions.id, pos.id))
-  return pos
-}
 
 async function insertImportPortfolioTx(
   tx: DB,
