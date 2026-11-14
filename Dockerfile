@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1
 
-FROM ghcr.io/marx-org/base-node:22-alpine@sha256:4c555748c9819babb757c7c328a12443b9d242edcfcc11cd196c24623dc704dd
+FROM ghcr.io/marx-org/base-node:22-alpine@sha256:a3d3cea2575a542fe6f3d0b931f214027870ddf2cbcef488fc60b913c8f9c40d
 
 WORKDIR /app
 
