@@ -2,6 +2,13 @@ import { Hono } from "hono"
 import { and, eq, or, sql } from "drizzle-orm"
 import { z } from "zod"
 import { effectiveDateToUtc } from "../services/splitFactors.js"
+import {
+  averageFromLots,
+  fifoApplies,
+  lotsFromRows,
+  quantityFromLots,
+  type FifoRow,
+} from "../services/fifo.js"
 import { getDb, type DB } from "../db/index.js"
 import { positions, portfolios, portfolioTransactions, splitEvents } from "../db/schema.js"
 import { positionInPortfolio } from "../db/position-membership.js"
@@ -265,6 +272,35 @@ async function restatePositions(
 
     const [pos] = await tx.select().from(positions).where(eq(positions.id, posId))
     if (!pos) continue
+    if (fifoApplies(pos)) {
+      // A split changes every lot's quantity and price. Rebuilding the queue
+      // from the restated rows keeps the position's average equal to the
+      // weighted cost of what remains, even when earlier sales consumed some
+      // lots and left others behind.
+      const fifoRows: FifoRow[] = posRows.map((r) => ({
+        id: r.id,
+        type: r.type,
+        executedAt: r.executedAt,
+        quantity: r.quantity,
+        price: r.price,
+        originalQuantity: r.originalQuantity,
+        originalPrice: r.originalPrice,
+        externalId: r.externalId,
+        externalSource: r.externalSource,
+        feesSettled: r.feesSettled,
+        feesType: r.feesType,
+        feeCurrency: r.feeCurrency,
+        currency: r.currency,
+        convertedFees: r.convertedFees,
+        exchangeRate: r.exchangeRate,
+      }))
+      const lots = lotsFromRows(fifoRows, cumFor)
+      qty = quantityFromLots(lots)
+      // A closed position has no open lots to average; the buy rows still carry
+      // the average the lifecycle closed at, so keep that rather than zeroing it.
+      if (qty > QTY_EPS) avg = averageFromLots(lots)
+      if (Math.abs(qty) < QTY_EPS) qty = 0
+    }
     if (
       Math.abs(Number(pos.quantity) - qty) < QTY_EPS &&
       Math.abs(Number(pos.averageCostBasis) - avg) < QTY_EPS

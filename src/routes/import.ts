@@ -32,6 +32,14 @@ import { rateToBase } from "../services/cashLedger.js"
 import { convertTransactionFee } from "../services/fee-fx.js"
 import { buildTransferLegs, TransferError } from "../services/transferLegs.js"
 import { upsertImportPositionOnBuy } from "../services/positions.js"
+import {
+  averageFromLots,
+  drawFromLots,
+  fifoApplies,
+  loadFifoLots,
+  quantityFromLots,
+  realizedFromDraws,
+} from "../services/fifo.js"
 import type { components } from "../generated/api-types.js"
 
 type ImportPortfolioBootstrapResponse = components["schemas"]["ImportPortfolioBootstrapResponse"]
@@ -257,14 +265,36 @@ async function processImportSell(
   }
   const sellQty = Math.min(body.quantity, oldQty)
 
-  const avgCost = Number(pos.averageCostBasis)
-  const realizedGainLoss = round2((body.price - avgCost) * sellQty - body.feeInTransactionCurrency)
-  const newQty = Math.round((oldQty - sellQty) * 1e8) / 1e8
-
   const updateData: Record<string, unknown> = {
-    quantity: String(newQty),
+    quantity: String(Math.round((oldQty - sellQty) * 1e8) / 1e8),
     updatedAt: new Date(),
   }
+  let realizedGainLoss: number
+
+  if (fifoApplies(pos)) {
+    // Same arithmetic as the interactive route: the sale consumes the oldest
+    // lots first, and the position keeps the weighted cost of the remainder.
+    // The import row is not inserted yet, so the queue is exactly the history
+    // before this sale.
+    const lots = await loadFifoLots(tx, { ...pos, userId, symbol }, portfolioId)
+    const { draws, shortfall, remaining } = drawFromLots(lots, sellQty)
+    if (shortfall > 1e-6) {
+      return {
+        error: "insufficient_quantity",
+        message: `Insufficient quantity for ${symbol}: have ${oldQty}, selling ${body.quantity}`,
+      }
+    }
+    realizedGainLoss = realizedFromDraws(draws, body.price, body.feeInTransactionCurrency)
+    const remainingQty = quantityFromLots(remaining)
+    updateData.quantity = String(remainingQty)
+    // Keep the closed lifecycle's average, as the moving-average path did.
+    if (remainingQty > 1e-9) updateData.averageCostBasis = String(averageFromLots(remaining))
+  } else {
+    const avgCost = Number(pos.averageCostBasis)
+    realizedGainLoss = round2((body.price - avgCost) * sellQty - body.feeInTransactionCurrency)
+  }
+
+  const newQty = Number(updateData.quantity)
   if (newQty < 1e-9) {
     updateData.isOpen = false
     // §72.13 — same defect as openedAt: the import timestamp, not the trade's.

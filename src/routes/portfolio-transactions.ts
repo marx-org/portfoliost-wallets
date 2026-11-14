@@ -29,6 +29,14 @@ import { notifyTransactionsChanged } from "../services/recalc-queue.js"
 import { buildTransferLegs, TransferError } from "../services/transferLegs.js"
 import { positionMembershipKey, realizedGainLossByMembership } from "../services/realizedGainLoss.js"
 import {
+  averageFromLots,
+  drawFromLots,
+  fifoApplies,
+  loadFifoLots,
+  quantityFromLots,
+  realizedFromDraws,
+} from "../services/fifo.js"
+import {
   groupPositionMembershipRows,
   realizedGainLossForPositionGroup,
   samePositionInstrument,
@@ -317,6 +325,8 @@ async function processSell(
     positionId?: string
     feesSettled: number
     executedAt: Date
+    /** The in-flight SELL row, excluded from the legacy null-link fallback. */
+    transactionId?: string
   },
 ) {
   const symbol = body.symbol.toUpperCase()
@@ -359,14 +369,34 @@ async function processSell(
     return { error: `Insufficient quantity: have ${oldQty}, selling ${body.quantity}` }
   }
 
-  const avgCost = Number(pos.averageCostBasis)
-  const realizedGainLoss = round2((body.price - avgCost) * body.quantity - body.feesSettled)
-  const newQty = Math.round((oldQty - body.quantity) * 1e8) / 1e8
-
   const updateData: Record<string, unknown> = {
-    quantity: String(newQty),
+    quantity: String(Math.round((oldQty - body.quantity) * 1e8) / 1e8),
     updatedAt: new Date(),
   }
+  let realizedGainLoss: number
+
+  if (fifoApplies(pos)) {
+    // The queue is derived from the ledger, so the sale is attributed to the
+    // lots it actually consumed. The position's remaining average is then the
+    // weighted cost of what is left, not the pre-sale average.
+    const lots = await loadFifoLots(tx, { ...pos, userId, symbol }, portfolioId, body.transactionId)
+    const { draws, shortfall, remaining } = drawFromLots(lots, body.quantity)
+    if (shortfall > 1e-6) {
+      return { error: `Insufficient quantity: have ${oldQty}, selling ${body.quantity}` }
+    }
+    realizedGainLoss = realizedFromDraws(draws, body.price, body.feesSettled)
+    const remainingQty = quantityFromLots(remaining)
+    updateData.quantity = String(remainingQty)
+    // A fully closed position keeps the average it had: the number describes
+    // the lots that were sold, and zeroing it would erase the cost of a closed
+    // lifecycle that the Holdings row still reports.
+    if (remainingQty > 1e-9) updateData.averageCostBasis = String(averageFromLots(remaining))
+  } else {
+    const avgCost = Number(pos.averageCostBasis)
+    realizedGainLoss = round2((body.price - avgCost) * body.quantity - body.feesSettled)
+  }
+
+  const newQty = Number(updateData.quantity)
   if (newQty < 1e-9) {
     updateData.isOpen = false
     updateData.closedAt = body.executedAt
@@ -685,6 +715,7 @@ export function createTransactionRoutes(db?: DB) {
           positionId: body.positionId,
           feesSettled: fx.feeInTransaction,
           executedAt,
+          transactionId: inserted.id,
         })
         if ("error" in sellResult) return { error: sellResult.error }
         position = sellResult.position
