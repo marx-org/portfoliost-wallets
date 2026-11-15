@@ -11,6 +11,7 @@ import { createPositionLabelRoutes } from "./routes/position-labels.js"
 import { createTransactionLabelRoutes } from "./routes/transaction-labels.js"
 import { createImportRoutes } from "./routes/import.js"
 import { createInternalRoutes } from "./routes/internal.js"
+import { createChartingRoutes } from "./routes/charting.js"
 import { moduleMeta } from "./meta.js"
 import { metricsRouteHandler } from "./instrumentation.js"
 
@@ -46,6 +47,9 @@ const api = new Hono()
 // §15 — portfolio management (D53–D64)
 // D2: cross-portfolio transaction feed (must be mounted before portfolio routes to avoid /:id collision)
 api.route("/portfolios/transactions", createCrossPortfolioTransactionsRoute())
+// Charting reads are static and MUST mount before the dynamic /:id portfolio
+// routes so /portfolios/charting/* is not parsed as a portfolio id.
+api.route("/portfolios/charting", createChartingRoutes())
 api.route("/portfolios", createPortfolioCashRoutes())
 api.route("/portfolios", createPortfolioRoutes())
 // G3: public share view (auth-exempt) — mounted at /portfolios/public to avoid auth middleware
