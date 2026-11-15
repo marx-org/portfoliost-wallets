@@ -11,7 +11,7 @@ import {
 } from "../db/schema.js"
 import { resolveChartScope, type ChartScopeInput, type ResolvedChartScope } from "../services/charting/scope.js"
 import { getScopedDailySeries } from "../services/charting/queries.js"
-import { aggregateIncome } from "../services/charting/income.js"
+import { aggregateIncome, monthlyIncomeSeries } from "../services/charting/income.js"
 import type { components } from "../generated/api-types.js"
 
 type ChartIncomeData = components["schemas"]["ChartIncomeData"]
@@ -105,7 +105,7 @@ export function createChartingRoutes(db?: DB) {
       currency: scope.currency,
       scope: toScopeDto(scope),
       coverage: coverage(generation, complete, accountIds.length === 0 ? "empty" : complete ? "complete" : "partial"),
-      monthly: agg.monthly,
+      monthly: monthlyIncomeSeries(agg),
       cumulative: [],
       annual: agg.annual.map((b) => ({
         year: Number(b.period),
