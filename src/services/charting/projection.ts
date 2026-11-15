@@ -7,7 +7,6 @@ import {
   portfolioCashTransactions,
   portfolioTransactions,
   portfolios,
-  positions,
 } from "../../db/schema.js"
 import {
   buildPriceMap,
