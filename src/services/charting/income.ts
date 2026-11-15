@@ -290,3 +290,53 @@ export async function cumulativeIncomeSeries(
     }
   })
 }
+
+/**
+ * One year of received income with its year-over-year change (feature #253,
+ * sub-issue #260). `partial` marks the current calendar year (YTD): its ratio is
+ * a partial-year-versus-prior-full-year comparison, never annualised. A missing
+ * or zero prior-year denominator yields `null` (undefined), not a fabricated 0%.
+ * A gap year between two observed years is a true zero bar.
+ */
+export interface AnnualIncomePoint {
+  year: number
+  dividends: number
+  interest: number
+  options: number
+  total: number
+  priorYearTotal: number | null
+  yoyChangePercent: number | null
+  partial: boolean
+}
+
+export function annualIncomeSeries(annual: IncomeBucket[], now: Date = new Date()): AnnualIncomePoint[] {
+  if (annual.length === 0) return []
+  const currentYear = now.getUTCFullYear()
+  const byYear = new Map(annual.map((b) => [Number(b.period), b]))
+  const first = Math.min(...byYear.keys())
+  const last = Math.max(...byYear.keys())
+  const out: AnnualIncomePoint[] = []
+  for (let year = first; year <= last; year++) {
+    const b = byYear.get(year)
+    const total = b ? b.total : 0
+    // The prior year must be an OBSERVED bucket; a missing prior is undefined,
+    // and a zero prior is also undefined (no ratio to report).
+    const prior = byYear.get(year - 1)
+    const priorYearTotal = prior ? round(prior.total) : null
+    const yoyChangePercent =
+      priorYearTotal != null && priorYearTotal !== 0
+        ? round(((total - priorYearTotal) / priorYearTotal) * 100)
+        : null
+    out.push({
+      year,
+      dividends: b?.dividends ?? 0,
+      interest: b?.interest ?? 0,
+      options: b?.options ?? 0,
+      total: round(total),
+      priorYearTotal,
+      yoyChangePercent,
+      partial: year === currentYear,
+    })
+  }
+  return out
+}

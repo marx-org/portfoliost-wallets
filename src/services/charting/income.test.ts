@@ -2,7 +2,7 @@ import { describe, expect, it, beforeEach } from "vitest"
 import { createTestDb } from "../../db/test-db.js"
 import { chartEventFacts, labels, portfolios, positionLabels, positions } from "../../db/schema.js"
 import type { DB } from "../../db/index.js"
-import { aggregateIncome, cumulativeIncomeSeries, monthlyIncomeSeries, linearTrend } from "./income.js"
+import { aggregateIncome, annualIncomeSeries, cumulativeIncomeSeries, monthlyIncomeSeries, linearTrend } from "./income.js"
 
 let db: DB
 
@@ -213,5 +213,53 @@ describe("aggregateIncome label scope", () => {
     const [other] = await db.insert(labels).values({ userId: "user-1", name: "L3", color: "#333333" }).returning({ id: labels.id })
     const out = await aggregateIncome(db, [a], 1, undefined, undefined, [other.id])
     expect(out.annual).toEqual([])
+  })
+})
+
+describe("annualIncomeSeries", () => {
+  const bucket = (period: string, dividends: number, interest = 0, options = 0) => ({
+    period,
+    dividends,
+    interest,
+    options,
+    total: dividends + interest + options,
+  })
+
+  it("computes YoY from the prior year and labels the current year partial", () => {
+    const out = annualIncomeSeries([bucket("2025", 100), bucket("2026", 125)], new Date("2026-06-15T00:00:00Z"))
+    expect(out.map((p) => p.year)).toEqual([2025, 2026])
+    expect(out[1]).toMatchObject({ total: 125, priorYearTotal: 100, yoyChangePercent: 25, partial: true })
+    expect(out[0].partial).toBe(false)
+    expect(out[0].yoyChangePercent).toBeNull() // no 2024 in the dataset
+  })
+
+  it("yields undefined YoY for a zero or missing prior year", () => {
+    const out = annualIncomeSeries([bucket("2025", 0), bucket("2026", 125)])
+    expect(out[1].priorYearTotal).toBe(0)
+    expect(out[1].yoyChangePercent).toBeNull()
+  })
+
+  it("fills a gap year between observed years with a true zero bar", () => {
+    const out = annualIncomeSeries([bucket("2024", 100), bucket("2026", 125)])
+    expect(out.map((p) => p.year)).toEqual([2024, 2025, 2026])
+    expect(out[1]).toMatchObject({ total: 0, dividends: 0, interest: 0, options: 0 })
+    // The year after a zero prior has no ratio.
+    expect(out[2].priorYearTotal).toBeNull()
+    expect(out[2].yoyChangePercent).toBeNull()
+  })
+
+  it("keeps the annual total equal to the monthly and quarterly sums", async () => {
+    const a = await addPortfolio("user-1", "A")
+    await addEvent(a, "2026-01-10", "dividend", "100")
+    await addEvent(a, "2026-02-10", "interest", "5")
+    await addEvent(a, "2026-05-10", "dividend", "20")
+    const agg = await aggregateIncome(db, [a], 1)
+    const annual = annualIncomeSeries(agg.annual)
+    const total = annual.reduce((s, p) => s + p.total, 0)
+    const monthly = agg.monthly.reduce((s, b) => s + b.total, 0)
+    const quarterly = agg.quarterly.reduce((s, b) => s + b.total, 0)
+    expect(total).toBe(monthly)
+    expect(total).toBe(quarterly)
+    expect(total).toBe(125)
   })
 })
