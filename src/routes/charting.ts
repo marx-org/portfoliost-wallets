@@ -11,7 +11,12 @@ import {
 } from "../db/schema.js"
 import { resolveChartScope, type ChartScopeInput, type ResolvedChartScope } from "../services/charting/scope.js"
 import { getScopedDailySeries } from "../services/charting/queries.js"
-import { aggregateIncome, cumulativeIncomeSeries, monthlyIncomeSeries } from "../services/charting/income.js"
+import {
+  aggregateIncome,
+  annualIncomeSeries,
+  cumulativeIncomeSeries,
+  monthlyIncomeSeries,
+} from "../services/charting/income.js"
 import {
   isStockChartCategory,
   listHoldableStocks,
@@ -120,15 +125,7 @@ export function createChartingRoutes(db?: DB) {
       coverage: coverage(generation, complete, accountIds.length === 0 ? "empty" : complete ? "complete" : "partial"),
       monthly,
       cumulative,
-      annual: agg.annual.map((b) => ({
-        year: Number(b.period),
-        dividends: b.dividends,
-        interest: b.interest,
-        options: b.options,
-        total: b.total,
-        priorYearTotal: null,
-        yoyChangePercent: null,
-      })),
+      annual: annualIncomeSeries(agg.annual).map(({ partial: _partial, ...rest }) => rest),
       quarterly: agg.quarterly.map((b) => ({
         quarter: b.period,
         dividends: b.dividends,

@@ -181,3 +181,20 @@ describe("cumulative income route", () => {
     expect(typeof body.cumulative[body.cumulative.length - 1].total).toBe("number")
   })
 })
+
+describe("annual income route", () => {
+  it("serves annual totals with a nullable year-over-year change", async () => {
+    const h = await makeHarness("user-1")
+    await seed(h)
+    const app = await boot(h)
+    const res = await app.request("/api/portfolios/charting/income", { headers: h.headers })
+    expect(res.status).toBe(200)
+    const body = (await res.json()) as {
+      annual: Array<{ year: number; total: number; yoyChangePercent: number | null }>
+    }
+    expect(body.annual.length).toBeGreaterThan(0)
+    for (const row of body.annual) {
+      expect(row.yoyChangePercent === null || typeof row.yoyChangePercent === "number").toBe(true)
+    }
+  })
+})
