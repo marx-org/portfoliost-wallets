@@ -765,3 +765,137 @@ export const portfolioCashTransactionLabels = portfoliosSchema.table(
     index("idx_cash_transaction_labels_label").on(t.labelId),
   ],
 )
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Charting projection facts (feature #253, sub-issue #254)
+//
+// Fine-grained, rebuildable facts the charting reads aggregate. They are NOT a
+// cache of chart pixels and there is no per-label-combination table: labels and
+// categories are late-bound to these facts at query time, so relabeling or
+// recategorising restates history without replaying prices. A new generation is
+// built and published atomically; reads only ever see one complete generation.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Per-portfolio projection metadata. `generation` is the currently published
+ * fact generation (bumped on each atomic publish); `dirtyFrom` is the earliest
+ * date whose facts are stale; `version` is bumped on every invalidation so a
+ * reader can tell a rebuild is pending. One row per portfolio.
+ */
+export const chartProjectionState = portfoliosSchema.table(
+  "chart_projection_state",
+  {
+    /** Portfolio this projection state belongs to; primary key, one row per portfolio. */
+    portfolioId: uuid("portfolio_id")
+      .primaryKey()
+      .references(() => portfolios.id, { onDelete: "cascade" }),
+    /** Currently published fact generation; reads only see this generation. */
+    generation: integer("generation").notNull().default(0),
+    /** Bumped on every invalidation; lets a reader detect a pending rebuild. */
+    version: integer("version").notNull().default(0),
+    /** Projection lifecycle: 'pending' | 'complete' | 'failed' | 'stale'. */
+    status: text("status").notNull().default("pending"),
+    /** Earliest date whose facts are stale; null when the projection is current. */
+    dirtyFrom: date("dirty_from"),
+    /** When the projection state row was last written. */
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+)
+
+/**
+ * One position-day fact. Quantity, market value (in the portfolio base
+ * currency), remaining cost basis, realized gain booked that day, received
+ * income and the day's net flow attribution — all per (generation, portfolio,
+ * position, day). Attribution comes from the canonical transaction owner/replay
+ * (via position_portfolios), never by multiplying a global position quantity by
+ * every membership row, so a position held in two accounts contributes to each
+ * account exactly once.
+ */
+export const chartPositionDaily = portfoliosSchema.table(
+  "chart_position_daily",
+  {
+    /** Fact generation this row belongs to. */
+    generation: integer("generation").notNull(),
+    /** Owning portfolio (account); cascades on portfolio delete. */
+    portfolioId: uuid("portfolio_id")
+      .notNull()
+      .references(() => portfolios.id, { onDelete: "cascade" }),
+    /** Position this fact is for; cascades on position delete. */
+    positionId: uuid("position_id")
+      .notNull()
+      .references(() => positions.id, { onDelete: "cascade" }),
+    /** Business day of the fact. */
+    day: date("day").notNull(),
+    /** Open quantity held on the day (negative for short). */
+    quantity: numeric("quantity", { precision: 20, scale: 8 }).notNull().default("0"),
+    /** Market value on the day in the portfolio base currency; excludes unpriced positions. */
+    value: numeric("value", { precision: 20, scale: 8 }).notNull().default("0"),
+    /** Remaining cost basis on the day in the portfolio base currency. */
+    remainingBasis: numeric("remaining_basis", { precision: 20, scale: 8 }).notNull().default("0"),
+    /** Realized gain/loss booked on the day in the portfolio base currency. */
+    realizedGain: numeric("realized_gain", { precision: 20, scale: 8 }).notNull().default("0"),
+    /** Received income (dividends/interest) attributed to the day, base currency. */
+    income: numeric("income", { precision: 20, scale: 8 }).notNull().default("0"),
+    /** Net external flow attributed to the day, base currency. */
+    netFlow: numeric("net_flow", { precision: 20, scale: 8 }).notNull().default("0"),
+    /** Instrument quote currency (ISO 4217). */
+    instrumentCurrency: char("instrument_currency", { length: 3 }).notNull().default("USD"),
+    /** False when the day had no price for the position; `value` then excludes it. */
+    priceKnown: boolean("price_known").notNull().default(true),
+    /** True when the day's price is a carried-forward close rather than a real bar. */
+    carriedForward: boolean("carried_forward").notNull().default(false),
+  },
+  (t) => [
+    primaryKey({ columns: [t.generation, t.portfolioId, t.positionId, t.day] }),
+    index("idx_chart_position_daily_scope").on(t.portfolioId, t.day),
+  ],
+)
+
+/**
+ * Normalized income/cash/funding event facts. Each row is one source event
+ * (a dividend, an interest credit, an option premium, an external contribution,
+ * a withdrawal, a transfer leg, or a trade cash effect) with its source identity
+ * so a dividend and its cash effect are never counted twice. `standalone` marks
+ * cash events that are not generated by a trade; `linkedPositionId` /
+ * `sourceTransactionId` carry the trade linkage so a linked trade cash effect
+ * follows the selected investment and is counted once.
+ */
+export const chartEventFacts = portfoliosSchema.table(
+  "chart_event_facts",
+  {
+    /** Event fact primary key. */
+    id: uuid("id").primaryKey().default(sql`gen_random_uuid()`),
+    /** Fact generation this row belongs to. */
+    generation: integer("generation").notNull(),
+    /** Owning portfolio (account); cascades on portfolio delete. */
+    portfolioId: uuid("portfolio_id")
+      .notNull()
+      .references(() => portfolios.id, { onDelete: "cascade" }),
+    /** Position the event belongs to; null for portfolio-level standalone cash events. */
+    positionId: uuid("position_id").references(() => positions.id, { onDelete: "cascade" }),
+    /** Business day the event is attributed to. */
+    eventDate: date("event_date").notNull(),
+    /** Receipt kind: dividend | interest | option | contribution | withdrawal | transfer | trade | cash. */
+    receiptKind: text("receipt_kind").notNull(),
+    /** Signed amount in the portfolio base currency. */
+    amountBase: numeric("amount_base", { precision: 20, scale: 8 }).notNull().default("0"),
+    /** Unsigned amount in the original event currency. */
+    amountOriginal: numeric("amount_original", { precision: 20, scale: 8 }).notNull().default("0"),
+    /** Original event currency (ISO 4217). */
+    originalCurrency: char("original_currency", { length: 3 }).notNull(),
+    /** Source trade transaction, when the event is trade-generated. */
+    sourceTransactionId: uuid("source_transaction_id"),
+    /** Source cash transaction, when the event came from the cash ledger. */
+    sourceCashTransactionId: uuid("source_cash_transaction_id"),
+    /** In-kind transfer group, when the event is a transfer leg. */
+    transferGroupId: uuid("transfer_group_id"),
+    /** True for standalone cash events not generated by a trade. */
+    standalone: boolean("standalone").notNull().default(false),
+    /** Position whose investment history a linked cash effect follows. */
+    linkedPositionId: uuid("linked_position_id"),
+  },
+  (t) => [
+    index("idx_chart_event_facts_scope").on(t.portfolioId, t.eventDate),
+    index("idx_chart_event_facts_generation").on(t.generation, t.portfolioId),
+  ],
+)
