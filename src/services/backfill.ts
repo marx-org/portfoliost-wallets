@@ -51,7 +51,7 @@ import {
 
 // ── instruments client ────────────────────────────────────────────────────
 
-interface PriceBarSeries {
+export interface PriceBarSeries {
   symbol: string
   dates: string[]
   closes: number[]
