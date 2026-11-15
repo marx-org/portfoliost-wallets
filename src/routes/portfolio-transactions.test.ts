@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest"
 import { Hono } from "hono"
 import { createPortfolioRoutes } from "./portfolios.js"
+import { createImportRoutes } from "./import.js"
 import { createPortfolioCashRoutes } from "./portfolio-cash.js"
 import { createPublicShareRoutes } from "./portfolios.js"
 import { createCrossPortfolioTransactionsRoute, openPositionsValueByPortfolio } from "./portfolio-transactions.js"
@@ -154,8 +155,8 @@ describe("Portfolio transactions (§15 Phase C)", () => {
     const body = await detail.json()
     expect(body.positions.length).toBe(1) // merged, not 2
     expect(Number(body.positions[0].quantity)).toBe(15) // 10 + 5
-    // avg cost: (10*150 + 5*160)/15 = 2300/15 ≈ 153.33
-    expect(body.positions[0].averageCostBasis).toBeCloseTo(153.33, 1)
+    // avg cost includes both buys' settled fees: (10×150 + 4.99 + 5×160 + 4.99)/15 ≈ 154.00
+    expect(body.positions[0].averageCostBasis).toBeCloseTo(154, 1)
   })
 
   it("POST /:id/transactions — SELL computes realized P/L", async () => {
@@ -185,7 +186,9 @@ describe("Portfolio transactions (§15 Phase C)", () => {
     expect(sellRes.status).toBe(201)
     const sellBody = await sellRes.json()
     expect(sellBody.type).toBe("SELL")
-    expect(sellBody.realizedGainLoss).toBeCloseTo((170 - 150) * 5 - 2.5, 1)
+    // The BUY's 4.99 fee is part of the cost, so half of it leaves with the half
+    // sold: (170 − 150.499) × 5 − 2.5 = 95.005, booked as 95.01.
+    expect(sellBody.realizedGainLoss).toBeCloseTo(95.01, 2)
 
     // Position should have 5 remaining
     const detail = await a.request(`/api/portfolios/${portfolio.id}`, { headers: h.headers })
@@ -208,7 +211,7 @@ describe("Portfolio transactions (§15 Phase C)", () => {
       .where(eq(positions.id, body.positions[0].id))
     const positionsRes = await a.request(`/api/portfolios/${portfolio.id}/positions`, { headers: h.headers })
     const [holding] = await positionsRes.json()
-    expect(holding.realizedGainLoss).toBeCloseTo(97.5, 2)
+    expect(holding.realizedGainLoss).toBeCloseTo(95.01, 2)
     expect(holding.unrealizedGainLoss).toBe(12.34)
   })
 
@@ -263,7 +266,7 @@ describe("Portfolio transactions (§15 Phase C)", () => {
     const response = await a.request(`/api/portfolios/${portfolio.id}/positions`, { headers: h.headers })
     const body = await response.json()
     expect(body).toHaveLength(1)
-    expect(body[0]).toMatchObject({ id: initialPositionId, isOpen: true, realizedGainLoss: 197.5 })
+    expect(body[0]).toMatchObject({ id: initialPositionId, isOpen: true, realizedGainLoss: 192.51 })
     expect(body[0].unrealizedGainLoss).toBeNull()
   })
 
@@ -344,7 +347,7 @@ describe("Portfolio transactions (§15 Phase C)", () => {
       portfolioId: portfolio.id,
       isOpen: false,
       closedAt: "2024-03-04T12:30:00.000Z",
-      realizedGainLoss: 197.5,
+      realizedGainLoss: 192.51,
     })
     const openPortfolioRow = portfolioPositions.find((position: { symbol: string }) => position.symbol === "MSFT")
     expect(openPortfolioRow.percentOfPortfolio).toBe(100)
@@ -361,7 +364,7 @@ describe("Portfolio transactions (§15 Phase C)", () => {
     )
     expect(closedMembershipRows.map((position: { portfolioName: string }) => position.portfolioName).sort()).toEqual(["P", "P2"])
     expect(closedMembershipRows.map((position: { portfolioId: string; realizedGainLoss: number }) => [position.portfolioId, position.realizedGainLoss]))
-      .toEqual(expect.arrayContaining([[portfolio.id, 197.5], [secondPortfolio.id, 31.25]]))
+      .toEqual(expect.arrayContaining([[portfolio.id, 192.51], [secondPortfolio.id, 31.25]]))
     expect(closedMembershipRows.every((position: { isOpen: boolean; closedAt: string }) =>
       !position.isOpen && position.closedAt === "2024-03-04T12:30:00.000Z",
     )).toBe(true)
@@ -790,7 +793,7 @@ describe("Portfolio transactions (§15 Phase C)", () => {
     expect(patched.sector).toBe("Consumer Tech")
     expect(Number(patched.currentPrice)).toBe(180)
     expect(Number(patched.marketValue)).toBe(1800)
-    expect(Number(patched.unrealizedGainLoss)).toBeCloseTo(300, 0) // (180-150)*10
+    expect(Number(patched.unrealizedGainLoss)).toBeCloseTo(295.01, 0) // (180 − 150.499) × 10
   })
 
   it("DELETE /:id/positions/:positionId — removes position with its transactions (D4.8)", async () => {
@@ -1331,7 +1334,7 @@ describe("Portfolio positions & allocation (§15 Phase E)", () => {
     expect(p.symbol).toBe("AAPL")
     expect(p.quantity).toBe(10)
     expect(p.isOpen).toBe(true)
-    expect(p.totalCostBasis).toBeCloseTo(10 * BUY_BODY.price, 1)
+    expect(p.totalCostBasis).toBeCloseTo(10 * BUY_BODY.price + BUY_BODY.fees, 1)
     expect(p.displayCurrency).toBe("USD")
     expect(p.metrics).toBeNull()
     if (p.currentPrice != null) {
@@ -1466,8 +1469,9 @@ describe("Position CRUD (§15 D4.2–D4.8)", () => {
     const p = await res.json()
     expect(p.symbol).toBe("TSLA")
     expect(p.quantity).toBe(4)
-    expect(p.averageCostBasis).toBe(250)
-    expect(p.totalCostBasis).toBe(1000)
+    // The 2.5 fee is part of the opening cost: (4×250 + 2.5)/4 = 250.625.
+    expect(p.averageCostBasis).toBe(250.625)
+    expect(p.totalCostBasis).toBe(1002.5)
     expect(p.isOpen).toBe(true)
     expect(p.displayCurrency).toBe("USD")
     expect(p.portfolioId).toBe(portfolio.id)
@@ -1537,7 +1541,8 @@ describe("Position CRUD (§15 D4.2–D4.8)", () => {
     expect(res.status).toBe(201)
     const p = await res.json()
     expect(p.quantity).toBe(15)
-    expect(p.averageCostBasis).toBeCloseTo((10 * 150 + 5 * 200) / 15, 1)
+    // Fee-inclusive: (10×150 + 4.99 + 5×200)/15 ≈ 167.00.
+    expect(p.averageCostBasis).toBeCloseTo((10 * 150 + BUY_BODY.fees + 5 * 200) / 15, 1)
   })
 
   it("POST /:id/positions — option position persists contract fields", async () => {
@@ -1977,7 +1982,7 @@ describe("Aggregates & metrics (§15 Phase G)", () => {
     expect(body.stocks.length).toBe(1)
     expect(body.stocks[0].symbol).toBe("AAPL")
     expect(body.stocks[0].totalQuantity).toBe(10)
-    expect(body.stocks[0].currentPrice).toBe(150)
+    expect(body.stocks[0].currentPrice).toBe(150.5)
   })
 
   it("GET /:id/summary-metrics — per-portfolio computed metrics", async () => {
@@ -2012,7 +2017,7 @@ describe("Aggregates & metrics (§15 Phase G)", () => {
     expect(res.status).toBe(200)
     const body = await res.json()
     expect(body.totalValue).toBe(1500)
-    expect(body.costBasis).toBe(1500)
+    expect(body.costBasis).toBe(1504.99)
     expect(body.positionCount).toBe(1)
     expect(body.realizedGain).toBe(0)
   })
@@ -3475,5 +3480,142 @@ describe("§87.5: a UI-created cash leg", () => {
     expect(
       await h.db.select().from(portfolioTransactions).where(eq(portfolioTransactions.id, tx.id)),
     ).toHaveLength(1)
+  })
+})
+
+describe("BUY cost basis parity between the interactive and import paths (#82)", () => {
+  // The importer has always folded a BUY's settled fee into `averageCostBasis`;
+  // the interactive route ignored it. Both must now land on the same basis and
+  // the same realised P/L for the same trade.
+  const FEE = 4.99
+  const SELL_FEE = 2.5
+
+  function bothApps(db: Parameters<typeof makeHarness>[0] extends string ? never : Parameters<typeof createPortfolioRoutes>[0]) {
+    const a = new Hono()
+    a.route("/api/import", createImportRoutes(db))
+    a.route("/api/portfolios", createPortfolioRoutes(db))
+    return a
+  }
+
+  function importRow(
+    portfolioId: string,
+    portfolioTx: Record<string, unknown>,
+    executedAt: string,
+  ): Record<string, unknown> {
+    return {
+      externalId: `row-${Math.random().toString(36).slice(2, 10)}`,
+      portfolioName: "Imported",
+      executedAt,
+      portfolioTx: {
+        portfolioId,
+        instrumentSymbol: "AAPL",
+        assetType: "STOCK",
+        currency: "USD",
+        feesType: "fixed",
+        feeCurrency: "USD",
+        ...portfolioTx,
+      },
+    }
+  }
+
+  it("interactive BUY and imported BUY agree on averageCostBasis and on the sale's realized P/L", { timeout: 30_000 }, async () => {
+    const h = await makeHarness()
+    const a = bothApps(h.db)
+
+    const makePortfolio = async (name: string) =>
+      (
+        await a.request("/api/portfolios", {
+          method: "POST",
+          headers: h.headers,
+          body: JSON.stringify({ name, currency: "USD" }),
+        })
+      ).json()
+
+    const interactive = await makePortfolio("Interactive")
+    const imported = await makePortfolio("Imported")
+
+    const buy = (portfolioId: string) =>
+      a.request(`/api/portfolios/${portfolioId}/transactions`, {
+        method: "POST",
+        headers: { ...h.headers, "content-type": "application/json" },
+        body: JSON.stringify({
+          type: "BUY",
+          symbol: "AAPL",
+          instrumentName: "Apple Inc",
+          quantity: 10,
+          price: 150,
+          currency: "USD",
+          assetType: "STOCK",
+          fees: FEE,
+          executedAt: "2024-01-15T10:00:00.000Z",
+        }),
+      })
+    const sell = (portfolioId: string) =>
+      a.request(`/api/portfolios/${portfolioId}/transactions`, {
+        method: "POST",
+        headers: { ...h.headers, "content-type": "application/json" },
+        body: JSON.stringify({
+          type: "SELL",
+          symbol: "AAPL",
+          quantity: 5,
+          price: 170,
+          currency: "USD",
+          fees: SELL_FEE,
+          executedAt: "2024-02-15T10:00:00.000Z",
+        }),
+      })
+    const positionsOf = async (portfolioId: string) =>
+      (await (await a.request(`/api/portfolios/${portfolioId}/positions`, { headers: h.headers })).json()) as Array<
+        Record<string, number | string | boolean | null>
+      >
+
+    // Interactive path: BUY, read the basis, SELL, read what it booked.
+    expect((await buy(interactive.id)).status).toBe(201)
+    const interactiveAfterBuy = await positionsOf(interactive.id)
+    const interactiveSell = await (await sell(interactive.id)).json()
+    const interactiveAfterSell = await positionsOf(interactive.id)
+
+    // Import path: the same BUY and SELL, with the fee on the BUY only.
+    const importRes = await a.request("/api/import/transactions", {
+      method: "POST",
+      headers: { ...h.headers, "content-type": "application/json" },
+      body: JSON.stringify({
+        source: { externalSource: "google-sheets:transakcje", spreadsheetId: "spr-1", sheet: "tx" },
+        transactions: [
+          importRow(
+            imported.id,
+            { type: "BUY", quantity: 10, price: 150, fees: FEE },
+            "2024-01-15T10:00:00.000Z",
+          ),
+          importRow(
+            imported.id,
+            { type: "SELL", quantity: 5, price: 170, fees: SELL_FEE },
+            "2024-02-15T10:00:00.000Z",
+          ),
+        ],
+      }),
+    })
+    if (importRes.status !== 200) {
+      console.log("IMPORT", JSON.stringify(await importRes.clone().json()))
+    }
+    expect(importRes.status).toBe(200)
+    const importedAfterImport = await positionsOf(imported.id)
+
+    // (10 × 150 + 4.99) / 10 = 150.499 — the fee is part of the opening cost.
+    expect(Number(interactiveAfterBuy[0].averageCostBasis)).toBeCloseTo(150.499, 6)
+    expect(Number(importedAfterImport[0].averageCostBasis)).toBeCloseTo(150.499, 6)
+    expect(interactiveAfterBuy[0].averageCostBasis).toBe(importedAfterImport[0].averageCostBasis)
+
+    // Half the buy fee leaves with the half sold: (170 − 150.499) × 5 − 2.5.
+    const interactiveRealized = Number(interactiveSell.realizedGainLoss)
+    const importedRealized = Number(importedAfterImport[0].realizedGainLoss)
+    expect(interactiveRealized).toBeCloseTo(95.01, 2)
+    expect(importedRealized).toBeCloseTo(interactiveRealized, 6)
+
+    // The remaining half keeps the untouched fee-inclusive average on both paths.
+    expect(Number(interactiveAfterSell[0].averageCostBasis)).toBeCloseTo(
+      Number(importedAfterImport[0].averageCostBasis),
+      6,
+    )
   })
 })
