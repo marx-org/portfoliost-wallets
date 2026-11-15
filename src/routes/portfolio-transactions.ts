@@ -51,6 +51,7 @@ type PositionDerivativeMetadata = Pick<
 
 const scale8 = (n: number) => n.toFixed(8)
 const round2 = (n: number) => Math.round(n * 100) / 100
+const round8 = (n: number) => Math.round(n * 1e8) / 1e8
 
 /**
  * The types this route can actually build. Deliberately narrower than
@@ -246,7 +247,12 @@ async function upsertPositionOnBuy(
     }
   }
 
-  const costOfTrade = body.quantity * body.price
+  // A LONG opening's settled cost includes its commission; a SHORT opening's
+  // recorded premium is net of that cost. The importer (`upsertImportPositionOnBuy`)
+  // applies the same rule, so the two paths must agree (#82).
+  const feeSign = body.direction === "SHORT" ? -1 : 1
+  const costOfTrade = body.quantity * body.price + feeSign * body.feesSettled
+  const costPerUnit = round8(costOfTrade / body.quantity)
 
   if (pos) {
     const reopening = !pos.isOpen
@@ -293,7 +299,7 @@ async function upsertPositionOnBuy(
       symbol,
       companyName: body.instrumentName ?? null,
       quantity: String(body.quantity),
-      averageCostBasis: String(body.price),
+      averageCostBasis: String(costPerUnit),
       instrumentCurrency: instCcy,
       assetType: body.assetType ?? "STOCK",
       contractSize: body.contractSize != null ? String(body.contractSize) : null,

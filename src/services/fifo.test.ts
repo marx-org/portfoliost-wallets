@@ -64,7 +64,7 @@ describe("FIFO sale arithmetic", () => {
     expect(lots[0].price).toBeCloseTo(100.39604, 5)
   })
 
-  it("does not fold a fee into an interactive buy, matching its average", () => {
+  it("folds a fee into an interactive buy too, matching its average", () => {
     const lots = lotsFromRows(
       [
         {
@@ -87,6 +87,8 @@ describe("FIFO sale arithmetic", () => {
       ],
       () => 1,
     )
-    expect(lots[0].price).toBe(150)
+    // #82: the interactive BUY's position average is fee-inclusive, so its lot
+    // must be too — (10 × 150 + 4.99) / 10 = 150.499.
+    expect(lots[0].price).toBeCloseTo(150.499, 6)
   })
 })

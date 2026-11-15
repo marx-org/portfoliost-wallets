@@ -29,12 +29,12 @@ const round8 = (n: number) => Math.round(n * 1e8) / 1e8
  * from it. `openLots` owns the walk and the split restatement; this module adds
  * the two things the sale path needs on top:
  *
- * - **Imported buy fees are part of the lot's cost.** The ledger stores the fee
- *   separately, and the importer has always folded it into `averageCostBasis`.
- *   Folding it into the opening lot keeps the two cost bases comparable and
- *   keeps the position's average equal to the weighted cost of the remaining
- *   lots. The interactive BUY path has always excluded it, so it stays excluded
- *   there; the inconsistency is a separate defect, not widened here.
+ * - **A buy's settled fee is part of the lot's cost.** The ledger stores the fee
+ *   separately, and the position's `averageCostBasis` has always folded it in —
+ *   the importer did, and since #82 the interactive BUY does too. Folding it into
+ *   the opening lot keeps the queue consistent with the position row, so a sale
+ *   that consumes a lot and a sale priced off the average agree, and the
+ *   position's average stays the weighted cost of the remaining lots.
  * - **The position row is the reconciliation point.** A manual quantity edit or
  *   an imported position with no linked rows has no opening transaction, so the
  *   difference between the queue and `positions.quantity` is represented by a
@@ -90,11 +90,11 @@ export function fifoApplies(position: Pick<FifoPosition, "assetType" | "directio
  * math uses — using `feeExchangeRate` directly would be the fee -> base axis,
  * not fee -> trade, and would multiply by the trade rate a second time.
  *
- * Only imported rows fold the fee into the lot. The interactive BUY path has
- * always excluded it from `averageCostBasis` (its tests pin that), while the
- * importer has always included it. Reusing each path's existing convention
- * keeps one-lot results identical; the inconsistency itself is a separate
- * defect and is not widened here.
+ * Only an opening leg folds a fee in, and the fee is always the row's own: a
+ * closing row's fee belongs to realised P/L, not to the cost of what is left.
+ * `averageCostBasis` folds an opening BUY's fee in on both the interactive and
+ * the import path (the interactive route was brought in line by #82), so the
+ * queue has to agree or a sale would book a different basis than the average.
  */
 function feeInTradeCurrency(row: FifoRow): number {
   const amount = Math.abs(Number(row.feesSettled ?? 0))
@@ -129,7 +129,7 @@ function toLotTx(row: FifoRow): LotTx {
   const price = Number(row.price)
   const originalQuantity = row.originalQuantity == null ? null : Number(row.originalQuantity)
   const originalPrice = row.originalPrice == null ? null : Number(row.originalPrice)
-  const fee = quantitySign(row.type) > 0 && row.externalSource != null ? feeInTradeCurrency(row) : 0
+  const fee = quantitySign(row.type) > 0 ? feeInTradeCurrency(row) : 0
 
   const unitPrice = quantity > 0 ? (quantity * price + fee) / quantity : price
   const unitOriginalPrice =
