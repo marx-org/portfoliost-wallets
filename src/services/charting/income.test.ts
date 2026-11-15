@@ -91,8 +91,33 @@ describe("monthlyIncomeSeries", () => {
       annual: [],
     }
     const pts = monthlyIncomeSeries(agg, new Date("2026-06-15T00:00:00Z"))
-    expect(pts[0].partial).toBe(false)
-    expect(pts[1].partial).toBe(true)
+    // Gaps are filled as true zero months; only the observed endpoints exist.
+    expect(pts).toHaveLength(12)
+    expect(pts[0]).toMatchObject({ period: "2026-01", dividends: 100, partial: false })
+    // February 2026 is a past month (now = June 2026), so it is complete zero.
+    expect(pts[1]).toMatchObject({ period: "2026-02", dividends: 0, interest: 0, options: 0, total: 0, partial: false })
+    expect(pts[5]).toMatchObject({ period: "2026-06", total: 0, partial: true }) // current month
+    expect(pts[11]).toMatchObject({ period: "2026-12", partial: true }) // future
+  })
+
+  it("fills a true zero month between two receipt months", () => {
+    const agg = {
+      monthly: [
+        { period: "2026-01", dividends: 100, interest: 0, options: 0, total: 100 },
+        // 2026-02 has no receipts: aggregateIncome omits it, series must show zero.
+        { period: "2026-03", dividends: 200, interest: 0, options: 0, total: 200 },
+      ],
+      quarterly: [],
+      annual: [],
+    }
+    // now is after the window, so every month is complete (no partial flag).
+    const pts = monthlyIncomeSeries(agg, new Date("2027-01-01T00:00:00Z"))
+    expect(pts.map((p) => p.period)).toEqual(["2026-01", "2026-02", "2026-03"])
+    expect(pts[1]).toMatchObject({ period: "2026-02", dividends: 0, total: 0, partial: false })
+  })
+
+  it("returns an empty series when there are no monthly buckets", () => {
+    expect(monthlyIncomeSeries({ monthly: [], quarterly: [], annual: [] })).toEqual([])
   })
 })
 

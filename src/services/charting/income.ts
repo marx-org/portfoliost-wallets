@@ -138,15 +138,34 @@ export interface MonthlyIncomePoint {
 
 export function monthlyIncomeSeries(agg: AggregatedIncome, now: Date = new Date()): MonthlyIncomePoint[] {
   const currentMonth = `${now.getUTCFullYear()}-${String(now.getUTCMonth() + 1).padStart(2, "0")}`
-  return agg.monthly.map((b) => ({
-    period: b.period,
-    dividends: b.dividends,
-    interest: b.interest,
-    options: b.options,
-    total: b.total,
-    // Current and future months are incomplete.
-    partial: b.period >= currentMonth,
-  }))
+  if (agg.monthly.length === 0) return []
+
+  // Fill gaps between the first and last receipt month with TRUE zero months, so
+  // a trend line and the current-month total see them (a month with no receipts
+  // is zero, not absent). Months outside the observed window are not invented.
+  const byPeriod = new Map(agg.monthly.map((b) => [b.period, b]))
+  const first = agg.monthly[0].period
+  const last = agg.monthly[agg.monthly.length - 1].period
+  const points: MonthlyIncomePoint[] = []
+  for (let p = first; p <= last; p = nextMonth(p)) {
+    const b = byPeriod.get(p)
+    points.push({
+      period: p,
+      dividends: b?.dividends ?? 0,
+      interest: b?.interest ?? 0,
+      options: b?.options ?? 0,
+      total: b?.total ?? 0,
+      // Current and future months are incomplete.
+      partial: p >= currentMonth,
+    })
+  }
+  return points
+}
+
+function nextMonth(period: string): string {
+  const y = Number(period.slice(0, 4))
+  const m = Number(period.slice(5, 7))
+  return m === 12 ? `${y + 1}-01` : `${y}-${String(m + 1).padStart(2, "0")}`
 }
 
 export interface Trend {
