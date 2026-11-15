@@ -1076,6 +1076,92 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/portfolios/charting/income": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Received income dataset (dividends/interest/options) for the chart scope */
+        get: operations["getChartIncome"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/portfolios/charting/allocation": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Allocation proportions in comparable market value */
+        get: operations["getChartAllocation"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/portfolios/charting/performance": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Valuation, capital and cumulative income overlays with quarterly returns */
+        get: operations["getChartPerformance"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/portfolios/charting/cash": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Broker cash balances through time and annual net external contributions */
+        get: operations["getChartCash"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/portfolios/charting/stock-categories": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** List the caller's fixed stock-category assignments */
+        get: operations["getStockChartCategories"];
+        /** Create or update one stock-category assignment */
+        put: operations["setStockChartCategory"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/portfolios/{id}": {
         parameters: {
             query?: never;
@@ -3268,6 +3354,212 @@ export interface components {
             weight?: number;
             currency?: string;
         };
+        /** @description Resolved chart scope. `accountIds` are real portfolio IDs and `labelIds` are position-label IDs combined with OR. Empty arrays mean All. Never silently broadened by invalid or foreign IDs. */
+        ChartScope: {
+            accountIds: string[];
+            labelIds: string[];
+            currency: string;
+            /** Format: date */
+            from?: string | null;
+            /** Format: date */
+            to?: string | null;
+            /** @description Virtual portfolios resolved to their underlying real positions; never counted as extra capital on top of the real accounts. */
+            virtualAccountIds?: string[];
+        };
+        ChartMissingCoverage: {
+            /** @description Machine-readable reason code */
+            reason: string;
+            detail?: string | null;
+            symbols?: string[];
+        };
+        /** @description Every dataset declares generation, as-of and completeness so the UI can distinguish partial/current-period, stale and empty results instead of inventing zeroes. */
+        ChartCoverage: {
+            generation: number;
+            /** Format: date-time */
+            asOf: string;
+            /** @enum {string} */
+            status: "complete" | "partial" | "stale" | "pending" | "empty";
+            partial?: boolean;
+            /** @description Current year/quarter bucket is incomplete */
+            currentPeriod?: boolean;
+            stale?: boolean;
+            missing?: components["schemas"]["ChartMissingCoverage"][];
+        };
+        /**
+         * @description Fixed dividend-style stock categories (screenshot 8). Absence of an assignment means `not_classified`; no automatic yield/growth classifier.
+         * @enum {string}
+         */
+        StockChartCategory: "balanced" | "high_yield" | "high_growth" | "very_high_growth" | "not_classified";
+        /** @description One user-owned assignment per stock across lots/accounts, keyed by owner plus STOCK instrument identity (symbol and instrument currency). Option contracts never inherit a stock's category by ticker collision. */
+        StockChartCategoryAssignment: {
+            symbol: string;
+            instrumentCurrency: string;
+            name?: string | null;
+            category: components["schemas"]["StockChartCategory"];
+            /** Format: date-time */
+            updatedAt: string;
+        };
+        StockChartCategoryUpdate: {
+            symbol: string;
+            instrumentCurrency: string;
+            category: components["schemas"]["StockChartCategory"];
+        };
+        ChartIncomePoint: {
+            /** @description Bucket label: YYYY-MM, YYYY or YYYY-Qn */
+            period: string;
+            /** @description Received dividend income in the dataset currency */
+            dividends?: number;
+            interest?: number;
+            /** @description Option premium / realized option P/L */
+            options?: number;
+            total: number;
+            partial?: boolean;
+        };
+        ChartIncomeCumulativePoint: {
+            /** Format: date */
+            date: string;
+            dividends?: number;
+            interest?: number;
+            options?: number;
+            total: number;
+            /** @description Pre-window cumulative value at the first visible point */
+            openingBalance?: number;
+        };
+        ChartIncomeAnnualPoint: {
+            year: number;
+            dividends?: number;
+            interest?: number;
+            options?: number;
+            total: number;
+            priorYearTotal?: number | null;
+            /** @description Undefined (null) when the prior-year denominator is zero or missing */
+            yoyChangePercent?: number | null;
+        };
+        ChartIncomeQuarterPoint: {
+            /** @description YYYY-Qn */
+            quarter: string;
+            dividends?: number;
+            interest?: number;
+            options?: number;
+            total: number;
+            priorYearQuarterTotal?: number | null;
+            yoyChangePercent?: number | null;
+        };
+        ChartIncomeAveragePoint: {
+            year: number;
+            /** @enum {string} */
+            basis?: "days" | "months";
+            /** @description 365 or 12 (calendar-year equivalent, not elapsed-day/month average) */
+            divisor: number;
+            amount: number;
+            partial?: boolean;
+        };
+        ChartPayerCoverageMonth: {
+            year: number;
+            month: number;
+            /** @description Distinct currently-held stocks with known payment dates in the month */
+            count: number;
+            partial?: boolean;
+        };
+        ChartIncomeData: {
+            currency: string;
+            scope: components["schemas"]["ChartScope"];
+            coverage: components["schemas"]["ChartCoverage"];
+            monthly?: components["schemas"]["ChartIncomePoint"][];
+            cumulative?: components["schemas"]["ChartIncomeCumulativePoint"][];
+            annual?: components["schemas"]["ChartIncomeAnnualPoint"][];
+            quarterly?: components["schemas"]["ChartIncomeQuarterPoint"][];
+            dailyAverageByYear?: components["schemas"]["ChartIncomeAveragePoint"][];
+            monthlyAverageByYear?: components["schemas"]["ChartIncomeAveragePoint"][];
+            payerCoverage?: components["schemas"]["ChartPayerCoverageMonth"][];
+        };
+        ChartAllocationSlice: {
+            key: string;
+            label?: string;
+            /** @description Comparable value in the dataset currency */
+            value: number;
+            percent?: number | null;
+            sourceCurrency?: string | null;
+            sourceValue?: number | null;
+            /** @description Classification is unknown/exposed rather than silently zeroed */
+            unknown?: boolean;
+        };
+        ChartAllocationData: {
+            currency: string;
+            scope: components["schemas"]["ChartScope"];
+            coverage: components["schemas"]["ChartCoverage"];
+            byCurrency?: components["schemas"]["ChartAllocationSlice"][];
+            byAssetType?: components["schemas"]["ChartAllocationSlice"][];
+            bySector?: components["schemas"]["ChartAllocationSlice"][];
+            byCategory?: components["schemas"]["ChartAllocationSlice"][];
+            byLabel?: components["schemas"]["ChartAllocationSlice"][];
+            byCostBasis?: components["schemas"]["ChartAllocationSlice"][];
+            /** @description Current holdings composition by instrument identity (not raw ticker only). */
+            positions?: components["schemas"]["ChartAllocationSlice"][];
+        };
+        ChartPerformancePoint: {
+            /** Format: date */
+            date: string;
+            value: number;
+            /** @description Cumulative net external contributions */
+            invested?: number | null;
+            capitalBasis?: number | null;
+            cumulativeIncome?: number | null;
+            cumulativeOptions?: number | null;
+            unpricedValue?: number | null;
+            carriedValue?: number | null;
+            twr?: number | null;
+            mwr?: number | null;
+            simple?: number | null;
+        };
+        ChartQuarterlyReturnPoint: {
+            /** @description YYYY-Qn */
+            quarter: string;
+            endingValue: number;
+            cumulativeNetContributions?: number;
+            /** @description Index-chained time-weighted return */
+            twr?: number | null;
+            /** @description 100 * ((Vq - Cq) - (Vprev - Cprev)) / Vq; null when the denominator is zero or unknown */
+            netGainChange?: number | null;
+            partial?: boolean;
+        };
+        ChartScatterPoint: {
+            symbol: string;
+            name?: string | null;
+            marketValue: number;
+            /** @description Realized + unrealized + received dividends under existing P/L rules */
+            totalProfit: number;
+            realized?: number | null;
+            unrealized?: number | null;
+            dividends?: number | null;
+        };
+        ChartPerformanceData: {
+            currency: string;
+            scope: components["schemas"]["ChartScope"];
+            coverage: components["schemas"]["ChartCoverage"];
+            series?: components["schemas"]["ChartPerformancePoint"][];
+            quarterly?: components["schemas"]["ChartQuarterlyReturnPoint"][];
+            scatter?: components["schemas"]["ChartScatterPoint"][];
+        };
+        ChartCashPoint: {
+            /** Format: date */
+            date: string;
+            balance: number;
+        };
+        ChartContributionPoint: {
+            year: number;
+            contributions?: number;
+            withdrawals?: number;
+            net: number;
+            partial?: boolean;
+        };
+        ChartCashData: {
+            currency: string;
+            scope: components["schemas"]["ChartScope"];
+            coverage: components["schemas"]["ChartCoverage"];
+            balanceHistory?: components["schemas"]["ChartCashPoint"][];
+            annualContributions?: components["schemas"]["ChartContributionPoint"][];
+        };
         Portfolio: {
             /** Format: uuid */
             id: string;
@@ -4693,6 +4985,18 @@ export interface components {
         benchmarks: string;
         /** @description Return-type calculation used for benchmark series and the authoritative portfolio return line (default timeWeighted) */
         benchmarkCalcType: "moneyWeighted" | "timeWeighted" | "simple";
+        /** @description Real portfolio (account) IDs to scope to. Repeat the parameter or pass a comma-separated list. Omitted/empty = All owned real accounts. Invalid or foreign IDs never silently broaden the scope. */
+        chartAccounts: string[];
+        /** @description Current position-label IDs, combined with OR (any selected label matches). Standalone cash events use their own labels. Omitted/empty = All. */
+        chartLabels: string[];
+        /** @description ISO-4217 display currency for comparable slices and points. */
+        chartCurrency: string;
+        /** @description Inclusive window start (YYYY-MM-DD). */
+        chartFrom: string;
+        /** @description Inclusive window end (YYYY-MM-DD). */
+        chartTo: string;
+        /** @description Chart-specific metric selector (e.g. twr or net_gain_change for quarterly performance). */
+        chartMetric: string;
     };
     requestBodies: never;
     headers: never;
@@ -6132,6 +6436,186 @@ export interface operations {
                     "application/json": components["schemas"]["PageResponse"] & {
                         items?: components["schemas"]["Transaction"][];
                     };
+                };
+            };
+        };
+    };
+    getChartIncome: {
+        parameters: {
+            query?: {
+                /** @description Real portfolio (account) IDs to scope to. Repeat the parameter or pass a comma-separated list. Omitted/empty = All owned real accounts. Invalid or foreign IDs never silently broaden the scope. */
+                accounts?: components["parameters"]["chartAccounts"];
+                /** @description Current position-label IDs, combined with OR (any selected label matches). Standalone cash events use their own labels. Omitted/empty = All. */
+                labels?: components["parameters"]["chartLabels"];
+                /** @description ISO-4217 display currency for comparable slices and points. */
+                currency?: components["parameters"]["chartCurrency"];
+                /** @description Inclusive window start (YYYY-MM-DD). */
+                from?: components["parameters"]["chartFrom"];
+                /** @description Inclusive window end (YYYY-MM-DD). */
+                to?: components["parameters"]["chartTo"];
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Income dataset */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ChartIncomeData"];
+                };
+            };
+        };
+    };
+    getChartAllocation: {
+        parameters: {
+            query?: {
+                /** @description Real portfolio (account) IDs to scope to. Repeat the parameter or pass a comma-separated list. Omitted/empty = All owned real accounts. Invalid or foreign IDs never silently broaden the scope. */
+                accounts?: components["parameters"]["chartAccounts"];
+                /** @description Current position-label IDs, combined with OR (any selected label matches). Standalone cash events use their own labels. Omitted/empty = All. */
+                labels?: components["parameters"]["chartLabels"];
+                /** @description ISO-4217 display currency for comparable slices and points. */
+                currency?: components["parameters"]["chartCurrency"];
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Allocation dataset */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ChartAllocationData"];
+                };
+            };
+        };
+    };
+    getChartPerformance: {
+        parameters: {
+            query?: {
+                /** @description Real portfolio (account) IDs to scope to. Repeat the parameter or pass a comma-separated list. Omitted/empty = All owned real accounts. Invalid or foreign IDs never silently broaden the scope. */
+                accounts?: components["parameters"]["chartAccounts"];
+                /** @description Current position-label IDs, combined with OR (any selected label matches). Standalone cash events use their own labels. Omitted/empty = All. */
+                labels?: components["parameters"]["chartLabels"];
+                /** @description ISO-4217 display currency for comparable slices and points. */
+                currency?: components["parameters"]["chartCurrency"];
+                /** @description Inclusive window start (YYYY-MM-DD). */
+                from?: components["parameters"]["chartFrom"];
+                /** @description Inclusive window end (YYYY-MM-DD). */
+                to?: components["parameters"]["chartTo"];
+                /** @description Chart-specific metric selector (e.g. twr or net_gain_change for quarterly performance). */
+                metric?: components["parameters"]["chartMetric"];
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Performance dataset */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ChartPerformanceData"];
+                };
+            };
+        };
+    };
+    getChartCash: {
+        parameters: {
+            query?: {
+                /** @description Real portfolio (account) IDs to scope to. Repeat the parameter or pass a comma-separated list. Omitted/empty = All owned real accounts. Invalid or foreign IDs never silently broaden the scope. */
+                accounts?: components["parameters"]["chartAccounts"];
+                /** @description Current position-label IDs, combined with OR (any selected label matches). Standalone cash events use their own labels. Omitted/empty = All. */
+                labels?: components["parameters"]["chartLabels"];
+                /** @description ISO-4217 display currency for comparable slices and points. */
+                currency?: components["parameters"]["chartCurrency"];
+                /** @description Inclusive window start (YYYY-MM-DD). */
+                from?: components["parameters"]["chartFrom"];
+                /** @description Inclusive window end (YYYY-MM-DD). */
+                to?: components["parameters"]["chartTo"];
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Cash dataset */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ChartCashData"];
+                };
+            };
+        };
+    };
+    getStockChartCategories: {
+        parameters: {
+            query?: {
+                /** @description Real portfolio (account) IDs to scope to. Repeat the parameter or pass a comma-separated list. Omitted/empty = All owned real accounts. Invalid or foreign IDs never silently broaden the scope. */
+                accounts?: components["parameters"]["chartAccounts"];
+                /** @description Current position-label IDs, combined with OR (any selected label matches). Standalone cash events use their own labels. Omitted/empty = All. */
+                labels?: components["parameters"]["chartLabels"];
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Stock-category assignments */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+        };
+    };
+    setStockChartCategory: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["StockChartCategoryUpdate"];
+            };
+        };
+        responses: {
+            /** @description Updated assignment */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["StockChartCategoryAssignment"];
+                };
+            };
+            /** @description Validation error (unknown category or identity) */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
                 };
             };
         };
