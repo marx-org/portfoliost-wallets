@@ -12,6 +12,13 @@ import {
 import { resolveChartScope, type ChartScopeInput, type ResolvedChartScope } from "../services/charting/scope.js"
 import { getScopedDailySeries } from "../services/charting/queries.js"
 import { aggregateIncome, monthlyIncomeSeries } from "../services/charting/income.js"
+import {
+  isStockChartCategory,
+  listHoldableStocks,
+  listStockCategories,
+  upsertStockCategory,
+  type StockCategoryAssignment,
+} from "../services/charting/categories.js"
 import type { components } from "../generated/api-types.js"
 
 type ChartIncomeData = components["schemas"]["ChartIncomeData"]
@@ -20,6 +27,7 @@ type ChartPerformanceData = components["schemas"]["ChartPerformanceData"]
 type ChartCashData = components["schemas"]["ChartCashData"]
 type ChartCoverage = components["schemas"]["ChartCoverage"]
 type ChartScopeDto = components["schemas"]["ChartScope"]
+type StockChartCategoryAssignment = components["schemas"]["StockChartCategoryAssignment"]
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 
@@ -262,5 +270,62 @@ export function createChartingRoutes(db?: DB) {
     return c.json(body satisfies ChartCashData)
   })
 
+  // GET /api/portfolios/charting/stock-categories
+  routes.get("/stock-categories", async (c) => {
+    const identity = c.get("userIdentity")
+    const database = getDbInstance()
+    const input = parseScope(c)
+    if (hasMalformedIds(input)) return c.json({ error: "ValidationError", message: "malformed id" }, 422)
+    const scope = await resolveChartScope(database, identity.id, input)
+    const accountIds = await effectiveAccountIds(database, identity.id, scope)
+    const all = await listStockCategories(database, identity.id)
+    let rows: StockCategoryAssignment[] = all
+    // An account/label filter narrows the assignment table to the scoped STOCK
+    // holdings; All returns every assignment the caller owns.
+    if (!scope.allAccounts || !scope.allLabels) {
+      const stocks = await listHoldableStocks(database, identity.id, { accountIds, labelIds: scope.labelIds })
+      const allowed = new Set(stocks.map((s) => `${s.symbol}|${s.instrumentCurrency}`))
+      rows = all.filter((a) => allowed.has(`${a.symbol}|${a.instrumentCurrency}`))
+    }
+    return c.json(rows.map(toCategoryDto) satisfies StockChartCategoryAssignment[])
+  })
+
+  // PUT /api/portfolios/charting/stock-categories
+  routes.put("/stock-categories", async (c) => {
+    const identity = c.get("userIdentity")
+    const database = getDbInstance()
+    let raw: unknown
+    try {
+      raw = await c.req.json()
+    } catch {
+      return c.json({ error: "ValidationError", message: "invalid json" }, 422)
+    }
+    const body = (raw ?? {}) as Record<string, unknown>
+    const symbol = typeof body.symbol === "string" ? body.symbol.trim().toUpperCase() : ""
+    const instrumentCurrency =
+      typeof body.instrumentCurrency === "string" ? body.instrumentCurrency.trim().toUpperCase() : ""
+    const category = body.category
+    if (
+      !symbol ||
+      !/^[A-Z0-9][A-Z0-9.^_-]{0,31}$/.test(symbol) ||
+      !/^[A-Z]{3}$/.test(instrumentCurrency) ||
+      !isStockChartCategory(category)
+    ) {
+      return c.json({ error: "ValidationError", message: "unknown category or identity" }, 422)
+    }
+    const row = await upsertStockCategory(database, identity.id, { symbol, instrumentCurrency, category })
+    return c.json(toCategoryDto(row) satisfies StockChartCategoryAssignment)
+  })
+
   return routes
+}
+
+function toCategoryDto(row: StockCategoryAssignment): StockChartCategoryAssignment {
+  return {
+    symbol: row.symbol,
+    instrumentCurrency: row.instrumentCurrency,
+    name: row.name ?? null,
+    category: row.category,
+    updatedAt: row.updatedAt.toISOString(),
+  }
 }

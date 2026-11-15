@@ -899,3 +899,49 @@ export const chartEventFacts = portfoliosSchema.table(
     index("idx_chart_event_facts_generation").on(t.generation, t.portfolioId),
   ],
 )
+
+/**
+ * Fixed dividend-style stock categories for the Charting stock-category chart
+ * (feature #253, sub-issue #258). One user-owned assignment per (owner, STOCK
+ * symbol, instrument currency) across all lots and accounts, so the same equity
+ * held in two accounts shares one edit. Options and other asset types are
+ * excluded from the assignment surface, so a same-ticker option contract is
+ * never classified as the equity. Absence of a row means `not_classified`; there
+ * is no automatic yield/growth classifier. Assignments are retained when the
+ * stock is temporarily unheld.
+ */
+export const STOCK_CHART_CATEGORIES = [
+  "balanced",
+  "high_yield",
+  "high_growth",
+  "very_high_growth",
+  "not_classified",
+] as const
+
+export const stockChartCategories = portfoliosSchema.table(
+  "stock_chart_categories",
+  {
+    /** Assignment primary key. */
+    id: uuid("id").primaryKey().default(sql`gen_random_uuid()`),
+    /** Owner of the assignment; the authorization boundary and the unique scope. */
+    userId: text("user_id").notNull(),
+    /** Equity ticker symbol, e.g. AAPL. A same-ticker option is a different asset type and never collides here. */
+    symbol: text("symbol").notNull(),
+    /** Instrument quote currency (ISO 4217); part of the equity identity. */
+    instrumentCurrency: char("instrument_currency", { length: 3 }).notNull(),
+    /** Fixed category code, constrained by chk_stock_chart_categories_category. */
+    category: text("category").notNull(),
+    /** When the assignment was created. */
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    /** When the assignment was last edited. */
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex("uq_stock_chart_categories_owner_stock").on(t.userId, t.symbol, t.instrumentCurrency),
+    index("idx_stock_chart_categories_user").on(t.userId),
+    check(
+      "chk_stock_chart_categories_category",
+      sql`${t.category} in ('balanced','high_yield','high_growth','very_high_growth','not_classified')`,
+    ),
+  ],
+)

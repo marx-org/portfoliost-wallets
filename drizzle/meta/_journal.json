@@ -267,6 +267,20 @@
       "when": 1794746426400,
       "tag": "0037_doc_wallets_charting",
       "breakpoints": true
+    },
+    {
+      "idx": 38,
+      "version": "7",
+      "when": 1794760329895,
+      "tag": "0038_sparkling_firebird",
+      "breakpoints": true
+    },
+    {
+      "idx": 39,
+      "version": "7",
+      "when": 1794760340313,
+      "tag": "0039_doc_wallets_stock_categories",
+      "breakpoints": true
     }
   ]
 }
