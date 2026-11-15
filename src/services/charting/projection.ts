@@ -135,12 +135,16 @@ export async function buildChartFacts(
       exchangeRate: portfolioCashTransactions.exchangeRate,
       linkedTradeId: portfolioCashTransactions.linkedTradeId,
       transactionDate: portfolioCashTransactions.transactionDate,
+      createdAt: portfolioCashTransactions.createdAt,
     })
     .from(portfolioCashTransactions)
     .where(eq(portfolioCashTransactions.portfolioId, portfolioId))
 
   const tradeDates = txRows.map((t) => toDateStr(t.executedAt)).filter((d): d is string => !!d)
-  const cashDates = cashRows.map((c) => c.transactionDate).filter((d): d is string => !!d)
+  // Cash rows created via the API may carry a null transaction_date; fall back to
+  // the created_at date so a same-day deposit/withdrawal is still a dated event.
+  const cashDate = (c: { transactionDate: string | null; createdAt: Date }) => c.transactionDate ?? toDateStr(c.createdAt)
+  const cashDates = cashRows.map(cashDate).filter((d): d is string => !!d)
   const allDates = [...tradeDates, ...cashDates].sort()
   if (allDates.length === 0) {
     await db.delete(chartPositionDaily).where(and(eq(chartPositionDaily.portfolioId, portfolioId), eq(chartPositionDaily.generation, opts.generation)))
@@ -309,7 +313,8 @@ export async function buildChartFacts(
     })
   }
   for (const c of cashRows) {
-    if (!c.transactionDate || c.transactionDate < from || c.transactionDate > to) continue
+    const date = cashDate(c)
+    if (!date || date < from || date > to) continue
     const rate = num(c.exchangeRate) || 1
     const amountBase = num(c.amount) * rate
     let receiptKind: string | null = null
@@ -322,7 +327,7 @@ export async function buildChartFacts(
       generation: opts.generation,
       portfolioId,
       positionId: null,
-      eventDate: c.transactionDate,
+      eventDate: date,
       receiptKind,
       amountBase: round(amountBase).toFixed(8),
       amountOriginal: round(Math.abs(num(c.amount))).toFixed(8),

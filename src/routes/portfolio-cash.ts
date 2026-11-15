@@ -23,6 +23,7 @@ import {
 import { cashBalances, cashBalanceSeries, cashRowLegs, ledgerCurrency, ledgerMode, normalizeConversionLegs, toDateStr, tradeCashEffects } from "../services/cashLedger.js"
 import { fxTo } from "../services/instruments-fx.js"
 import { ISO_CURRENCY } from "../services/currency.js"
+import { markChartingDirty } from "../services/charting/invalidation.js"
 import {
   labelsForCashTransactions,
   labelFilterIds,
@@ -542,6 +543,10 @@ export function createPortfolioCashRoutes(db?: DB) {
         ...baseRow,
       })
       .returning()
+
+    // Charting facts read the cash ledger too, so a cash mutation invalidates
+    // the projection (rebuild runs in the refresh lifecycle, not on read).
+    void markChartingDirty(database, portfolio.id, inserted.transactionDate ?? null).catch(() => {})
 
     return c.json(serializeCash(inserted, { labels: [] }), 201)
   }
