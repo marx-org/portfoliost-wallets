@@ -2,7 +2,7 @@ import { describe, expect, it, beforeEach } from "vitest"
 import { createTestDb } from "../../db/test-db.js"
 import { chartEventFacts, portfolios } from "../../db/schema.js"
 import type { DB } from "../../db/index.js"
-import { aggregateIncome } from "./income.js"
+import { aggregateIncome, monthlyIncomeSeries, linearTrend } from "./income.js"
 
 let db: DB
 
@@ -78,5 +78,37 @@ describe("aggregateIncome", () => {
   it("returns empty buckets for an empty account set", async () => {
     const out = await aggregateIncome(db, [], 1)
     expect(out).toEqual({ monthly: [], quarterly: [], annual: [] })
+  })
+})
+describe("monthlyIncomeSeries", () => {
+  it("marks the current and future months partial", () => {
+    const agg = {
+      monthly: [
+        { period: "2026-01", dividends: 100, interest: 0, options: 0, total: 100 },
+        { period: "2026-12", dividends: 0, interest: 0, options: 0, total: 0 },
+      ],
+      quarterly: [],
+      annual: [],
+    }
+    const pts = monthlyIncomeSeries(agg, new Date("2026-06-15T00:00:00Z"))
+    expect(pts[0].partial).toBe(false)
+    expect(pts[1].partial).toBe(true)
+  })
+})
+
+describe("linearTrend", () => {
+  it("fits complete points and ignores partial", () => {
+    const t = linearTrend([
+      { period: "2026-01", value: 100 },
+      { period: "2026-02", value: 200 },
+      { period: "2026-03", value: 300, partial: true },
+    ])
+    expect(t).not.toBeNull()
+    expect(t!.slope).toBe(100)
+    expect(t!.intercept).toBe(100)
+  })
+
+  it("returns null with fewer than two complete points", () => {
+    expect(linearTrend([{ period: "2026-01", value: 100, partial: true }])).toBeNull()
   })
 })

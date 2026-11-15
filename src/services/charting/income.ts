@@ -122,3 +122,62 @@ export async function aggregateIncome(
 
   return { monthly: finalize(monthly), quarterly: finalize(quarterly), annual: finalize(annual) }
 }
+/**
+ * One month of received income with a partial flag (feature #253, sub-issue
+ * #257). A month is partial when it is the current (or a future) calendar month
+ * relative to `now`, so a trend and any current-month total are marked as such.
+ */
+export interface MonthlyIncomePoint {
+  period: string
+  dividends: number
+  interest: number
+  options: number
+  total: number
+  partial: boolean
+}
+
+export function monthlyIncomeSeries(agg: AggregatedIncome, now: Date = new Date()): MonthlyIncomePoint[] {
+  const currentMonth = `${now.getUTCFullYear()}-${String(now.getUTCMonth() + 1).padStart(2, "0")}`
+  return agg.monthly.map((b) => ({
+    period: b.period,
+    dividends: b.dividends,
+    interest: b.interest,
+    options: b.options,
+    total: b.total,
+    // Current and future months are incomplete.
+    partial: b.period >= currentMonth,
+  }))
+}
+
+export interface Trend {
+  slope: number
+  intercept: number
+}
+
+/**
+ * Least-squares linear trend over the COMPLETE (non-partial) points, used for
+ * the dividends+interest trend line. Returns null when there are fewer than two
+ * complete points (undefined, never a fabricated zero slope).
+ */
+export function linearTrend(points: { period: string; value: number; partial?: boolean }[]): Trend | null {
+  const pts = points.filter((p) => !p.partial)
+  if (pts.length < 2) return null
+  const n = pts.length
+  let sx = 0
+  let sy = 0
+  let sxx = 0
+  let sxy = 0
+  for (let i = 0; i < n; i++) {
+    const x = i
+    const y = pts[i].value
+    sx += x
+    sy += y
+    sxx += x * x
+    sxy += x * y
+  }
+  const denom = n * sxx - sx * sx
+  if (denom === 0) return null
+  const slope = (n * sxy - sx * sy) / denom
+  const intercept = (sy - slope * sx) / n
+  return { slope, intercept }
+}
