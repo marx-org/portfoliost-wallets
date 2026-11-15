@@ -253,6 +253,20 @@
       "when": 1794466897196,
       "tag": "0035_cash_tx_kinds",
       "breakpoints": true
+    },
+    {
+      "idx": 36,
+      "version": "7",
+      "when": 1794746426395,
+      "tag": "0036_wet_moonstone",
+      "breakpoints": true
+    },
+    {
+      "idx": 37,
+      "version": "7",
+      "when": 1794746426400,
+      "tag": "0037_doc_wallets_charting",
+      "breakpoints": true
     }
   ]
 }
