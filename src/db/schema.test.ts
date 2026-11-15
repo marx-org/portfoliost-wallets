@@ -607,3 +607,9 @@ describe("#124 — portfolio_cash_transaction_labels documentation", () => {
     await expectDocumented("portfolio_cash_transaction_labels", /label/i)
   })
 })
+
+describe("#253/#258 — stock_chart_categories documentation", () => {
+  it("documents the table and every one of its columns", async () => {
+    await expectDocumented("stock_chart_categories", /categor/i)
+  })
+})

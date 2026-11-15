@@ -75,3 +75,93 @@ describe("charting routes", () => {
     expect(body.annual).toEqual([])
   })
 })
+describe("stock category routes", () => {
+  const jsonHeaders = (h: Harness) => ({ ...h.headers, "Content-Type": "application/json" })
+
+  async function seedStock(h: Harness): Promise<string> {
+    const [pf] = await h.db
+      .insert(portfolios)
+      .values({ userId: h.user.id, name: "A", baseCurrency: "USD" })
+      .returning({ id: portfolios.id })
+    await insertPosition(h.db, { userId: h.user.id, symbol: "AAPL", assetType: "STOCK", instrumentCurrency: "USD", portfolioId: pf.id })
+    return pf.id
+  }
+
+  async function put(app: Hono, h: Harness, body: unknown) {
+    return app.request("/api/portfolios/charting/stock-categories", {
+      method: "PUT",
+      headers: jsonHeaders(h),
+      body: JSON.stringify(body),
+    })
+  }
+
+  async function list(app: Hono, h: Harness, query = "") {
+    const res = await app.request(`/api/portfolios/charting/stock-categories${query}`, { headers: h.headers })
+    return { res, rows: (await res.json()) as Array<{ symbol: string; instrumentCurrency: string; category: string }> }
+  }
+
+  it("creates, lists and retains an assignment across reloads", async () => {
+    const h = await makeHarness("user-1")
+    await seedStock(h)
+    const app = await boot(h)
+    const created = await put(app, h, { symbol: "aapl", instrumentCurrency: "usd", category: "high_growth" })
+    expect(created.status).toBe(200)
+    expect(((await created.json()) as { symbol: string; category: string })).toMatchObject({ symbol: "AAPL", category: "high_growth" })
+
+    const { res, rows } = await list(app, h)
+    expect(res.status).toBe(200)
+    expect(rows).toHaveLength(1)
+    expect(rows[0]).toMatchObject({ symbol: "AAPL", instrumentCurrency: "USD", category: "high_growth" })
+  })
+
+  it("rejects an unknown category and leaves the previous value intact", async () => {
+    const h = await makeHarness("user-1")
+    await seedStock(h)
+    const app = await boot(h)
+    expect((await put(app, h, { symbol: "AAPL", instrumentCurrency: "USD", category: "balanced" })).status).toBe(200)
+
+    const bad = await put(app, h, { symbol: "AAPL", instrumentCurrency: "USD", category: "growth" })
+    expect(bad.status).toBe(422)
+
+    const { rows } = await list(app, h)
+    expect(rows).toHaveLength(1)
+    expect(rows[0].category).toBe("balanced")
+  })
+
+  it("rejects a malformed identity", async () => {
+    const h = await makeHarness("user-1")
+    await seedStock(h)
+    const app = await boot(h)
+    expect((await put(app, h, { symbol: "AAPL", instrumentCurrency: "DOLLAR", category: "balanced" })).status).toBe(422)
+    expect((await put(app, h, { symbol: "", instrumentCurrency: "USD", category: "balanced" })).status).toBe(422)
+  })
+
+  it("isolates assignments between users", async () => {
+    const h1 = await makeHarness("user-1")
+    await seedStock(h1)
+    const app1 = await boot(h1)
+    expect((await put(app1, h1, { symbol: "AAPL", instrumentCurrency: "USD", category: "high_yield" })).status).toBe(200)
+
+    const h2 = await makeHarness("user-2")
+    const app2 = await boot(h2)
+    const { rows } = await list(app2, h2)
+    expect(rows).toEqual([])
+  })
+
+  it("narrows the assignment list to the scoped account", async () => {
+    const h = await makeHarness("user-1")
+    const other = await h.db
+      .insert(portfolios)
+      .values({ userId: h.user.id, name: "B", baseCurrency: "USD" })
+      .returning({ id: portfolios.id })
+    const a = await seedStock(h)
+    const app = await boot(h)
+    await put(app, h, { symbol: "AAPL", instrumentCurrency: "USD", category: "balanced" })
+    // A label/account that holds nothing narrows the list to empty, not All.
+    const { rows } = await list(app, h, `?accounts=${other[0].id}`)
+    expect(rows).toEqual([])
+    const all = await list(app, h)
+    expect(all.rows).toHaveLength(1)
+    expect(a).toBeTruthy()
+  })
+})
