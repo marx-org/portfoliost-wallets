@@ -25,6 +25,7 @@
 import type { DB } from "../db/index.js"
 import { recalcPortfolioSeries } from "./backfill.js"
 import { abortActiveBackfill, enqueueBackfill, __resetBackfillRunnerForTests } from "./backfill-runner.js"
+import { markChartingDirty } from "./charting/invalidation.js"
 
 export const MAX_GRACE_MS = 60_000
 
@@ -62,6 +63,11 @@ export function notifyTransactionsChanged(db: DB, portfolioId: string, authToken
   }
   job.token = authToken
   abortActiveBackfill(portfolioId)
+  // Charting facts are stale too — mark the projection dirty so a reader can
+  // see a rebuild is pending (the rebuild itself runs in the refresh/recompute
+  // lifecycle, never on a chart read). Fire-and-forget: a charting bookkeeping
+  // failure must never break the snapshot recalc.
+  void markChartingDirty(db, portfolioId).catch(() => {})
   if (job.timer) clearTimeout(job.timer)
   job.timer = setTimeout(() => {
     job.timer = null
