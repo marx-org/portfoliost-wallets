@@ -1,6 +1,6 @@
-import { and, eq, gte, inArray, lte } from "drizzle-orm"
+import { and, eq, gte, inArray, lt, lte } from "drizzle-orm"
 import type { DB } from "../../db/index.js"
-import { chartEventFacts } from "../../db/schema.js"
+import { chartEventFacts, positionLabels } from "../../db/schema.js"
 
 /**
  * Income aggregation (feature #253). One canonical input — the normalized
@@ -83,6 +83,7 @@ export async function aggregateIncome(
   generation: number,
   from?: string | null,
   to?: string | null,
+  labelIds: string[] = [],
 ): Promise<AggregatedIncome> {
   if (accountIds.length === 0) return { monthly: [], quarterly: [], annual: [] }
 
@@ -92,6 +93,15 @@ export async function aggregateIncome(
   ]
   if (from) conds.push(gte(chartEventFacts.eventDate, from))
   if (to) conds.push(lte(chartEventFacts.eventDate, to))
+  if (labelIds.length) {
+    // A subquery, not a join: an event whose position carries two selected
+    // labels must be counted ONCE (overlapping labels intersect, not add).
+    const labelled = db
+      .select({ id: positionLabels.positionId })
+      .from(positionLabels)
+      .where(inArray(positionLabels.labelId, labelIds))
+    conds.push(inArray(chartEventFacts.positionId, labelled))
+  }
 
   const rows = await db
     .select({
@@ -199,4 +209,84 @@ export function linearTrend(points: { period: string; value: number; partial?: b
   const slope = (n * sxy - sx * sy) / denom
   const intercept = (sy - slope * sx) / n
   return { slope, intercept }
+}
+
+/**
+ * One point of the cumulative dividends+interest curve (feature #253, sub-issue
+ * #259). `dividends` and `interest` are CUMULATIVE from the start of time;
+ * `total = openingBalance + dividends + interest`. Options are excluded from
+ * this curve (they remain in the valuation and the monthly options series).
+ * `openingBalance` is the lifetime cumulative at the first visible point, so a
+ * narrow date window still shows the true cumulative, not the in-window sum.
+ */
+export interface CumulativeIncomePoint {
+  /** First day of the month this cumulative point closes. */
+  date: string
+  dividends: number
+  interest: number
+  options: number
+  total: number
+  openingBalance: number
+}
+
+/** Dividends + interest received strictly before `before` (the window opening). */
+async function incomeBefore(
+  db: DB,
+  accountIds: string[],
+  generation: number,
+  before: string,
+  labelIds: string[],
+): Promise<number> {
+  if (accountIds.length === 0) return 0
+  const conds = [
+    eq(chartEventFacts.generation, generation),
+    inArray(chartEventFacts.portfolioId, accountIds),
+    lt(chartEventFacts.eventDate, before),
+  ]
+  if (labelIds.length) {
+    const labelled = db
+      .select({ id: positionLabels.positionId })
+      .from(positionLabels)
+      .where(inArray(positionLabels.labelId, labelIds))
+    conds.push(inArray(chartEventFacts.positionId, labelled))
+  }
+  const rows = await db
+    .select({ kind: chartEventFacts.receiptKind, amount: chartEventFacts.amountBase })
+    .from(chartEventFacts)
+    .where(and(...conds))
+  let sum = 0
+  for (const r of rows) {
+    const comp = INCOME_COMPONENT[r.kind]
+    if (comp && comp !== "options") sum += Number(r.amount)
+  }
+  return round(sum)
+}
+
+/**
+ * Cumulative dividends+interest over `monthly` (the in-window buckets), opening
+ * with the lifetime pre-window total. A zero-receipt month is flat by
+ * construction, because the running sum only moves when a bucket does.
+ */
+export async function cumulativeIncomeSeries(
+  db: DB,
+  accountIds: string[],
+  generation: number,
+  monthly: IncomeBucket[],
+  opts?: { from?: string | null; labelIds?: string[] },
+): Promise<CumulativeIncomePoint[]> {
+  const opening = opts?.from ? await incomeBefore(db, accountIds, generation, opts.from, opts.labelIds ?? []) : 0
+  let dividends = 0
+  let interest = 0
+  return monthly.map((b) => {
+    dividends += b.dividends
+    interest += b.interest
+    return {
+      date: `${b.period}-01`,
+      dividends: round(dividends),
+      interest: round(interest),
+      options: 0,
+      total: round(opening + dividends + interest),
+      openingBalance: round(opening),
+    }
+  })
 }

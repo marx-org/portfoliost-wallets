@@ -11,7 +11,7 @@ import {
 } from "../db/schema.js"
 import { resolveChartScope, type ChartScopeInput, type ResolvedChartScope } from "../services/charting/scope.js"
 import { getScopedDailySeries } from "../services/charting/queries.js"
-import { aggregateIncome, monthlyIncomeSeries } from "../services/charting/income.js"
+import { aggregateIncome, cumulativeIncomeSeries, monthlyIncomeSeries } from "../services/charting/income.js"
 import {
   isStockChartCategory,
   listHoldableStocks,
@@ -108,13 +108,18 @@ export function createChartingRoutes(db?: DB) {
     const scope = await resolveChartScope(database, identity.id, input)
     const accountIds = await effectiveAccountIds(database, identity.id, scope)
     const { generation, complete } = await scopeGeneration(database, accountIds)
-    const agg = await aggregateIncome(database, accountIds, generation, scope.from, scope.to)
+    const agg = await aggregateIncome(database, accountIds, generation, scope.from, scope.to, scope.labelIds)
+    const monthly = monthlyIncomeSeries(agg)
+    const cumulative = await cumulativeIncomeSeries(database, accountIds, generation, monthly, {
+      from: scope.from,
+      labelIds: scope.labelIds,
+    })
     const body: ChartIncomeData = {
       currency: scope.currency,
       scope: toScopeDto(scope),
       coverage: coverage(generation, complete, accountIds.length === 0 ? "empty" : complete ? "complete" : "partial"),
-      monthly: monthlyIncomeSeries(agg),
-      cumulative: [],
+      monthly,
+      cumulative,
       annual: agg.annual.map((b) => ({
         year: Number(b.period),
         dividends: b.dividends,

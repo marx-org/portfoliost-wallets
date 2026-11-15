@@ -1,8 +1,8 @@
 import { describe, expect, it, beforeEach } from "vitest"
 import { createTestDb } from "../../db/test-db.js"
-import { chartEventFacts, portfolios } from "../../db/schema.js"
+import { chartEventFacts, labels, portfolios, positionLabels, positions } from "../../db/schema.js"
 import type { DB } from "../../db/index.js"
-import { aggregateIncome, monthlyIncomeSeries, linearTrend } from "./income.js"
+import { aggregateIncome, cumulativeIncomeSeries, monthlyIncomeSeries, linearTrend } from "./income.js"
 
 let db: DB
 
@@ -135,5 +135,83 @@ describe("linearTrend", () => {
 
   it("returns null with fewer than two complete points", () => {
     expect(linearTrend([{ period: "2026-01", value: 100, partial: true }])).toBeNull()
+  })
+})
+
+describe("cumulativeIncomeSeries", () => {
+  it("opens with the lifetime pre-window total and stays flat on a zero month", async () => {
+    const a = await addPortfolio("user-1", "A")
+    await addEvent(a, "2025-12-10", "dividend", "100") // before the window
+    await addEvent(a, "2026-01-10", "dividend", "20")
+    await addEvent(a, "2026-03-10", "dividend", "5")
+    const agg = await aggregateIncome(db, [a], 1, "2026-01-01", "2026-03-31")
+    const monthly = monthlyIncomeSeries(agg)
+    const cum = await cumulativeIncomeSeries(db, [a], 1, monthly, { from: "2026-01-01" })
+
+    expect(cum.map((p) => p.date)).toEqual(["2026-01-01", "2026-02-01", "2026-03-01"])
+    // 100 before the window + 20 in January, not just the in-window 20.
+    expect(cum[0]).toMatchObject({ dividends: 20, interest: 0, total: 120, openingBalance: 100 })
+    // February has no receipts: the curve is flat at 120.
+    expect(cum[1]).toMatchObject({ total: 120, openingBalance: 100 })
+    expect(cum[2]).toMatchObject({ total: 125, openingBalance: 100 })
+  })
+
+  it("excludes options from the curve", async () => {
+    const a = await addPortfolio("user-1", "A")
+    await addEvent(a, "2026-01-10", "dividend", "20")
+    await addEvent(a, "2026-01-11", "option", "999")
+    const agg = await aggregateIncome(db, [a], 1)
+    const cum = await cumulativeIncomeSeries(db, [a], 1, monthlyIncomeSeries(agg))
+    expect(cum[0]).toMatchObject({ dividends: 20, options: 0, total: 20 })
+  })
+
+  it("matches the canonical in-window income sum plus the opening", async () => {
+    const a = await addPortfolio("user-1", "A")
+    await addEvent(a, "2025-06-10", "dividend", "100")
+    await addEvent(a, "2026-01-10", "dividend", "20")
+    await addEvent(a, "2026-01-11", "interest", "5")
+    const agg = await aggregateIncome(db, [a], 1, "2026-01-01", "2026-12-31")
+    const cum = await cumulativeIncomeSeries(db, [a], 1, monthlyIncomeSeries(agg), { from: "2026-01-01" })
+    const final = cum[cum.length - 1]
+    expect(final.total).toBe(125) // 100 opening + 20 dividend + 5 interest
+  })
+})
+
+describe("aggregateIncome label scope", () => {
+  async function seedLabelled() {
+    const a = await addPortfolio("user-1", "A")
+    const [p] = await db.insert(positions).values({ userId: "user-1", symbol: "AAPL" }).returning({ id: positions.id })
+    const [l1] = await db.insert(labels).values({ userId: "user-1", name: "L1", color: "#111111" }).returning({ id: labels.id })
+    const [l2] = await db.insert(labels).values({ userId: "user-1", name: "L2", color: "#222222" }).returning({ id: labels.id })
+    await db.insert(positionLabels).values([
+      { positionId: p.id, labelId: l1.id },
+      { positionId: p.id, labelId: l2.id },
+    ])
+    await db.insert(chartEventFacts).values({
+      generation: 1,
+      portfolioId: a,
+      positionId: p.id,
+      eventDate: "2026-01-10",
+      receiptKind: "dividend",
+      amountBase: "100",
+      amountOriginal: "100",
+      originalCurrency: "USD",
+    })
+    return { a, l1, l2 }
+  }
+
+  it("counts an event once when a position carries two selected labels", async () => {
+    const { a, l1, l2 } = await seedLabelled()
+    const one = await aggregateIncome(db, [a], 1, undefined, undefined, [l1.id])
+    expect(one.annual[0].dividends).toBe(100)
+    const both = await aggregateIncome(db, [a], 1, undefined, undefined, [l1.id, l2.id])
+    expect(both.annual[0].dividends).toBe(100) // overlap intersects, never doubles
+  })
+
+  it("returns nothing for a label that matches no position", async () => {
+    const { a } = await seedLabelled()
+    const [other] = await db.insert(labels).values({ userId: "user-1", name: "L3", color: "#333333" }).returning({ id: labels.id })
+    const out = await aggregateIncome(db, [a], 1, undefined, undefined, [other.id])
+    expect(out.annual).toEqual([])
   })
 })

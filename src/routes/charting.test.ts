@@ -165,3 +165,19 @@ describe("stock category routes", () => {
     expect(a).toBeTruthy()
   })
 })
+
+describe("cumulative income route", () => {
+  it("serves a cumulative dividends+interest series with an opening balance", async () => {
+    const h = await makeHarness("user-1")
+    await seed(h)
+    const app = await boot(h)
+    const res = await app.request("/api/portfolios/charting/income", { headers: h.headers })
+    expect(res.status).toBe(200)
+    const body = (await res.json()) as {
+      cumulative: Array<{ date: string; total: number; openingBalance: number }>
+    }
+    expect(body.cumulative.length).toBeGreaterThan(0)
+    expect(body.cumulative[0].openingBalance).toBe(0)
+    expect(typeof body.cumulative[body.cumulative.length - 1].total).toBe("number")
+  })
+})
