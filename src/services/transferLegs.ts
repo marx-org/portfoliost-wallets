@@ -275,6 +275,14 @@ export async function buildTransferLegs(tx: DB, input: TransferLegInput) {
       country: country ?? null,
     })
     targetPositionId = targetPos.id
+    // The receiving lot must be linked to its position, or the FIFO queue that
+    // reads a position's history cannot see it. This is the link the transfer
+    // feature was missing: the rows carried the source lot's price, but no sale
+    // path could find them.
+    await tx
+      .update(portfolioTransactions)
+      .set({ positionId: targetPositionId })
+      .where(eq(portfolioTransactions.id, inRow.id))
   }
 
   if (positionLabelIds.length > 0 && sourcePositionId) {

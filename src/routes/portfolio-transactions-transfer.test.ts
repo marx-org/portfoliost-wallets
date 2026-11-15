@@ -5,7 +5,8 @@ import { createPortfolioRoutes } from "./portfolios.js"
 import { createTransactionRoutes } from "./portfolio-transactions.js"
 import { makeHarness, type Harness } from "./test-utils.js"
 import { mockInstrumentsFx, unmockInstrumentsFx } from "../test-fx-mock.js"
-import { portfolios, portfolioTransactions, portfolioCashTransactions } from "../db/schema.js"
+import { portfolios, portfolioTransactions, portfolioCashTransactions, positions } from "../db/schema.js"
+import { positionInPortfolio } from "../db/position-membership.js"
 import { __resetBackfillRunnerForTests } from "../services/backfill-runner.js"
 
 /**
@@ -243,5 +244,89 @@ describe("POST /:id/transfers (§74)", () => {
       expect(leg, `${expected} visible in ${portfolioId}`).toBeTruthy()
       expect(leg!.notes).toBe("moved to IBKR")
     }
+  })
+
+  it("sells delivered lots FIFO even when the transfer rows predate the position link", { timeout: 30_000 }, async () => {
+    const h = await boot()
+    const from = await createPortfolio(h.app, h.headers, "Equate+")
+    const to = await createPortfolio(h.app, h.headers, "IBKR")
+    await buy(h, from.id, 4, 10, "2026-01-01T12:00:00Z")
+    await buy(h, from.id, 1, 12, "2026-02-01T12:00:00Z")
+
+    await transfer(h, from.id, to.id, {
+      symbol: "AAPL",
+      quantity: 5,
+      toPortfolioId: to.id,
+      executedAt: "2026-06-01T12:00:00Z",
+    })
+
+    // Rows written before the link existed: the fallback must still find them
+    // by portfolio + symbol, or every sale after the 2026-11-13 re-import would
+    // see only the position row's weighted average.
+    await h.db
+      .update(portfolioTransactions)
+      .set({ positionId: null })
+      .where(and(eq(portfolioTransactions.portfolioId, to.id), eq(portfolioTransactions.type, "TRANSFER_IN")))
+
+    const sold = await h.app.request(`/api/portfolios/${to.id}/transactions`, {
+      method: "POST",
+      headers: h.headers,
+      body: JSON.stringify({
+        type: "SELL",
+        symbol: "AAPL",
+        instrumentName: "Apple Inc",
+        quantity: 5,
+        price: 15,
+        currency: "USD",
+        assetType: "STOCK",
+        executedAt: "2026-07-01T12:00:00Z",
+      }),
+    })
+    expect(sold.status).toBe(201)
+    expect(((await sold.json()) as { realizedGainLoss: number }).realizedGainLoss).toBe(23)
+  })
+
+  it("sells the delivered lots FIFO in the receiving portfolio", { timeout: 30_000 }, async () => {
+    const h = await boot()
+    const from = await createPortfolio(h.app, h.headers, "Equate+")
+    const to = await createPortfolio(h.app, h.headers, "IBKR")
+    await buy(h, from.id, 4, 10, "2026-01-01T12:00:00Z")
+    await buy(h, from.id, 1, 12, "2026-02-01T12:00:00Z")
+
+    const moved = await transfer(h, from.id, to.id, {
+      symbol: "AAPL",
+      quantity: 5,
+      toPortfolioId: to.id,
+      executedAt: "2026-06-01T12:00:00Z",
+    })
+    expect(moved.status).toBe(201)
+
+    const sold = await h.app.request(`/api/portfolios/${to.id}/transactions`, {
+      method: "POST",
+      headers: h.headers,
+      body: JSON.stringify({
+        type: "SELL",
+        symbol: "AAPL",
+        instrumentName: "Apple Inc",
+        quantity: 5,
+        price: 15,
+        currency: "USD",
+        assetType: "STOCK",
+        executedAt: "2026-07-01T12:00:00Z",
+      }),
+    })
+    expect(sold.status).toBe(201)
+    const soldBody = (await sold.json()) as { realizedGainLoss: number }
+
+    // The transfer delivered 4 @ 10.00 and 1 @ 12.00. FIFO books
+    // 4 × (15 − 10) + 1 × (15 − 12) = 23, not (15 − 10.80) × 5 = 21.
+    expect(soldBody.realizedGainLoss).toBe(23)
+
+    const [pos] = await h.db
+      .select()
+      .from(positions)
+      .where(and(positionInPortfolio(to.id), eq(positions.symbol, "AAPL")))
+    expect(Number(pos.quantity)).toBe(0)
+    expect(pos.isOpen).toBe(false)
   })
 })

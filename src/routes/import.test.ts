@@ -474,8 +474,8 @@ describe("POST /api/import/transactions (§23.4)", () => {
     expect(Number(buy.feesSettled)).toBe(19)
     expect(Number(buy.convertedFees)).toBe(19)
     expect(Number(sell.convertedFees)).toBe(19)
-    expect(Number(sell.realizedGainLoss)).toBe(288.04)
-    expect(Number(sell.convertedRealizedGainLoss)).toBeCloseTo(1381.87, 2)
+    expect(Number(sell.realizedGainLoss)).toBe(288.12)
+    expect(Number(sell.convertedRealizedGainLoss)).toBeCloseTo(1382.26, 2)
 
     const [position] = await h.db
       .select()
@@ -593,6 +593,48 @@ describe("POST /api/import/transactions (§23.4)", () => {
 
     const [portfolio] = await h.db.select().from(portfolios).where(eq(portfolios.id, portfolioId))
     expect(Number(portfolio.totalInvested)).toBe(1000) // = the 1000 deposit (net external flow)
+  })
+
+  it("books a multi-lot sale FIFO, not against the moving average", async () => {
+    const h = await boot()
+    const { portfolioId } = await seedPortfolio(h)
+
+    const res = await postTransactions(h, [
+      {
+        externalId: "fifo-buy-1",
+        portfolioName: "Transakcje",
+        executedAt: "2024-01-01T10:00:00.000Z",
+        portfolioTx: { portfolioId, type: "BUY", instrumentSymbol: "AAPL", quantity: 4, price: 10, currency: "USD" },
+      },
+      {
+        externalId: "fifo-buy-2",
+        portfolioName: "Transakcje",
+        executedAt: "2024-01-02T10:00:00.000Z",
+        portfolioTx: { portfolioId, type: "BUY", instrumentSymbol: "AAPL", quantity: 2, price: 12, currency: "USD" },
+      },
+      {
+        externalId: "fifo-sell-1",
+        portfolioName: "Transakcje",
+        executedAt: "2024-02-01T10:00:00.000Z",
+        portfolioTx: { portfolioId, type: "SELL", instrumentSymbol: "AAPL", quantity: 5, price: 15, currency: "USD" },
+      },
+    ])
+    expect(res.status).toBe(200)
+    expect((await res.json()).errors).toEqual([])
+
+    const [pos] = await h.db.select().from(positions).where(positionInPortfolio(portfolioId))
+    expect(Number(pos.quantity)).toBe(1)
+    // FIFO leaves the 12.00 lot: (4 × 10 + 1 × 12) / 6 = 10.666..., drawn
+    // against 5 units leaves the 1.00 remainder of the 12.00 lot.
+    expect(Number(pos.averageCostBasis)).toBe(12)
+
+    const [sell] = await h.db
+      .select()
+      .from(portfolioTransactions)
+      .where(and(eq(portfolioTransactions.type, "SELL"), eq(portfolioTransactions.portfolioId, portfolioId)))
+    // 4 × (15 − 10) + 1 × (15 − 12) = 23. The moving average would book
+    // (15 − 10.80) × 5 = 21 and leave the same total cost attributed wrongly.
+    expect(Number(sell.realizedGainLoss)).toBe(23)
   })
 
   it("reuses one stock Position across imported close/rebuy lifecycles", async () => {
