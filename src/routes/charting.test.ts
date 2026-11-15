@@ -198,3 +198,20 @@ describe("annual income route", () => {
     }
   })
 })
+
+describe("annual income equivalent route", () => {
+  it("serves daily and monthly equivalents with 365/12 divisors", async () => {
+    const h = await makeHarness("user-1")
+    await seed(h)
+    const app = await boot(h)
+    const res = await app.request("/api/portfolios/charting/income", { headers: h.headers })
+    expect(res.status).toBe(200)
+    const body = (await res.json()) as {
+      dailyAverageByYear: Array<{ divisor: number; basis: string; amount: number; partial: boolean }>
+      monthlyAverageByYear: Array<{ divisor: number; basis: string; amount: number }>
+    }
+    expect(body.dailyAverageByYear.length).toBeGreaterThan(0)
+    expect(body.dailyAverageByYear[0]).toMatchObject({ divisor: 365, basis: "days" })
+    expect(body.monthlyAverageByYear[0]).toMatchObject({ divisor: 12, basis: "months" })
+  })
+})

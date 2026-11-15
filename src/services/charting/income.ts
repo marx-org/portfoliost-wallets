@@ -340,3 +340,35 @@ export function annualIncomeSeries(annual: IncomeBucket[], now: Date = new Date(
   }
   return out
 }
+
+/** Day- or month-equivalent annual income (feature #253, sub-issues #261/#262). */
+export type IncomeAverageUnit = "day" | "month"
+
+export interface AnnualIncomeEquivalentPoint {
+  year: number
+  basis: "days" | "months"
+  divisor: number
+  amount: number
+  partial: boolean
+}
+
+/**
+ * Annual-equivalent received income: the year's total divided by 365 (daily) or
+ * 12 (monthly). This is an annualised average, NOT a projection of future
+ * receipts and NOT a division by elapsed days/months. The current year is marked
+ * `partial`, so its value is read as year-to-date rather than a forecast.
+ */
+export function annualIncomeEquivalent(
+  points: AnnualIncomePoint[],
+  unit: IncomeAverageUnit,
+): AnnualIncomeEquivalentPoint[] {
+  const divisor = unit === "day" ? 365 : 12
+  const basis = unit === "day" ? "days" : "months"
+  return points.map((p) => ({
+    year: p.year,
+    basis,
+    divisor,
+    amount: round(p.total / divisor),
+    partial: p.partial,
+  }))
+}

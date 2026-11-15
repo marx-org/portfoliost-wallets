@@ -2,7 +2,7 @@ import { describe, expect, it, beforeEach } from "vitest"
 import { createTestDb } from "../../db/test-db.js"
 import { chartEventFacts, labels, portfolios, positionLabels, positions } from "../../db/schema.js"
 import type { DB } from "../../db/index.js"
-import { aggregateIncome, annualIncomeSeries, cumulativeIncomeSeries, monthlyIncomeSeries, linearTrend } from "./income.js"
+import { aggregateIncome, annualIncomeEquivalent, annualIncomeSeries, cumulativeIncomeSeries, monthlyIncomeSeries, linearTrend } from "./income.js"
 
 let db: DB
 
@@ -263,3 +263,49 @@ describe("annualIncomeSeries", () => {
     expect(total).toBe(125)
   })
 })
+
+describe("annualIncomeEquivalent", () => {
+  const year = (y: number, total: number, partial = false): import("./income.js").AnnualIncomePoint => ({
+    year: y,
+    dividends: total,
+    interest: 0,
+    options: 0,
+    total,
+    priorYearTotal: null,
+    yoyChangePercent: null,
+    partial,
+  })
+
+  it("divides the annual total by 365 for the daily equivalent", () => {
+    const out = annualIncomeEquivalent([year(2025, 365), year(2026, 730)], "day")
+    expect(out.map((p) => p.amount)).toEqual([1, 2])
+    expect(out[0]).toMatchObject({ basis: "days", divisor: 365 })
+  })
+
+  it("divides the annual total by 12 for the monthly equivalent", () => {
+    const out = annualIncomeEquivalent([year(2025, 1200)], "month")
+    expect(out[0]).toMatchObject({ amount: 100, basis: "months", divisor: 12 })
+  })
+
+  it("keeps 365 across a leap year and does not divide by elapsed days", () => {
+    const out = annualIncomeEquivalent([year(2024, 366)], "day")
+    expect(out[0]).toMatchObject({ divisor: 365, amount: roundish(366 / 365) })
+  })
+
+  it("marks the current partial year and still divides by the full-year divisor", () => {
+    const out = annualIncomeEquivalent([year(2026, 600, true)], "month")
+    expect(out[0]).toMatchObject({ amount: 50, partial: true, divisor: 12 })
+  })
+
+  it("matches the annual chart's totals", () => {
+    const points = annualIncomeSeries([
+      { period: "2026", dividends: 1200, interest: 0, options: 0, total: 1200 },
+    ])
+    const daily = annualIncomeEquivalent(points, "day")
+    expect(daily[0].amount).toBe(roundish(points[0].total / 365))
+  })
+})
+
+function roundish(n: number): number {
+  return Math.round(n * 1e8) / 1e8
+}

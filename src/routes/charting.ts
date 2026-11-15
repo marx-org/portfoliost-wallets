@@ -13,6 +13,7 @@ import { resolveChartScope, type ChartScopeInput, type ResolvedChartScope } from
 import { getScopedDailySeries } from "../services/charting/queries.js"
 import {
   aggregateIncome,
+  annualIncomeEquivalent,
   annualIncomeSeries,
   cumulativeIncomeSeries,
   monthlyIncomeSeries,
@@ -119,13 +120,14 @@ export function createChartingRoutes(db?: DB) {
       from: scope.from,
       labelIds: scope.labelIds,
     })
+    const annual = annualIncomeSeries(agg.annual)
     const body: ChartIncomeData = {
       currency: scope.currency,
       scope: toScopeDto(scope),
       coverage: coverage(generation, complete, accountIds.length === 0 ? "empty" : complete ? "complete" : "partial"),
       monthly,
       cumulative,
-      annual: annualIncomeSeries(agg.annual).map(({ partial: _partial, ...rest }) => rest),
+      annual: annual.map(({ partial: _partial, ...rest }) => rest),
       quarterly: agg.quarterly.map((b) => ({
         quarter: b.period,
         dividends: b.dividends,
@@ -135,8 +137,8 @@ export function createChartingRoutes(db?: DB) {
         priorYearQuarterTotal: null,
         yoyChangePercent: null,
       })),
-      dailyAverageByYear: [],
-      monthlyAverageByYear: [],
+      dailyAverageByYear: annualIncomeEquivalent(annual, "day"),
+      monthlyAverageByYear: annualIncomeEquivalent(annual, "month"),
       payerCoverage: [],
     }
     return c.json(body satisfies ChartIncomeData)
