@@ -90,6 +90,16 @@ describe("buildChartFacts", () => {
     expect(byKind.get("interest")).toBe(2)
   })
 
+  it("dates a cash event from created_at when transaction_date is null", async () => {
+    const pf = await addPortfolio("user-1", "A")
+    await addCash({ userId: "user-1", portfolioId: pf, type: "DEPOSIT", amount: "100", currency: "USD", exchangeRate: "1", transactionDate: null })
+    const fetcher = fakeFetcher({})
+    await buildChartFacts(db, pf, "token", { generation: 1, fetcher })
+    const events = await db.select().from(chartEventFacts).where(eq(chartEventFacts.generation, 1))
+    expect(events).toHaveLength(1)
+    expect(events[0].eventDate).toBe(new Date().toISOString().slice(0, 10))
+  })
+
   it("is idempotent: a re-run replaces the same generation", async () => {
     const pf = await addPortfolio("user-1", "A")
     await addCash({ userId: "user-1", portfolioId: pf, type: "DEPOSIT", amount: "1000", currency: "USD", exchangeRate: "1", transactionDate: "2026-01-01" })
