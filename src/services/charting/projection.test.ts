@@ -1,4 +1,5 @@
 import { describe, expect, it, beforeEach } from "vitest"
+import { randomUUID } from "node:crypto"
 import { eq } from "drizzle-orm"
 import { createTestDb } from "../../db/test-db.js"
 import {
@@ -28,7 +29,8 @@ async function addPosition(userId: string, portfolioId: string, symbol: string) 
 }
 
 async function addTx(row: typeof portfolioTransactions.$inferInsert) {
-  await db.insert(portfolioTransactions).values(row)
+  const [inserted] = await db.insert(portfolioTransactions).values(row).returning()
+  return inserted
 }
 
 async function addCash(row: typeof portfolioCashTransactions.$inferInsert) {
@@ -128,5 +130,110 @@ describe("buildChartFacts", () => {
     expect(facts).toHaveLength(2)
     expect(facts.every((f) => f.portfolioId === pf1)).toBe(true)
     expect(Number(facts[0].quantity)).toBe(10)
+  })
+
+  it("replays in-kind transfers as quantity moves and never as income", async () => {
+    const pf = await addPortfolio("user-1", "A")
+    const pos = await addPosition("user-1", pf, "AAPL")
+
+    const buy = await addTx({ userId: "user-1", portfolioId: pf, positionId: pos, type: "BUY", instrumentSymbol: "AAPL", assetType: "STOCK", quantity: "10", price: "100", currency: "USD", exchangeRate: "1", executedAt: new Date("2026-01-01T00:00:00Z") })
+    const transferGroupId = randomUUID()
+    const transferOut = await addTx({ userId: "user-1", portfolioId: pf, positionId: pos, type: "TRANSFER_OUT", instrumentSymbol: "AAPL", assetType: "STOCK", quantity: "3", price: "120", currency: "USD", exchangeRate: "1", sourceTransactionId: buy.id, transferGroupId, executedAt: new Date("2026-01-03T00:00:00Z") })
+    await addTx({ userId: "user-1", portfolioId: pf, positionId: pos, type: "TRANSFER_IN", instrumentSymbol: "AAPL", assetType: "STOCK", quantity: "5", price: "100", currency: "USD", exchangeRate: "1", linkedTransferId: transferOut.id, transferGroupId, executedAt: new Date("2026-01-02T00:00:00Z") })
+
+    const fetcher = fakeFetcher({ AAPL: { dates: ["2026-01-01", "2026-01-02", "2026-01-03"], closes: [100, 100, 100] } })
+    await buildChartFacts(db, pf, "token", { generation: 1, from: "2026-01-01", to: "2026-01-03", fetcher })
+
+    const facts = await db.select().from(chartPositionDaily).where(eq(chartPositionDaily.generation, 1))
+    const byDay = new Map(facts.map((f) => [f.day, f]))
+    expect(Number(byDay.get("2026-01-01")!.quantity)).toBe(10)
+    expect(Number(byDay.get("2026-01-02")!.quantity)).toBe(15)
+    expect(Number(byDay.get("2026-01-03")!.quantity)).toBe(12)
+    // Basis follows the transfer legs at their own prices: 1000 + 500 - 360.
+    expect(Number(byDay.get("2026-01-03")!.remainingBasis)).toBe(1140)
+
+    const events = await db.select().from(chartEventFacts).where(eq(chartEventFacts.generation, 1))
+    expect(events.filter((e) => e.receiptKind === "transfer")).toHaveLength(2)
+    // A transfer is not income and must never become a dividend/interest row.
+    expect(events.some((e) => e.receiptKind === "dividend" || e.receiptKind === "interest")).toBe(false)
+  })
+
+  it("uses the converted total for a trade with a third-currency fee and emits no fee event", async () => {
+    const pf = await addPortfolio("user-1", "A")
+    const pos = await addPosition("user-1", pf, "AAPL")
+
+    // Execution in EUR, instrument quoted in USD, fee settled in PLN: the fact's
+    // base-currency amount is the stored converted total, and the fee is not a
+    // separate chart event.
+    await addTx({
+      userId: "user-1", portfolioId: pf, positionId: pos, type: "BUY",
+      instrumentSymbol: "AAPL", assetType: "STOCK", quantity: "10", price: "100",
+      currency: "EUR", instrumentCurrency: "USD", exchangeRate: "1.1",
+      fees: "5", feeCurrency: "PLN", totalAmount: "1100", convertedTotalAmount: "1105",
+      executedAt: new Date("2026-01-01T00:00:00Z"),
+    })
+
+    await buildChartFacts(db, pf, "token", { generation: 1, from: "2026-01-01", to: "2026-01-02", fetcher: fakeFetcher({}) })
+
+    const events = await db.select().from(chartEventFacts).where(eq(chartEventFacts.generation, 1))
+    expect(events).toHaveLength(1)
+    expect(events[0].receiptKind).toBe("trade")
+    expect(Number(events[0].amountBase)).toBe(1105)
+
+    // The position basis is quantity x price x rate — the fee is not capital.
+    const [fact] = await db.select().from(chartPositionDaily).where(eq(chartPositionDaily.generation, 1))
+    expect(Number(fact.remainingBasis)).toBe(1100)
+  })
+
+  it("falls back to rate 1 when the FX rate is zero or missing", async () => {
+    const pf = await addPortfolio("user-1", "A")
+    const pos = await addPosition("user-1", pf, "AAPL")
+
+    await addTx({ userId: "user-1", portfolioId: pf, positionId: pos, type: "BUY", instrumentSymbol: "AAPL", assetType: "STOCK", quantity: "10", price: "100", currency: "USD", exchangeRate: "0", executedAt: new Date("2026-01-01T00:00:00Z") })
+    await addTx({ userId: "user-1", portfolioId: pf, positionId: pos, type: "BUY", instrumentSymbol: "AAPL", assetType: "STOCK", quantity: "5", price: "100", currency: "USD", exchangeRate: null, executedAt: new Date("2026-01-01T00:00:00Z") })
+    await addCash({ userId: "user-1", portfolioId: pf, type: "DEPOSIT", amount: "1000", currency: "USD", exchangeRate: null, transactionDate: "2026-01-01" })
+
+    await buildChartFacts(db, pf, "token", { generation: 1, from: "2026-01-01", to: "2026-01-01", fetcher: fakeFetcher({}) })
+
+    const [fact] = await db.select().from(chartPositionDaily).where(eq(chartPositionDaily.generation, 1))
+    expect(Number(fact.quantity)).toBe(15)
+    expect(Number(fact.remainingBasis)).toBe(1500)
+
+    const events = await db.select().from(chartEventFacts).where(eq(chartEventFacts.generation, 1))
+    const tradeTotal = events.filter((e) => e.receiptKind === "trade").reduce((s, e) => s + Number(e.amountBase), 0)
+    expect(tradeTotal).toBe(1500)
+    const contribution = events.filter((e) => e.receiptKind === "contribution").reduce((s, e) => s + Number(e.amountBase), 0)
+    expect(contribution).toBe(1000)
+  })
+
+  it("restates from transactions dated before the window and reflects a backdated edit or delete", async () => {
+    const pf = await addPortfolio("user-1", "A")
+    const pos = await addPosition("user-1", pf, "AAPL")
+
+    const january = await addTx({ userId: "user-1", portfolioId: pf, positionId: pos, type: "BUY", instrumentSymbol: "AAPL", assetType: "STOCK", quantity: "10", price: "100", currency: "USD", exchangeRate: "1", executedAt: new Date("2026-01-01T00:00:00Z") })
+    await addTx({ userId: "user-1", portfolioId: pf, positionId: pos, type: "BUY", instrumentSymbol: "AAPL", assetType: "STOCK", quantity: "5", price: "100", currency: "USD", exchangeRate: "1", executedAt: new Date("2026-02-01T00:00:00Z") })
+
+    const fetcher = fakeFetcher({ AAPL: { dates: ["2026-02-01", "2026-02-02"], closes: [100, 100] } })
+    await buildChartFacts(db, pf, "token", { generation: 1, from: "2026-02-01", to: "2026-02-02", fetcher })
+
+    const factsFor = async () => {
+      const rows = await db.select().from(chartPositionDaily).where(eq(chartPositionDaily.generation, 1))
+      return rows.filter((r) => r.day === "2026-02-01")
+    }
+    // The January buy is outside the window but still part of the open quantity:
+    // a window is a reporting slice, not a fresh start.
+    expect(Number((await factsFor())[0].quantity)).toBe(15)
+    const events = await db.select().from(chartEventFacts).where(eq(chartEventFacts.generation, 1))
+    expect(events.map((e) => e.eventDate)).toEqual(["2026-02-01"])
+
+    // A backdated edit restates the facts that include the edited day.
+    await db.update(portfolioTransactions).set({ quantity: "4" }).where(eq(portfolioTransactions.id, january.id))
+    await buildChartFacts(db, pf, "token", { generation: 1, from: "2026-02-01", to: "2026-02-02", fetcher })
+    expect(Number((await factsFor())[0].quantity)).toBe(9)
+
+    // So does deleting it: the projection replays the ledger on every build.
+    await db.delete(portfolioTransactions).where(eq(portfolioTransactions.id, january.id))
+    await buildChartFacts(db, pf, "token", { generation: 1, from: "2026-02-01", to: "2026-02-02", fetcher })
+    expect(Number((await factsFor())[0].quantity)).toBe(5)
   })
 })
