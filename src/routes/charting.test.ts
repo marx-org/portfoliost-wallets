@@ -1,9 +1,10 @@
 import { describe, expect, it, beforeEach } from "vitest"
 import { Hono } from "hono"
+import { eq } from "drizzle-orm"
 import { makeHarness, insertPosition } from "./test-utils.js"
 import { createChartingRoutes } from "./charting.js"
 import { buildChartFacts } from "../services/charting/projection.js"
-import { portfolioCashTransactions, portfolioTransactions, portfolios } from "../db/schema.js"
+import { chartProjectionState, portfolioCashTransactions, portfolioTransactions, portfolios } from "../db/schema.js"
 import type { PriceBarSeries } from "../services/backfill.js"
 import type { Harness } from "./test-utils.js"
 
@@ -14,13 +15,13 @@ function fakeFetcher(series: Record<string, { dates: string[]; closes: number[] 
   }
 }
 
-async function seed(h: Harness) {
-  const [pf] = await h.db.insert(portfolios).values({ userId: h.user.id, name: "A", baseCurrency: "USD" }).returning({ id: portfolios.id })
-  const pos = await insertPosition(h.db, { userId: h.user.id, symbol: "AAPL", portfolioId: pf.id })
-  await h.db.insert(portfolioTransactions).values({ userId: h.user.id, portfolioId: pf.id, positionId: pos.id, type: "BUY", instrumentSymbol: "AAPL", assetType: "STOCK", quantity: "10", price: "100", currency: "USD", exchangeRate: "1", executedAt: new Date("2026-01-01T00:00:00Z") })
-  await h.db.insert(portfolioTransactions).values({ userId: h.user.id, portfolioId: pf.id, positionId: pos.id, type: "DIVIDEND", instrumentSymbol: "AAPL", assetType: "STOCK", quantity: "10", price: "0.5", currency: "USD", exchangeRate: "1", executedAt: new Date("2026-01-02T00:00:00Z") })
+async function seed(h: Harness, name = "A", generation = 1, symbol = "AAPL", closes: number[] = [100, 110]) {
+  const [pf] = await h.db.insert(portfolios).values({ userId: h.user.id, name, baseCurrency: "USD" }).returning({ id: portfolios.id })
+  const pos = await insertPosition(h.db, { userId: h.user.id, symbol, portfolioId: pf.id })
+  await h.db.insert(portfolioTransactions).values({ userId: h.user.id, portfolioId: pf.id, positionId: pos.id, type: "BUY", instrumentSymbol: symbol, assetType: "STOCK", quantity: "10", price: "100", currency: "USD", exchangeRate: "1", executedAt: new Date("2026-01-01T00:00:00Z") })
+  await h.db.insert(portfolioTransactions).values({ userId: h.user.id, portfolioId: pf.id, positionId: pos.id, type: "DIVIDEND", instrumentSymbol: symbol, assetType: "STOCK", quantity: "10", price: "0.5", currency: "USD", exchangeRate: "1", executedAt: new Date("2026-01-02T00:00:00Z") })
   await h.db.insert(portfolioCashTransactions).values({ userId: h.user.id, portfolioId: pf.id, type: "DEPOSIT", amount: "1000", currency: "USD", exchangeRate: "1", transactionDate: "2026-01-01" })
-  await buildChartFacts(h.db, pf.id, "token", { generation: 1, from: "2026-01-01", to: "2026-01-02", fetcher: fakeFetcher({ AAPL: { dates: ["2026-01-01", "2026-01-02"], closes: [100, 110] } }) })
+  await buildChartFacts(h.db, pf.id, "token", { generation, from: "2026-01-01", to: "2026-01-02", fetcher: fakeFetcher({ [symbol]: { dates: ["2026-01-01", "2026-01-02"], closes } }) })
   return pf.id
 }
 
@@ -63,6 +64,87 @@ describe("charting routes", () => {
     const app = await boot(h)
     const res = await app.request("/api/portfolios/charting/income?accounts=not-a-uuid", { headers: h.headers })
     expect(res.status).toBe(422)
+  })
+
+  it("keeps the projected account's data when another scoped account has no projection", async () => {
+    const h = await makeHarness("user-1")
+    const projected = await seed(h, "Top10", 1)
+    await h.db.insert(portfolios).values({ userId: h.user.id, name: "Fresh", baseCurrency: "USD" })
+    const app = await boot(h)
+
+    const allRes = await app.request("/api/portfolios/charting/income", { headers: h.headers })
+    const all = (await allRes.json()) as {
+      coverage: { status: string; generation: number; stale: boolean; missing: Array<{ reason: string; detail?: string }> }
+      annual: unknown[]
+      monthly: unknown[]
+      dailyAverageByYear: unknown[]
+    }
+    expect(all.coverage.status).toBe("partial")
+    expect(all.coverage.generation).toBe(1)
+    expect(all.coverage.missing).toEqual([{ reason: "not_projected", detail: "Fresh" }])
+    // The unprojected account must not empty the scope: the All-scope dataset is
+    // exactly the dataset the projected account alone returns (#95).
+    const onlyRes = await app.request(`/api/portfolios/charting/income?accounts=${projected}`, { headers: h.headers })
+    const only = (await onlyRes.json()) as { annual: unknown[]; monthly: unknown[]; dailyAverageByYear: unknown[] }
+    expect(all.annual).toEqual(only.annual)
+    expect(all.monthly).toEqual(only.monthly)
+    expect(all.dailyAverageByYear).toEqual(only.dailyAverageByYear)
+
+    const perf = (await (await app.request("/api/portfolios/charting/performance", { headers: h.headers })).json()) as {
+      series: { date: string; value: number }[]
+      coverage: { status: string }
+    }
+    expect(perf.series).toHaveLength(2)
+    expect(perf.series[1].value).toBe(1100)
+    expect(perf.coverage.status).toBe("partial")
+
+    const alloc = (await (await app.request("/api/portfolios/charting/allocation", { headers: h.headers })).json()) as {
+      byAssetType: Array<{ key: string; value: number }>
+    }
+    expect(alloc.byAssetType).toHaveLength(1)
+    expect(alloc.byAssetType[0].value).toBe(1100)
+
+    const cash = (await (await app.request("/api/portfolios/charting/cash", { headers: h.headers })).json()) as {
+      annualContributions: Array<{ year: number; contributions: number }>
+    }
+    expect(cash.annualContributions).toEqual([{ year: 2026, contributions: 1000, withdrawals: 0, net: 1000, partial: false }])
+  })
+
+  it("sums accounts published at different generations", async () => {
+    const h = await makeHarness("user-1")
+    await seed(h, "A", 1)
+    await seed(h, "B", 2, "MSFT", [50, 60])
+    const app = await boot(h)
+
+    const body = (await (await app.request("/api/portfolios/charting/income", { headers: h.headers })).json()) as {
+      coverage: { status: string; generation: number; missing: unknown[] }
+      annual: Array<{ total: number }>
+    }
+    expect(body.coverage.status).toBe("complete")
+    expect(body.coverage.generation).toBe(2)
+    expect(body.coverage.missing).toEqual([])
+    // 5 + 5 received income across the two accounts, not the 5 the min() scope saw.
+    expect(body.annual).toHaveLength(1)
+    expect(body.annual[0].total).toBe(10)
+
+    const perf = (await (await app.request("/api/portfolios/charting/performance", { headers: h.headers })).json()) as {
+      series: { date: string; value: number }[]
+    }
+    expect(perf.series[1].value).toBe(1700)
+  })
+
+  it("marks a scope stale when the published facts are flagged dirty", async () => {
+    const h = await makeHarness("user-1")
+    const pf = await seed(h, "A", 1)
+    await h.db.update(chartProjectionState).set({ status: "stale" }).where(eq(chartProjectionState.portfolioId, pf))
+    const app = await boot(h)
+    const res = await app.request("/api/portfolios/charting/income", { headers: h.headers })
+    const body = (await res.json()) as { coverage: { status: string; stale: boolean; generation: number }; annual: unknown[] }
+    expect(body.coverage.status).toBe("stale")
+    expect(body.coverage.stale).toBe(true)
+    expect(body.coverage.generation).toBe(1)
+    // The last published generation is still served, just flagged as stale.
+    expect(body.annual.length).toBeGreaterThan(0)
   })
 
   it("reports an empty scope rather than inventing data", async () => {

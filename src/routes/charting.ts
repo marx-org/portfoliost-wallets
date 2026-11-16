@@ -10,7 +10,7 @@ import {
   positions,
 } from "../db/schema.js"
 import { resolveChartScope, type ChartScopeInput, type ResolvedChartScope } from "../services/charting/scope.js"
-import { getScopedDailySeries } from "../services/charting/queries.js"
+import { getScopedDailySeries, publishedFactsCondition, type PublishedGeneration } from "../services/charting/queries.js"
 import {
   aggregateIncome,
   annualIncomeEquivalent,
@@ -32,10 +32,20 @@ type ChartAllocationData = components["schemas"]["ChartAllocationData"]
 type ChartPerformanceData = components["schemas"]["ChartPerformanceData"]
 type ChartCashData = components["schemas"]["ChartCashData"]
 type ChartCoverage = components["schemas"]["ChartCoverage"]
+type ChartMissingCoverage = components["schemas"]["ChartMissingCoverage"]
 type ChartScopeDto = components["schemas"]["ChartScope"]
 type StockChartCategoryAssignment = components["schemas"]["StockChartCategoryAssignment"]
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
+
+/** Result of resolving which scoped accounts actually have published facts. */
+interface ScopeProjection {
+  published: PublishedGeneration[]
+  missing: ChartMissingCoverage[]
+  generation: number
+  complete: boolean
+  stale: boolean
+}
 
 function hasMalformedIds(input: ChartScopeInput): boolean {
   return [...(input.accountIds ?? []), ...(input.labelIds ?? [])].some((id) => !UUID_RE.test(id))
@@ -82,27 +92,67 @@ export function createChartingRoutes(db?: DB) {
     return rows.map((r) => r.id)
   }
 
-  /** The common published generation across the scoped accounts (0 when none). */
-  async function scopeGeneration(database: DB, accountIds: string[]): Promise<{ generation: number; complete: boolean }> {
-    if (accountIds.length === 0) return { generation: 0, complete: false }
+  /**
+   * Which scoped accounts have published facts, and at which generation.
+   * Generations are per portfolio: an account whose projection has never run
+   * contributes nothing and is reported in `coverage.missing`; it must not drag
+   * the whole scope down to generation 0 (#95). `generation` is the newest
+   * published generation in the scope, and each account is read at its own.
+   */
+  async function scopeProjection(database: DB, accountIds: string[]): Promise<ScopeProjection> {
+    if (accountIds.length === 0) return { published: [], missing: [], generation: 0, complete: false, stale: false }
     const rows = await database
-      .select({ generation: chartProjectionState.generation, status: chartProjectionState.status })
-      .from(chartProjectionState)
-      .where(inArray(chartProjectionState.portfolioId, accountIds))
-    if (rows.length === 0) return { generation: 0, complete: false }
-    const generation = Math.min(...rows.map((r) => r.generation))
-    const complete = rows.every((r) => r.generation === generation && r.status === "complete")
-    return { generation, complete }
+      .select({
+        portfolioId: portfolios.id,
+        name: portfolios.name,
+        generation: chartProjectionState.generation,
+        status: chartProjectionState.status,
+      })
+      .from(portfolios)
+      .leftJoin(chartProjectionState, eq(chartProjectionState.portfolioId, portfolios.id))
+      .where(inArray(portfolios.id, accountIds))
+    const byPortfolio = new Map(rows.map((r) => [r.portfolioId, r]))
+
+    const published: PublishedGeneration[] = []
+    const missing: ChartMissingCoverage[] = []
+    for (const id of accountIds) {
+      const row = byPortfolio.get(id)
+      if (!row || row.generation == null || row.generation <= 0) {
+        missing.push({ reason: "not_projected", detail: row?.name ?? id })
+        continue
+      }
+      published.push({ portfolioId: id, generation: row.generation })
+    }
+    if (published.length === 0) return { published, missing, generation: 0, complete: false, stale: false }
+
+    const stale = published.some((p) => byPortfolio.get(p.portfolioId)?.status !== "complete")
+    return {
+      published,
+      missing,
+      generation: Math.max(...published.map((p) => p.generation)),
+      // Complete means every account in scope has published facts that are not
+      // flagged dirty; differing generations across accounts are still complete,
+      // because each is served from its own published generation.
+      complete: missing.length === 0 && !stale,
+      stale,
+    }
   }
 
-  const coverage = (generation: number, complete: boolean, status: ChartCoverage["status"]): ChartCoverage => ({
-    generation,
+  const coverage = (p: ScopeProjection, accountCount: number): ChartCoverage => ({
+    generation: p.generation,
     asOf: new Date().toISOString(),
-    status,
-    partial: !complete,
+    status:
+      accountCount === 0
+        ? "empty"
+        : p.complete
+          ? "complete"
+          : p.stale && p.missing.length === 0
+            ? "stale"
+            : "partial",
+    partial: !p.complete,
     currentPeriod: false,
-    stale: false,
-    missing: [],
+    stale: p.stale,
+    missing: p.missing,
   })
 
   // GET /api/portfolios/charting/income
@@ -113,10 +163,10 @@ export function createChartingRoutes(db?: DB) {
     if (hasMalformedIds(input)) return c.json({ error: "ValidationError", message: "malformed id" }, 422)
     const scope = await resolveChartScope(database, identity.id, input)
     const accountIds = await effectiveAccountIds(database, identity.id, scope)
-    const { generation, complete } = await scopeGeneration(database, accountIds)
-    const agg = await aggregateIncome(database, accountIds, generation, scope.from, scope.to, scope.labelIds)
+    const projection = await scopeProjection(database, accountIds)
+    const agg = await aggregateIncome(database, projection.published, scope.from, scope.to, scope.labelIds)
     const monthly = monthlyIncomeSeries(agg)
-    const cumulative = await cumulativeIncomeSeries(database, accountIds, generation, monthly, {
+    const cumulative = await cumulativeIncomeSeries(database, projection.published, monthly, {
       from: scope.from,
       labelIds: scope.labelIds,
     })
@@ -124,7 +174,7 @@ export function createChartingRoutes(db?: DB) {
     const body: ChartIncomeData = {
       currency: scope.currency,
       scope: toScopeDto(scope),
-      coverage: coverage(generation, complete, accountIds.length === 0 ? "empty" : complete ? "complete" : "partial"),
+      coverage: coverage(projection, accountIds.length),
       monthly,
       cumulative,
       annual: annual.map(({ partial: _partial, ...rest }) => rest),
@@ -152,12 +202,12 @@ export function createChartingRoutes(db?: DB) {
     if (hasMalformedIds(input)) return c.json({ error: "ValidationError", message: "malformed id" }, 422)
     const scope = await resolveChartScope(database, identity.id, input)
     const accountIds = await effectiveAccountIds(database, identity.id, scope)
-    const { generation, complete } = await scopeGeneration(database, accountIds)
-    const series = await getScopedDailySeries(database, accountIds, generation, scope.from, scope.to)
+    const projection = await scopeProjection(database, accountIds)
+    const series = await getScopedDailySeries(database, projection.published, scope.from, scope.to)
     const body: ChartPerformanceData = {
       currency: scope.currency,
       scope: toScopeDto(scope),
-      coverage: coverage(generation, complete, accountIds.length === 0 ? "empty" : complete ? "complete" : "partial"),
+      coverage: coverage(projection, accountIds.length),
       series: series.points.map((p) => ({
         date: p.date,
         value: p.value,
@@ -185,17 +235,22 @@ export function createChartingRoutes(db?: DB) {
     if (hasMalformedIds(input)) return c.json({ error: "ValidationError", message: "malformed id" }, 422)
     const scope = await resolveChartScope(database, identity.id, input)
     const accountIds = await effectiveAccountIds(database, identity.id, scope)
-    const { generation, complete } = await scopeGeneration(database, accountIds)
+    const projection = await scopeProjection(database, accountIds)
 
     const byAsset = new Map<string, number>()
     const bySector = new Map<string, number>()
     const byCurrency = new Map<string, number>()
     let total = 0
-    if (accountIds.length > 0 && generation > 0) {
+    if (projection.published.length > 0) {
+      const scopeCondition = publishedFactsCondition(
+        chartPositionDaily.portfolioId,
+        chartPositionDaily.generation,
+        projection.published,
+      )
       const [maxRow] = await database
         .select({ d: max(chartPositionDaily.day) })
         .from(chartPositionDaily)
-        .where(and(eq(chartPositionDaily.generation, generation), inArray(chartPositionDaily.portfolioId, accountIds)))
+        .where(scopeCondition)
       const latestDay = maxRow?.d ?? null
       if (latestDay) {
         const rows = await database
@@ -208,7 +263,7 @@ export function createChartingRoutes(db?: DB) {
           })
           .from(chartPositionDaily)
           .innerJoin(positions, eq(positions.id, chartPositionDaily.positionId))
-          .where(and(eq(chartPositionDaily.generation, generation), eq(chartPositionDaily.day, latestDay), inArray(chartPositionDaily.portfolioId, accountIds)))
+          .where(and(scopeCondition, eq(chartPositionDaily.day, latestDay)))
         for (const r of rows) {
           const v = Number(r.value)
           total += v
@@ -225,7 +280,7 @@ export function createChartingRoutes(db?: DB) {
     const body: ChartAllocationData = {
       currency: scope.currency,
       scope: toScopeDto(scope),
-      coverage: coverage(generation, complete, accountIds.length === 0 ? "empty" : complete ? "complete" : "partial"),
+      coverage: coverage(projection, accountIds.length),
       byCurrency: [...byCurrency].map(([k, v]) => slice(k, v)),
       byAssetType: [...byAsset].map(([k, v]) => slice(k, v)),
       bySector: [...bySector].map(([k, v]) => slice(k, v)),
@@ -245,14 +300,14 @@ export function createChartingRoutes(db?: DB) {
     if (hasMalformedIds(input)) return c.json({ error: "ValidationError", message: "malformed id" }, 422)
     const scope = await resolveChartScope(database, identity.id, input)
     const accountIds = await effectiveAccountIds(database, identity.id, scope)
-    const { generation, complete } = await scopeGeneration(database, accountIds)
+    const projection = await scopeProjection(database, accountIds)
 
     const annual = new Map<number, { contributions: number; withdrawals: number }>()
-    if (accountIds.length > 0 && generation > 0) {
+    if (projection.published.length > 0) {
       const rows = await database
         .select({ year: sql<string>`extract(year from ${chartEventFacts.eventDate})`, kind: chartEventFacts.receiptKind, amount: chartEventFacts.amountBase })
         .from(chartEventFacts)
-        .where(and(eq(chartEventFacts.generation, generation), inArray(chartEventFacts.portfolioId, accountIds)))
+        .where(publishedFactsCondition(chartEventFacts.portfolioId, chartEventFacts.generation, projection.published))
       for (const r of rows) {
         const y = Number(r.year)
         const cur = annual.get(y) ?? { contributions: 0, withdrawals: 0 }
@@ -265,7 +320,7 @@ export function createChartingRoutes(db?: DB) {
     const body: ChartCashData = {
       currency: scope.currency,
       scope: toScopeDto(scope),
-      coverage: coverage(generation, complete, accountIds.length === 0 ? "empty" : complete ? "complete" : "partial"),
+      coverage: coverage(projection, accountIds.length),
       balanceHistory: [],
       annualContributions: [...annual]
         .sort((a, b) => a[0] - b[0])
