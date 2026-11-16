@@ -2,13 +2,15 @@ import { describe, expect, it, beforeEach } from "vitest"
 import { createTestDb } from "../../db/test-db.js"
 import {
   chartPositionDaily,
+  labels,
   portfolios,
   positions,
+  positionLabels,
   positionPortfolios,
   stockChartCategories,
 } from "../../db/schema.js"
 import type { DB } from "../../db/index.js"
-import { allocationByStockCategory } from "./allocation.js"
+import { allocationByStockCategory, costAndValueByLabel } from "./allocation.js"
 
 let db: DB
 
@@ -40,6 +42,37 @@ async function addPosition(
 
 async function addFact(portfolioId: string, positionId: string, day: string, value: string, generation = 1) {
   await db.insert(chartPositionDaily).values({ generation, portfolioId, positionId, day, value, quantity: "1" })
+}
+
+async function addFactBasis(
+  portfolioId: string,
+  positionId: string,
+  day: string,
+  value: string,
+  remainingBasis: string,
+  generation = 1,
+) {
+  await db.insert(chartPositionDaily).values({
+    generation,
+    portfolioId,
+    positionId,
+    day,
+    value,
+    remainingBasis,
+    quantity: "1",
+  })
+}
+
+async function addLabel(name: string) {
+  const [row] = await db
+    .insert(labels)
+    .values({ userId: "user-1", name, color: "#112233" })
+    .returning({ id: labels.id })
+  return row.id
+}
+
+async function labelPosition(positionId: string, labelId: string) {
+  await db.insert(positionLabels).values({ positionId, labelId })
 }
 
 async function assign(symbol: string, category: string, instrumentCurrency = "USD", userId = "user-1") {
@@ -128,5 +161,115 @@ describe("allocationByStockCategory", () => {
   it("returns nothing for an empty scope", async () => {
     const out = await allocationByStockCategory(db, "user-1", [])
     expect(out).toEqual({ slices: [], total: 0 })
+  })
+})
+
+describe("costAndValueByLabel", () => {
+  const all = { allLabels: true, labelIds: [] }
+
+  it("reports remaining cost basis and market value per label", async () => {
+    const pf = await addPortfolio("A")
+    const aapl = await addPosition(pf, "AAPL")
+    const core = await addLabel("Core")
+    await labelPosition(aapl, core)
+    await addFactBasis(pf, aapl, "2026-01-02", "150", "100")
+
+    const out = await costAndValueByLabel(db, "user-1", [pub(pf)], all)
+    expect(out.groups).toEqual([{ key: core, label: "Core", costBasis: 100, value: 150 }])
+  })
+
+  it("counts a two-label holding in each group without treating the groups as a partition", async () => {
+    const pf = await addPortfolio("A")
+    const aapl = await addPosition(pf, "AAPL")
+    const core = await addLabel("Core")
+    const growth = await addLabel("Growth")
+    await labelPosition(aapl, core)
+    await labelPosition(aapl, growth)
+    await addFactBasis(pf, aapl, "2026-01-02", "150", "100")
+
+    const out = await costAndValueByLabel(db, "user-1", [pub(pf)], all)
+    const byLabel = Object.fromEntries(out.groups.map((g) => [g.label, g]))
+    expect(byLabel.Core).toEqual({ key: core, label: "Core", costBasis: 100, value: 150 })
+    expect(byLabel.Growth).toEqual({ key: growth, label: "Growth", costBasis: 100, value: 150 })
+    // Summing the groups (300) is NOT the scope total (150).
+    const groupValue = out.groups.reduce((s, g) => s + g.value, 0)
+    expect(groupValue).toBe(300)
+  })
+
+  it("shows an unlabelled bucket only for All, not when labels are selected", async () => {
+    const pf = await addPortfolio("A")
+    const aapl = await addPosition(pf, "AAPL")
+    const msft = await addPosition(pf, "MSFT")
+    const core = await addLabel("Core")
+    await labelPosition(aapl, core)
+    await addFactBasis(pf, aapl, "2026-01-02", "150", "100")
+    await addFactBasis(pf, msft, "2026-01-02", "50", "40")
+
+    const allOut = await costAndValueByLabel(db, "user-1", [pub(pf)], all)
+    const labels = allOut.groups.map((g) => g.label)
+    expect(labels).toEqual(["Core", "Unlabelled"])
+    const unlabelled = allOut.groups.find((g) => g.key === "__unlabelled__")
+    expect(unlabelled).toEqual({ key: "__unlabelled__", label: "Unlabelled", costBasis: 40, value: 50 })
+
+    const selected = await costAndValueByLabel(db, "user-1", [pub(pf)], { allLabels: false, labelIds: [core] })
+    expect(selected.groups.map((g) => g.label)).toEqual(["Core"])
+  })
+
+  it("intersects accounts with any selected label and never multiplies a position by its labels", async () => {
+    const pf = await addPortfolio("A")
+    const aapl = await addPosition(pf, "AAPL")
+    const core = await addLabel("Core")
+    const growth = await addLabel("Growth")
+    await labelPosition(aapl, core)
+    await labelPosition(aapl, growth)
+    await addFactBasis(pf, aapl, "2026-01-02", "150", "100")
+
+    const out = await costAndValueByLabel(db, "user-1", [pub(pf)], { allLabels: false, labelIds: [core, growth] })
+    expect(out.groups.map((g) => g.label).sort()).toEqual(["Core", "Growth"])
+    for (const g of out.groups) expect(g.value).toBe(150)
+  })
+
+  it("reduces the remaining basis after a partial sale using the fact, not deposits", async () => {
+    const pf = await addPortfolio("A")
+    const aapl = await addPosition(pf, "AAPL")
+    const core = await addLabel("Core")
+    await labelPosition(aapl, core)
+    // Value 150 on 100 basis before the sale; the fact after the sale carries the
+    // reduced remaining basis and the reduced value.
+    await addFactBasis(pf, aapl, "2026-01-02", "150", "100")
+    await addFactBasis(pf, aapl, "2026-01-03", "90", "60")
+
+    const out = await costAndValueByLabel(db, "user-1", [pub(pf)], all)
+    expect(out.groups).toEqual([{ key: core, label: "Core", costBasis: 60, value: 90 }])
+  })
+
+  it("keeps a foreign-currency holding's basis and value in the same fact currency", async () => {
+    const pf = await addPortfolio("A")
+    const position = await addPosition(pf, "SNT", { instrumentCurrency: "PLN" })
+    const core = await addLabel("Core")
+    await labelPosition(position, core)
+    // Facts are stored in the account base after conversion; both numbers come
+    // from the same row, so they are never one currency each.
+    await addFactBasis(pf, position, "2026-01-02", "150", "100")
+
+    const out = await costAndValueByLabel(db, "user-1", [pub(pf)], all)
+    expect(out.groups[0]).toMatchObject({ costBasis: 100, value: 150 })
+  })
+
+  it("uses only the latest published day", async () => {
+    const pf = await addPortfolio("A")
+    const aapl = await addPosition(pf, "AAPL")
+    const core = await addLabel("Core")
+    await labelPosition(aapl, core)
+    await addFactBasis(pf, aapl, "2026-01-01", "100", "80")
+    await addFactBasis(pf, aapl, "2026-01-02", "120", "90")
+
+    const out = await costAndValueByLabel(db, "user-1", [pub(pf)], all)
+    expect(out.groups[0]).toMatchObject({ costBasis: 90, value: 120 })
+  })
+
+  it("returns nothing for an empty scope", async () => {
+    const out = await costAndValueByLabel(db, "user-1", [], all)
+    expect(out).toEqual({ groups: [] })
   })
 })

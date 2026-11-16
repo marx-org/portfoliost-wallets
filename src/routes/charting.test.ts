@@ -4,7 +4,7 @@ import { eq } from "drizzle-orm"
 import { makeHarness, insertPosition } from "./test-utils.js"
 import { createChartingRoutes } from "./charting.js"
 import { buildChartFacts } from "../services/charting/projection.js"
-import { chartProjectionState, portfolioCashTransactions, portfolioTransactions, portfolios } from "../db/schema.js"
+import { chartProjectionState, labels, portfolioCashTransactions, portfolioTransactions, portfolios, positionLabels } from "../db/schema.js"
 import type { PriceBarSeries } from "../services/backfill.js"
 import type { Harness } from "./test-utils.js"
 
@@ -56,6 +56,35 @@ describe("charting routes", () => {
     const body = (await res.json()) as { series: { date: string; value: number }[] }
     expect(body.series.length).toBe(2)
     expect(body.series[1].value).toBe(1100)
+  })
+
+  it("serves cost basis vs market value per label", async () => {
+    const h = await makeHarness("user-1")
+    const [pf] = await h.db.insert(portfolios).values({ userId: h.user.id, name: "A", baseCurrency: "USD" }).returning({ id: portfolios.id })
+    const pos = await insertPosition(h.db, { userId: h.user.id, symbol: "AAPL", portfolioId: pf.id })
+    await h.db.insert(portfolioTransactions).values({ userId: h.user.id, portfolioId: pf.id, positionId: pos.id, type: "BUY", instrumentSymbol: "AAPL", assetType: "STOCK", quantity: "10", price: "100", currency: "USD", exchangeRate: "1", executedAt: new Date("2026-01-01T00:00:00Z") })
+    await buildChartFacts(h.db, pf.id, "token", { generation: 1, from: "2026-01-01", to: "2026-01-01", fetcher: fakeFetcher({ AAPL: { dates: ["2026-01-01"], closes: [110] } }) })
+    const [label] = await h.db.insert(labels).values({ userId: h.user.id, name: "Core", color: "#112233" }).returning({ id: labels.id })
+    await h.db.insert(positionLabels).values({ positionId: pos.id, labelId: label.id })
+
+    const app = await boot(h)
+    const res = await app.request("/api/portfolios/charting/allocation", { headers: h.headers })
+    expect(res.status).toBe(200)
+    const body = (await res.json()) as {
+      byCostBasis: Array<{ key: string; label: string; costBasis: number; value: number }>
+    }
+    expect(body.byCostBasis).toEqual([{ key: label.id, label: "Core", costBasis: 1000, value: 1100, percentCost: null, percentValue: null, unknown: false }])
+
+    // Selecting the label keeps the group; selecting an unowned label empties it.
+    const kept = (await (await app.request(`/api/portfolios/charting/allocation?labels=${label.id}`, { headers: h.headers })).json()) as {
+      byCostBasis: unknown[]
+    }
+    expect(kept.byCostBasis).toHaveLength(1)
+    const other = await h.db.insert(labels).values({ userId: h.user.id, name: "Other", color: "#445566" }).returning({ id: labels.id })
+    const filtered = (await (await app.request(`/api/portfolios/charting/allocation?labels=${other[0].id}`, { headers: h.headers })).json()) as {
+      byCostBasis: unknown[]
+    }
+    expect(filtered.byCostBasis).toEqual([])
   })
 
   it("rejects a malformed account id with 422", async () => {

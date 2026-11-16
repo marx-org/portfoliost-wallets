@@ -3484,6 +3484,20 @@ export interface components {
             /** @description Classification is unknown/exposed rather than silently zeroed */
             unknown?: boolean;
         };
+        /** @description Remaining cost basis against current market value for one label group. Label groups are independent (a holding may carry several labels), so the rows are not a partition and their sum is not a portfolio total. */
+        ChartCostValuePoint: {
+            /** @description Label id */
+            key: string;
+            label: string;
+            /** @description Remaining cost basis in the dataset currency */
+            costBasis: number;
+            /** @description Current market value in the dataset currency */
+            value: number;
+            percentCost?: number | null;
+            percentValue?: number | null;
+            /** @description A cost basis or value is unknown rather than silently zeroed */
+            unknown?: boolean;
+        };
         ChartAllocationData: {
             currency: string;
             scope: components["schemas"]["ChartScope"];
@@ -3493,7 +3507,7 @@ export interface components {
             bySector?: components["schemas"]["ChartAllocationSlice"][];
             byCategory?: components["schemas"]["ChartAllocationSlice"][];
             byLabel?: components["schemas"]["ChartAllocationSlice"][];
-            byCostBasis?: components["schemas"]["ChartAllocationSlice"][];
+            byCostBasis?: components["schemas"]["ChartCostValuePoint"][];
             /** @description Current holdings composition by instrument identity (not raw ticker only). */
             positions?: components["schemas"]["ChartAllocationSlice"][];
         };
