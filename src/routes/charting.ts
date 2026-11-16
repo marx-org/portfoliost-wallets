@@ -11,6 +11,7 @@ import {
 } from "../db/schema.js"
 import { resolveChartScope, type ChartScopeInput, type ResolvedChartScope } from "../services/charting/scope.js"
 import { getScopedDailySeries, publishedFactsCondition, type PublishedGeneration } from "../services/charting/queries.js"
+import { allocationByStockCategory, stockCategoryLabel } from "../services/charting/allocation.js"
 import {
   aggregateIncome,
   annualIncomeEquivalent,
@@ -277,6 +278,18 @@ export function createChartingRoutes(db?: DB) {
       }
     }
     const slice = (key: string, value: number) => ({ key, label: key, value, percent: total > 0 ? Math.round((value / total) * 1000) / 10 : null, sourceCurrency: null, sourceValue: null, unknown: key === "UNKNOWN" })
+    // Dividend-stock categories are a STOCK-only denominator: cash, bonds and
+    // derivatives are excluded, and an unassigned stock is `not_classified`.
+    const category = await allocationByStockCategory(database, identity.id, projection.published)
+    const categorySlice = (s: { key: string; value: number }) => ({
+      key: s.key,
+      label: stockCategoryLabel(s.key),
+      value: s.value,
+      percent: category.total > 0 ? Math.round((s.value / category.total) * 1000) / 10 : null,
+      sourceCurrency: null,
+      sourceValue: null,
+      unknown: s.key === "not_classified",
+    })
     const body: ChartAllocationData = {
       currency: scope.currency,
       scope: toScopeDto(scope),
@@ -284,7 +297,7 @@ export function createChartingRoutes(db?: DB) {
       byCurrency: [...byCurrency].map(([k, v]) => slice(k, v)),
       byAssetType: [...byAsset].map(([k, v]) => slice(k, v)),
       bySector: [...bySector].map(([k, v]) => slice(k, v)),
-      byCategory: [],
+      byCategory: category.slices.map(categorySlice),
       byLabel: [],
       byCostBasis: [],
       positions: [],
