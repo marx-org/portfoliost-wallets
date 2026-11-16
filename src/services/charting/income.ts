@@ -1,6 +1,7 @@
-import { and, eq, gte, inArray, lt, lte } from "drizzle-orm"
+import { and, gte, inArray, lt, lte } from "drizzle-orm"
 import type { DB } from "../../db/index.js"
 import { chartEventFacts, positionLabels } from "../../db/schema.js"
+import { publishedFactsCondition, type PublishedGeneration } from "./queries.js"
 
 /**
  * Income aggregation (feature #253). One canonical input — the normalized
@@ -73,23 +74,22 @@ function round(n: number): number {
 }
 
 /**
- * Aggregate income facts for the given accounts/generation/window into monthly,
- * quarterly and annual buckets. Reads only the published generation's facts; it
- * never replays trades or calls providers.
+ * Aggregate income facts for the given accounts, each read at its own published
+ * generation, within the window into monthly, quarterly and annual buckets.
+ * Reads only facts that were published; it never replays trades or calls
+ * providers.
  */
 export async function aggregateIncome(
   db: DB,
-  accountIds: string[],
-  generation: number,
+  published: PublishedGeneration[],
   from?: string | null,
   to?: string | null,
   labelIds: string[] = [],
 ): Promise<AggregatedIncome> {
-  if (accountIds.length === 0) return { monthly: [], quarterly: [], annual: [] }
+  if (published.length === 0) return { monthly: [], quarterly: [], annual: [] }
 
   const conds = [
-    eq(chartEventFacts.generation, generation),
-    inArray(chartEventFacts.portfolioId, accountIds),
+    publishedFactsCondition(chartEventFacts.portfolioId, chartEventFacts.generation, published),
   ]
   if (from) conds.push(gte(chartEventFacts.eventDate, from))
   if (to) conds.push(lte(chartEventFacts.eventDate, to))
@@ -232,15 +232,13 @@ export interface CumulativeIncomePoint {
 /** Dividends + interest received strictly before `before` (the window opening). */
 async function incomeBefore(
   db: DB,
-  accountIds: string[],
-  generation: number,
+  published: PublishedGeneration[],
   before: string,
   labelIds: string[],
 ): Promise<number> {
-  if (accountIds.length === 0) return 0
+  if (published.length === 0) return 0
   const conds = [
-    eq(chartEventFacts.generation, generation),
-    inArray(chartEventFacts.portfolioId, accountIds),
+    publishedFactsCondition(chartEventFacts.portfolioId, chartEventFacts.generation, published),
     lt(chartEventFacts.eventDate, before),
   ]
   if (labelIds.length) {
@@ -269,12 +267,11 @@ async function incomeBefore(
  */
 export async function cumulativeIncomeSeries(
   db: DB,
-  accountIds: string[],
-  generation: number,
+  published: PublishedGeneration[],
   monthly: IncomeBucket[],
   opts?: { from?: string | null; labelIds?: string[] },
 ): Promise<CumulativeIncomePoint[]> {
-  const opening = opts?.from ? await incomeBefore(db, accountIds, generation, opts.from, opts.labelIds ?? []) : 0
+  const opening = opts?.from ? await incomeBefore(db, published, opts.from, opts.labelIds ?? []) : 0
   let dividends = 0
   let interest = 0
   return monthly.map((b) => {

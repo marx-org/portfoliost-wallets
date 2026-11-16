@@ -1,6 +1,36 @@
-import { and, eq, gte, inArray, lte, sql } from "drizzle-orm"
+import { and, eq, or, gte, lte, sql, type Column } from "drizzle-orm"
 import type { DB } from "../../db/index.js"
 import { chartPositionDaily } from "../../db/schema.js"
+
+/**
+ * One scoped account pinned to the generation its facts are published at.
+ * `chart_projection_state` is per portfolio, so generations are NOT shared
+ * across a scope: a brand-new account has generation 0 while an older one is at
+ * 3. Reading the whole scope at one number (the old `min()`) silently empties
+ * every account that is ahead of it — see #95.
+ */
+export interface PublishedGeneration {
+  portfolioId: string
+  generation: number
+}
+
+/**
+ * Restrict a facts table to each scoped account's own published generation.
+ * Returns `false` for an empty scope so a caller can never read generation-0
+ * rows that do not exist.
+ */
+export function publishedFactsCondition(
+  portfolioColumn: Column,
+  generationColumn: Column,
+  published: PublishedGeneration[],
+) {
+  if (published.length === 0) return sql`false`
+  if (published.length === 1) {
+    const p = published[0]
+    return and(eq(portfolioColumn, p.portfolioId), eq(generationColumn, p.generation))
+  }
+  return or(...published.map((p) => and(eq(portfolioColumn, p.portfolioId), eq(generationColumn, p.generation))))
+}
 
 /**
  * One aggregated position-day point across the scoped accounts (feature #253).
@@ -23,21 +53,19 @@ export interface ScopedDailySeries {
 }
 
 /**
- * Bounded read: sum the per-position daily facts for the given accounts and
- * generation, grouped by day. Never replays trades, rebuilds prices or fans out
- * provider calls — it reads one published generation's facts.
+ * Bounded read: sum the per-position daily facts for the given accounts, each at
+ * its own published generation, grouped by day. Never replays trades, rebuilds
+ * prices or fans out provider calls — it only reads facts that were published.
  */
 export async function getScopedDailySeries(
   db: DB,
-  accountIds: string[],
-  generation: number,
+  published: PublishedGeneration[],
   from?: string | null,
   to?: string | null,
 ): Promise<ScopedDailySeries> {
-  if (accountIds.length === 0) return { generation, points: [] }
+  if (published.length === 0) return { generation: 0, points: [] }
   const conds = [
-    eq(chartPositionDaily.generation, generation),
-    inArray(chartPositionDaily.portfolioId, accountIds),
+    publishedFactsCondition(chartPositionDaily.portfolioId, chartPositionDaily.generation, published),
   ]
   if (from) conds.push(gte(chartPositionDaily.day, from))
   if (to) conds.push(lte(chartPositionDaily.day, to))
@@ -57,7 +85,7 @@ export async function getScopedDailySeries(
     .orderBy(chartPositionDaily.day)
 
   return {
-    generation,
+    generation: Math.max(...published.map((p) => p.generation)),
     points: rows.map((r) => ({
       date: r.day,
       value: Number(r.value),
