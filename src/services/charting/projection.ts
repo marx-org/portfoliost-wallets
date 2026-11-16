@@ -1,4 +1,4 @@
-import { and, eq, inArray } from "drizzle-orm"
+import { and, eq, inArray, lt } from "drizzle-orm"
 import type { DB } from "../../db/index.js"
 import {
   chartEventFacts,
@@ -354,6 +354,15 @@ export async function buildChartFacts(
       target: chartProjectionState.portfolioId,
       set: { generation: opts.generation, status: "complete", dirtyFrom: null, updatedAt: new Date() },
     })
+
+  // 8. Prune superseded generations. Readers pin the published generation, so
+  // rows from an older one are unreachable; leaving them would grow the fact
+  // tables by a whole history per rebuild (a portfolio mutated daily would add a
+  // generation a day). The new generation is published before this runs, and a
+  // failed rebuild never reaches it, so the last complete result is always
+  // readable.
+  await db.delete(chartPositionDaily).where(and(eq(chartPositionDaily.portfolioId, portfolioId), lt(chartPositionDaily.generation, opts.generation)))
+  await db.delete(chartEventFacts).where(and(eq(chartEventFacts.portfolioId, portfolioId), lt(chartEventFacts.generation, opts.generation)))
 
   return { positionRows: positionRows.length, eventRows: eventRows.length, days: days.length }
 }

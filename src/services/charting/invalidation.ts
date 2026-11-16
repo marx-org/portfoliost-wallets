@@ -55,8 +55,39 @@ export async function recomputeChartingForPortfolio(
 }
 
 /**
- * Rebuild only the portfolios whose projection is marked stale (dirty). This is
- * what the scheduled refresh calls: it bounds the work to what actually changed
+ * Portfolios whose facts must be built by the next refresh pass:
+ *  - never projected (no `chart_projection_state` row at all, or generation 0),
+ *  - or marked dirty by a transaction/cash/import mutation.
+ *
+ * The first case is the bootstrap: the schema and the invalidation hooks landed
+ * while portfolios already existed, so nothing gave them a row and the daily
+ * pass — which selected only `status = 'stale'` — had nothing to rebuild. That
+ * is why every Charting chart read generation 0 in production while Compose,
+ * whose seed publishes a generation by hand, looked fine.
+ *
+ * Virtual portfolios are label views over real accounts: their facts come from
+ * the underlying accounts, so they are never projected on their own.
+ */
+export async function portfoliosNeedingChartingRebuild(db: DB): Promise<string[]> {
+  const rows = await db
+    .select({ id: portfolios.id })
+    .from(portfolios)
+    .leftJoin(chartProjectionState, eq(chartProjectionState.portfolioId, portfolios.id))
+    .where(
+      and(
+        eq(portfolios.isVirtual, false),
+        sql`${chartProjectionState.generation} is null
+          or ${chartProjectionState.generation} = 0
+          or ${chartProjectionState.status} <> 'complete'`,
+      ),
+    )
+  return rows.map((r) => r.id)
+}
+
+/**
+ * Rebuild every portfolio that needs it: never-projected portfolios are
+ * bootstrapped, dirty ones are republished at a fresh generation. This is what
+ * the scheduled refresh calls, so the work is bounded to what actually changed
  * instead of re-fetching every portfolio's price history daily.
  */
 export async function recomputeDirtyCharting(
@@ -64,15 +95,12 @@ export async function recomputeDirtyCharting(
   authToken: string,
   opts: Omit<BuildChartFactsOptions, "generation"> = {},
 ): Promise<{ rebuilt: number; failed: number }> {
-  const rows = await db
-    .select({ id: chartProjectionState.portfolioId })
-    .from(chartProjectionState)
-    .where(eq(chartProjectionState.status, "stale"))
+  const ids = await portfoliosNeedingChartingRebuild(db)
   let rebuilt = 0
   let failed = 0
-  for (const p of rows) {
+  for (const portfolioId of ids) {
     try {
-      await recomputeChartingForPortfolio(db, p.id, authToken, opts)
+      await recomputeChartingForPortfolio(db, portfolioId, authToken, opts)
       rebuilt += 1
     } catch {
       failed += 1
