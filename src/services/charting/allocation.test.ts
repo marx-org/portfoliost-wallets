@@ -10,7 +10,7 @@ import {
   stockChartCategories,
 } from "../../db/schema.js"
 import type { DB } from "../../db/index.js"
-import { allocationByStockCategory, allocationByAssetType, costAndValueByLabel } from "./allocation.js"
+import { allocationByStockCategory, allocationByAssetType, allocationBySector, costAndValueByLabel } from "./allocation.js"
 
 let db: DB
 
@@ -25,7 +25,7 @@ async function addPortfolio(name: string) {
 async function addPosition(
   portfolioId: string,
   symbol: string,
-  opts: { assetType?: string; instrumentCurrency?: string } = {},
+  opts: { assetType?: string; instrumentCurrency?: string; sector?: string } = {},
 ) {
   const [pos] = await db
     .insert(positions)
@@ -34,6 +34,7 @@ async function addPosition(
       symbol,
       assetType: opts.assetType ?? "STOCK",
       instrumentCurrency: opts.instrumentCurrency ?? "USD",
+      ...(opts.sector ? { sector: opts.sector } : {}),
     })
     .returning({ id: positions.id })
   await db.insert(positionPortfolios).values({ positionId: pos.id, portfolioId })
@@ -331,6 +332,52 @@ describe("allocationByAssetType", () => {
 
   it("returns nothing for an empty scope", async () => {
     const out = await allocationByAssetType(db, [])
+    expect(out).toEqual({ slices: [], total: 0 })
+  })
+})
+
+describe("allocationBySector", () => {
+  it("splits value by sector, largest first", async () => {
+    const pf = await addPortfolio("A")
+    const tech = await addPosition(pf, "AAPL", { sector: "TECHNOLOGY" })
+    const fin = await addPosition(pf, "JPM", { sector: "FINANCIALS" })
+    await addFact(pf, tech, "2026-01-02", "60")
+    await addFact(pf, fin, "2026-01-02", "40")
+
+    const out = await allocationBySector(db, [pub(pf)])
+    expect(out.total).toBe(100)
+    expect(out.slices).toEqual([
+      { key: "TECHNOLOGY", value: 60 },
+      { key: "FINANCIALS", value: 40 },
+    ])
+  })
+
+  it("exposes an unknown sector instead of dropping it", async () => {
+    const pf = await addPortfolio("A")
+    const tech = await addPosition(pf, "AAPL", { sector: "TECHNOLOGY" })
+    const unknown = await addPosition(pf, "???", {})
+    await addFact(pf, tech, "2026-01-02", "60")
+    await addFact(pf, unknown, "2026-01-02", "40")
+
+    const out = await allocationBySector(db, [pub(pf)])
+    expect(out.slices).toEqual([
+      { key: "TECHNOLOGY", value: 60 },
+      { key: "UNKNOWN", value: 40 },
+    ])
+  })
+
+  it("uses only the latest published day", async () => {
+    const pf = await addPortfolio("A")
+    const tech = await addPosition(pf, "AAPL", { sector: "TECHNOLOGY" })
+    await addFact(pf, tech, "2026-01-01", "100")
+    await addFact(pf, tech, "2026-01-02", "120")
+
+    const out = await allocationBySector(db, [pub(pf)])
+    expect(out.total).toBe(120)
+  })
+
+  it("returns nothing for an empty scope", async () => {
+    const out = await allocationBySector(db, [])
     expect(out).toEqual({ slices: [], total: 0 })
   })
 })
