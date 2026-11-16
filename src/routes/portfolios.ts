@@ -19,6 +19,7 @@ import { getPortfolioNews } from "../services/portfolioNews.js"
 import { getPortfolioCalendar } from "../services/portfolioCalendar.js"
 import { getBackfillStatus, getGapSymbols, buildBenchmarkSeries, forcePortfolioRecalc, hasBackfillableHistory, markBackfillPending, recalcPortfolioSeries } from "../services/backfill.js"
 import { enqueueBackfill } from "../services/backfill-runner.js"
+import { recomputeChartingForPortfolio, refreshChartingFacts } from "../services/charting/invalidation.js"
 import { cashBalances, dailyExternalFlows, externalCashInvested } from "../services/cashLedger.js"
 import { debugEnabled, debugLog } from "../services/debug.js"
 import { buildPortfolioCash } from "./portfolio-cash.js"
@@ -1477,13 +1478,21 @@ async function resolveAggregateBase(
     // `enqueueBackfill` because it takes the abort signal and does not enqueue
     // itself; nesting an enqueue behind the pass awaiting it would self-deadlock
     // (the reason `refreshQuotesUnlocked` exists as a separate export).
+    // Charting facts are rebuilt on the same explicit recompute, but chained
+    // BEHIND the snapshot pass: both fan out to the price provider, and the
+    // serialized runner is what keeps that to one pass at a time. Full mode
+    // restates every day at a fresh generation (manual fix after bad data);
+    // upsert mode re-prices the published tail in place. Virtual portfolios are
+    // label views over real accounts and own no facts, so they are skipped.
+    const token = c.req.header("Authorization") ?? ""
     if (c.req.query("mode") === "upsert") {
-      const token = c.req.header("Authorization") ?? ""
-      void enqueueBackfill(id, (signal) => recalcPortfolioSeries(database, id, token, new Date(), signal)).catch(
-        () => undefined,
-      )
+      void enqueueBackfill(id, (signal) => recalcPortfolioSeries(database, id, token, new Date(), signal))
+        .then(() => (pf.isVirtual ? undefined : refreshChartingFacts(database, id, token)))
+        .catch(() => undefined)
     } else {
-      void forcePortfolioRecalc(database, id, c.req.header("Authorization") ?? "").catch(() => undefined)
+      void forcePortfolioRecalc(database, id, token)
+        .then(() => (pf.isVirtual ? undefined : recomputeChartingForPortfolio(database, id, token, { now: new Date() })))
+        .catch(() => undefined)
     }
     return c.json({ backfillStatus: "pending" } satisfies components["schemas"]["BackfillRecomputeResponse"])
   })

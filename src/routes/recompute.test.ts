@@ -12,6 +12,8 @@ import {
   portfolioCashTransactions,
   labels,
   positionLabels,
+  chartPositionDaily,
+  chartProjectionState,
 } from "../db/schema.js"
 import { eq, and } from "drizzle-orm"
 import { getBackfillStatus } from "../services/backfill.js"
@@ -95,6 +97,17 @@ async function waitForComplete(db: DB, portfolioId: string, timeoutMs = 10_000):
     const status = await getBackfillStatus(db, portfolioId)
     if (status === "complete" || status === "failed") return status
     if (Date.now() > deadline) throw new Error(`recompute did not finish in time (last status: ${status})`)
+    await new Promise((r) => setTimeout(r, 25))
+  }
+}
+
+/** Poll until the portfolio's charting projection is published (status complete). */
+async function waitForChartProjection(db: DB, portfolioId: string, timeoutMs = 10_000) {
+  const deadline = Date.now() + timeoutMs
+  for (;;) {
+    const [row] = await db.select().from(chartProjectionState).where(eq(chartProjectionState.portfolioId, portfolioId))
+    if (row && row.status === "complete" && row.generation >= 1) return row
+    if (Date.now() > deadline) throw new Error(`charting projection did not complete in time (${row?.status ?? "no row"})`)
     await new Promise((r) => setTimeout(r, 25))
   }
 }
@@ -297,6 +310,116 @@ describe("POST /api/portfolios/:id/recompute (plan §27.2)", () => {
     expect(byDate.get(t1)).toBeCloseTo(1600) // t1 uses the prior bar (160)
     // and it did NOT delete the stale 2000 row (additive).
     expect(byDate.get("2000-01-01")).toBe(9999)
+  })
+
+  it("POST /:id/recompute also publishes the charting facts for the portfolio", async () => {
+    const h = await makeHarness("recalc-route-charting")
+    const a = app(h.db)
+    const pf = await seedPortfolio(h.db, h.user.id)
+    const position = await insertPosition(h.db, {
+      userId: h.user.id,
+      portfolioId: pf.id,
+      symbol: "AAPL",
+      quantity: "10",
+      averageCostBasis: "150",
+      instrumentCurrency: "USD",
+      isOpen: true,
+      currentPrice: null,
+      priceSource: "manual",
+    })
+    await h.db.insert(portfolioTransactions).values({
+      userId: h.user.id,
+      portfolioId: pf.id,
+      positionId: position.id,
+      type: "BUY",
+      instrumentSymbol: "AAPL",
+      quantity: "10",
+      price: "150",
+      currency: "USD",
+      instrumentCurrency: "USD",
+      totalAmount: "1500",
+      executedAt: new Date("2026-07-01T12:00:00Z"),
+    })
+    await h.db.insert(portfolioCashTransactions).values({
+      userId: h.user.id,
+      portfolioId: pf.id,
+      type: "DEPOSIT",
+      amount: "1500",
+      currency: "USD",
+      transactionDate: "2026-07-01",
+    })
+    mockPriceBars({ AAPL: { dates: ["2026-07-01", "2026-07-02"], closes: [150, 155] } })
+
+    const res = await a.request(`/api/portfolios/${pf.id}/recompute`, { method: "POST", headers: h.headers })
+    expect(res.status).toBe(200)
+    expect(await waitForComplete(h.db, pf.id)).toBe("complete")
+
+    // The charts are rebuilt by the same explicit recompute, not only by the
+    // nightly job: the projection is published at a fresh generation and the
+    // position-day facts carry the traded quantity through today.
+    const state = await waitForChartProjection(h.db, pf.id)
+    expect(state.generation).toBe(1)
+
+    const facts = await h.db
+      .select({ day: chartPositionDaily.day, value: chartPositionDaily.value })
+      .from(chartPositionDaily)
+      .where(eq(chartPositionDaily.portfolioId, pf.id))
+      .orderBy(chartPositionDaily.day)
+    expect(facts.length).toBeGreaterThan(1)
+    expect(Number(facts[0].value)).toBeCloseTo(1500)
+    expect(Number(facts[facts.length - 1].value)).toBeCloseTo(1550)
+  })
+
+  it("POST /:id/recompute skips charting facts for a virtual portfolio", async () => {
+    const h = await makeHarness("recalc-route-charting-virtual")
+    const a = app(h.db)
+    const source = await seedPortfolio(h.db, h.user.id)
+    const [label] = await h.db
+      .insert(labels)
+      .values({ userId: h.user.id, name: "Virtual", color: "#000000" })
+      .returning()
+    const position = await insertPosition(h.db, {
+      userId: h.user.id,
+      portfolioId: source.id,
+      symbol: "AAPL",
+      quantity: "10",
+      averageCostBasis: "100",
+      instrumentCurrency: "USD",
+      isOpen: true,
+      currentPrice: null,
+      priceSource: "manual",
+    })
+    await h.db.insert(positionLabels).values({ positionId: position.id, labelId: label.id })
+    await h.db.insert(portfolioTransactions).values({
+      userId: h.user.id,
+      portfolioId: source.id,
+      positionId: position.id,
+      type: "BUY",
+      instrumentSymbol: "AAPL",
+      quantity: "10",
+      price: "100",
+      currency: "USD",
+      instrumentCurrency: "USD",
+      totalAmount: "1000",
+      executedAt: new Date("2026-07-01T12:00:00Z"),
+    })
+    const [virtual] = await h.db
+      .insert(portfolios)
+      .values({ userId: h.user.id, name: "Virtual view", baseCurrency: "USD", isVirtual: true, labelId: label.id })
+      .returning()
+    mockPriceBars({ AAPL: { dates: ["2026-07-01", "2026-07-02"], closes: [100, 110] } })
+
+    const res = await a.request(`/api/portfolios/${virtual.id}/recompute`, { method: "POST", headers: h.headers })
+    expect(res.status).toBe(200)
+    await waitForComplete(h.db, virtual.id)
+    // A wrongly-enqueued charting task would be chained behind the snapshot pass;
+    // give it a moment to (not) write before asserting.
+    await new Promise((r) => setTimeout(r, 150))
+    const state = await h.db
+      .select()
+      .from(chartProjectionState)
+      .where(eq(chartProjectionState.portfolioId, virtual.id))
+    expect(state).toHaveLength(0)
   })
 
   it("creates virtual history from existing labelled activity without manual recompute", async () => {
