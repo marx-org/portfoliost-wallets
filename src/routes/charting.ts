@@ -18,6 +18,7 @@ import {
   annualIncomeSeries,
   cumulativeIncomeSeries,
   monthlyIncomeSeries,
+  quarterlyIncomeSeries,
 } from "../services/charting/income.js"
 import {
   isStockChartCategory,
@@ -179,8 +180,8 @@ export function createChartingRoutes(db?: DB) {
       monthly,
       cumulative,
       annual: annual.map(({ partial: _partial, ...rest }) => rest),
-      quarterly: agg.quarterly.map((b) => ({
-        quarter: b.period,
+      quarterly: quarterlyIncomeSeries(agg.quarterly).map((b) => ({
+        quarter: b.quarter,
         dividends: b.dividends,
         interest: b.interest,
         options: b.options,
