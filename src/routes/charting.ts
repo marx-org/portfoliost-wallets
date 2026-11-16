@@ -11,7 +11,7 @@ import {
 } from "../db/schema.js"
 import { resolveChartScope, type ChartScopeInput, type ResolvedChartScope } from "../services/charting/scope.js"
 import { getScopedDailySeries, publishedFactsCondition, type PublishedGeneration } from "../services/charting/queries.js"
-import { allocationByStockCategory, stockCategoryLabel } from "../services/charting/allocation.js"
+import { allocationByStockCategory, costAndValueByLabel, stockCategoryLabel } from "../services/charting/allocation.js"
 import {
   aggregateIncome,
   annualIncomeEquivalent,
@@ -290,6 +290,12 @@ export function createChartingRoutes(db?: DB) {
       sourceValue: null,
       unknown: s.key === "not_classified",
     })
+    // Cost basis vs market value per label. Label groups are independent, so the
+    // rows are not a partition and their sum is not a portfolio total.
+    const costValue = await costAndValueByLabel(database, identity.id, projection.published, {
+      allLabels: scope.allLabels,
+      labelIds: scope.labelIds,
+    })
     const body: ChartAllocationData = {
       currency: scope.currency,
       scope: toScopeDto(scope),
@@ -299,7 +305,15 @@ export function createChartingRoutes(db?: DB) {
       bySector: [...bySector].map(([k, v]) => slice(k, v)),
       byCategory: category.slices.map(categorySlice),
       byLabel: [],
-      byCostBasis: [],
+      byCostBasis: costValue.groups.map((g) => ({
+        key: g.key,
+        label: g.label,
+        costBasis: g.costBasis,
+        value: g.value,
+        percentCost: null,
+        percentValue: null,
+        unknown: false,
+      })),
       positions: [],
     }
     return c.json(body satisfies ChartAllocationData)
