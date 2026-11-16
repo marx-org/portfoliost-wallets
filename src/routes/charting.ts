@@ -18,6 +18,7 @@ import {
   annualIncomeSeries,
   cumulativeIncomeSeries,
   monthlyIncomeSeries,
+  quarterlyIncomeGrowth,
   quarterlyIncomeSeries,
 } from "../services/charting/income.js"
 import {
@@ -173,6 +174,8 @@ export function createChartingRoutes(db?: DB) {
       labelIds: scope.labelIds,
     })
     const annual = annualIncomeSeries(agg.annual)
+    const quarterly = quarterlyIncomeSeries(agg.quarterly)
+    const quarterlyGrowth = quarterlyIncomeGrowth(quarterly)
     const body: ChartIncomeData = {
       currency: scope.currency,
       scope: toScopeDto(scope),
@@ -180,14 +183,14 @@ export function createChartingRoutes(db?: DB) {
       monthly,
       cumulative,
       annual: annual.map(({ partial: _partial, ...rest }) => rest),
-      quarterly: quarterlyIncomeSeries(agg.quarterly).map((b) => ({
+      quarterly: quarterly.map((b, i) => ({
         quarter: b.quarter,
         dividends: b.dividends,
         interest: b.interest,
         options: b.options,
         total: b.total,
-        priorYearQuarterTotal: null,
-        yoyChangePercent: null,
+        priorYearQuarterTotal: quarterlyGrowth[i].prior,
+        yoyChangePercent: quarterlyGrowth[i].changePercent,
       })),
       dailyAverageByYear: annualIncomeEquivalent(annual, "day"),
       monthlyAverageByYear: annualIncomeEquivalent(annual, "month"),

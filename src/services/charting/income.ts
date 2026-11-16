@@ -431,3 +431,41 @@ export function quarterlyIncomeSeries(buckets: IncomeBucket[], now: Date = new D
   }
   return out
 }
+
+/**
+ * Quarterly year-over-year growth (feature #253, sub-issue #264). Each quarter
+ * is compared with the SAME quarter of the preceding year, using the shared
+ * `quarterlyIncomeSeries` — never a second receipt aggregation. A missing prior
+ * quarter stays missing and a zero denominator is undefined (`null`), never 0%,
+ * infinity or a fabricated 100%. The current quarter is flagged `partial` so it
+ * can be shown against the prior FULL quarter, not as a final YoY.
+ */
+export interface QuarterlyIncomeGrowthPoint {
+  /** `YYYY-Qn`. */
+  quarter: string
+  year: number
+  /** 1–4. */
+  q: number
+  current: number
+  prior: number | null
+  changePercent: number | null
+  partial: boolean
+}
+
+export function quarterlyIncomeGrowth(series: QuarterlyIncomePoint[]): QuarterlyIncomeGrowthPoint[] {
+  const totalByKey = new Map(series.map((p) => [`${p.year}-${p.q}`, p.total]))
+  return series.map((p) => {
+    const prior = totalByKey.get(`${p.year - 1}-${p.q}`)
+    const changePercent =
+      prior != null && prior !== 0 ? round(((p.total - prior) / prior) * 100) : null
+    return {
+      quarter: p.quarter,
+      year: p.year,
+      q: p.q,
+      current: p.total,
+      prior: prior ?? null,
+      changePercent,
+      partial: p.partial,
+    }
+  })
+}
