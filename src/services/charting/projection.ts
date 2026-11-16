@@ -1,4 +1,4 @@
-import { and, eq, inArray, lt } from "drizzle-orm"
+import { and, eq, gte, inArray, lt, lte } from "drizzle-orm"
 import type { DB } from "../../db/index.js"
 import {
   chartEventFacts,
@@ -47,8 +47,8 @@ type FetchPriceBars = (
 export interface BuildChartFactsOptions {
   /** Generation to write. A rebuild writes a fresh generation; readers pin one. */
   generation: number
-  /** Window start (YYYY-MM-DD); default is the earliest trade/cash date. */
-  from?: string
+  /** Window start (YYYY-MM-DD); null means the whole history. Default: earliest trade/cash date. */
+  from?: string | null
   /** Window end (YYYY-MM-DD); default is yesterday. */
   to?: string
   /** Injectable price fetcher (tests); defaults to the instruments fetcher. */
@@ -80,9 +80,11 @@ function num(v: unknown): number {
 }
 
 /**
- * Rebuild the charting facts for one portfolio at `generation`. Deletes any
- * existing facts for that generation first, so a re-run is idempotent. Returns
- * the number of fact rows written.
+ * Rebuild the charting facts for one portfolio at `generation`, over the
+ * `[from, to]` window. Only that window is replaced, so a refresh pass can
+ * extend or restate a slice of history without wiping days it did not recompute;
+ * with no window it is a full rebuild. The publish is a single transaction.
+ * Returns the number of fact rows written.
  */
 export async function buildChartFacts(
   db: DB,
@@ -97,6 +99,23 @@ export async function buildChartFacts(
     .limit(1)
   if (!pf) throw new Error(`charting: portfolio ${portfolioId} not found`)
   const base = pf.baseCurrency.toUpperCase()
+
+  /**
+   * Clear this generation's facts for the recomputed window only. A refresh pass
+   * recomputes a window (see `refreshChartingFacts`), so deleting the whole
+   * generation would erase days the pass never touched. With no window the pass
+   * is a full rebuild and the whole generation goes.
+   */
+  const clearGenerationWindow = async (executor: DB, from: string | null, to: string | null) => {
+    const posConds = [eq(chartPositionDaily.portfolioId, portfolioId), eq(chartPositionDaily.generation, opts.generation)]
+    if (from) posConds.push(gte(chartPositionDaily.day, from))
+    if (to) posConds.push(lte(chartPositionDaily.day, to))
+    const evtConds = [eq(chartEventFacts.portfolioId, portfolioId), eq(chartEventFacts.generation, opts.generation)]
+    if (from) evtConds.push(gte(chartEventFacts.eventDate, from))
+    if (to) evtConds.push(lte(chartEventFacts.eventDate, to))
+    await executor.delete(chartPositionDaily).where(and(...posConds))
+    await executor.delete(chartEventFacts).where(and(...evtConds))
+  }
 
   // 1. Position-movement transactions for this portfolio, ordered by date.
   const txRows = await db
@@ -147,16 +166,14 @@ export async function buildChartFacts(
   const cashDates = cashRows.map(cashDate).filter((d): d is string => !!d)
   const allDates = [...tradeDates, ...cashDates].sort()
   if (allDates.length === 0) {
-    await db.delete(chartPositionDaily).where(and(eq(chartPositionDaily.portfolioId, portfolioId), eq(chartPositionDaily.generation, opts.generation)))
-    await db.delete(chartEventFacts).where(and(eq(chartEventFacts.portfolioId, portfolioId), eq(chartEventFacts.generation, opts.generation)))
+    await clearGenerationWindow(db, opts.from ?? null, opts.to ?? null)
     return { positionRows: 0, eventRows: 0, days: 0 }
   }
 
   const from = opts.from ?? allDates[0]
   const to = opts.to ?? (opts.now ? toDateStr(new Date(opts.now.getTime() - MS_DAY))! : allDates[allDates.length - 1])
   if (from > to) {
-    await db.delete(chartPositionDaily).where(and(eq(chartPositionDaily.portfolioId, portfolioId), eq(chartPositionDaily.generation, opts.generation)))
-    await db.delete(chartEventFacts).where(and(eq(chartEventFacts.portfolioId, portfolioId), eq(chartEventFacts.generation, opts.generation)))
+    await clearGenerationWindow(db, from, to)
     return { positionRows: 0, eventRows: 0, days: 0 }
   }
 
@@ -338,31 +355,34 @@ export async function buildChartFacts(
     })
   }
 
-  // 7. Replace the generation's facts and mark the projection complete.
-  await db.delete(chartPositionDaily).where(and(eq(chartPositionDaily.portfolioId, portfolioId), eq(chartPositionDaily.generation, opts.generation)))
-  await db.delete(chartEventFacts).where(and(eq(chartEventFacts.portfolioId, portfolioId), eq(chartEventFacts.generation, opts.generation)))
-  for (let i = 0; i < positionRows.length; i += 200) {
-    await db.insert(chartPositionDaily).values(positionRows.slice(i, i + 200))
-  }
-  for (let i = 0; i < eventRows.length; i += 200) {
-    await db.insert(chartEventFacts).values(eventRows.slice(i, i + 200))
-  }
-  await db
-    .insert(chartProjectionState)
-    .values({ portfolioId, generation: opts.generation, version: 1, status: "complete", dirtyFrom: null, updatedAt: new Date() })
-    .onConflictDoUpdate({
-      target: chartProjectionState.portfolioId,
-      set: { generation: opts.generation, status: "complete", dirtyFrom: null, updatedAt: new Date() },
-    })
+  // 7. Publish atomically: replace the window's facts and mark the projection
+  // complete in one transaction, so a reader never sees a half-written
+  // generation. A rollback leaves the previous complete result readable.
+  await db.transaction(async (tx) => {
+    await clearGenerationWindow(tx, from, to)
+    for (let i = 0; i < positionRows.length; i += 200) {
+      await tx.insert(chartPositionDaily).values(positionRows.slice(i, i + 200))
+    }
+    for (let i = 0; i < eventRows.length; i += 200) {
+      await tx.insert(chartEventFacts).values(eventRows.slice(i, i + 200))
+    }
+    await tx
+      .insert(chartProjectionState)
+      .values({ portfolioId, generation: opts.generation, version: 1, status: "complete", dirtyFrom: null, updatedAt: new Date() })
+      .onConflictDoUpdate({
+        target: chartProjectionState.portfolioId,
+        set: { generation: opts.generation, status: "complete", dirtyFrom: null, updatedAt: new Date() },
+      })
 
-  // 8. Prune superseded generations. Readers pin the published generation, so
-  // rows from an older one are unreachable; leaving them would grow the fact
-  // tables by a whole history per rebuild (a portfolio mutated daily would add a
-  // generation a day). The new generation is published before this runs, and a
-  // failed rebuild never reaches it, so the last complete result is always
-  // readable.
-  await db.delete(chartPositionDaily).where(and(eq(chartPositionDaily.portfolioId, portfolioId), lt(chartPositionDaily.generation, opts.generation)))
-  await db.delete(chartEventFacts).where(and(eq(chartEventFacts.portfolioId, portfolioId), lt(chartEventFacts.generation, opts.generation)))
+    // 8. Prune superseded generations. Readers pin the published generation, so
+    // rows from an older one are unreachable; leaving them would grow the fact
+    // tables by a whole history per rebuild (a portfolio mutated daily would add a
+    // generation a day). The new generation is published before this runs, and a
+    // failed rebuild never reaches it, so the last complete result is always
+    // readable.
+    await tx.delete(chartPositionDaily).where(and(eq(chartPositionDaily.portfolioId, portfolioId), lt(chartPositionDaily.generation, opts.generation)))
+    await tx.delete(chartEventFacts).where(and(eq(chartEventFacts.portfolioId, portfolioId), lt(chartEventFacts.generation, opts.generation)))
+  })
 
   return { positionRows: positionRows.length, eventRows: eventRows.length, days: days.length }
 }
