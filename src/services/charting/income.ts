@@ -369,3 +369,65 @@ export function annualIncomeEquivalent(
     partial: p.partial,
   }))
 }
+
+/**
+ * One quarter of received income (feature #253, sub-issue #263). Quarters are
+ * zero-filled BETWEEN the first and last observed quarter, so a covered
+ * zero-income quarter is a real zero bar while a future quarter (after the last
+ * observed one) is simply absent — never an invented zero. `partial` marks the
+ * current calendar quarter, whose total is year-to-date.
+ */
+export interface QuarterlyIncomePoint {
+  /** `YYYY-Qn`. */
+  quarter: string
+  year: number
+  /** 1–4. */
+  q: number
+  dividends: number
+  interest: number
+  options: number
+  total: number
+  partial: boolean
+}
+
+function quarterIndex(year: number, q: number): number {
+  return year * 4 + (q - 1)
+}
+
+function quarterFromIndex(index: number): { year: number; q: number } {
+  return { year: Math.floor(index / 4), q: (index % 4) + 1 }
+}
+
+function quarterLabel(year: number, q: number): string {
+  return `${year}-Q${q}`
+}
+
+export function quarterlyIncomeSeries(buckets: IncomeBucket[], now: Date = new Date()): QuarterlyIncomePoint[] {
+  if (buckets.length === 0) return []
+  const parsed = buckets.map((b) => {
+    const year = Number(b.period.slice(0, 4))
+    const q = Number(b.period.slice(6))
+    return { year, q, bucket: b }
+  })
+  const first = Math.min(...parsed.map((p) => quarterIndex(p.year, p.q)))
+  const last = Math.max(...parsed.map((p) => quarterIndex(p.year, p.q)))
+  const current = quarterIndex(now.getUTCFullYear(), Math.floor(now.getUTCMonth() / 3) + 1)
+  const byIndex = new Map(parsed.map((p) => [quarterIndex(p.year, p.q), p.bucket]))
+
+  const out: QuarterlyIncomePoint[] = []
+  for (let i = first; i <= last; i++) {
+    const { year, q } = quarterFromIndex(i)
+    const b = byIndex.get(i)
+    out.push({
+      quarter: quarterLabel(year, q),
+      year,
+      q,
+      dividends: round(b?.dividends ?? 0),
+      interest: round(b?.interest ?? 0),
+      options: round(b?.options ?? 0),
+      total: round(b?.total ?? 0),
+      partial: i === current,
+    })
+  }
+  return out
+}

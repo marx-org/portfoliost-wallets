@@ -2,7 +2,7 @@ import { describe, expect, it, beforeEach } from "vitest"
 import { createTestDb } from "../../db/test-db.js"
 import { chartEventFacts, labels, portfolios, positionLabels, positions } from "../../db/schema.js"
 import type { DB } from "../../db/index.js"
-import { aggregateIncome, annualIncomeEquivalent, annualIncomeSeries, cumulativeIncomeSeries, monthlyIncomeSeries, linearTrend } from "./income.js"
+import { aggregateIncome, annualIncomeEquivalent, annualIncomeSeries, cumulativeIncomeSeries, monthlyIncomeSeries, quarterlyIncomeSeries, linearTrend } from "./income.js"
 
 let db: DB
 
@@ -335,3 +335,48 @@ describe("annualIncomeEquivalent", () => {
 function roundish(n: number): number {
   return Math.round(n * 1e8) / 1e8
 }
+
+describe("quarterlyIncomeSeries", () => {
+  const bucket = (period: string, total: number): import("./income.js").IncomeBucket => ({
+    period,
+    dividends: total,
+    interest: 0,
+    options: 0,
+    total,
+  })
+
+  it("labels quarters YYYY-Qn and keeps each receipt in its own quarter", () => {
+    const out = quarterlyIncomeSeries([bucket("2026-Q1", 100), bucket("2026-Q2", 200)], new Date("2026-05-10T00:00:00Z"))
+    expect(out.map((p) => [p.quarter, p.total])).toEqual([
+      ["2026-Q1", 100],
+      ["2026-Q2", 200],
+    ])
+  })
+
+  it("zero-fills a covered zero-income quarter but invents no future quarter", () => {
+    // Q1 and Q3 observed, Q2 is a covered zero quarter; Q4 is in the future.
+    const out = quarterlyIncomeSeries([bucket("2026-Q1", 100), bucket("2026-Q3", 300)], new Date("2026-08-10T00:00:00Z"))
+    expect(out.map((p) => [p.quarter, p.total])).toEqual([
+      ["2026-Q1", 100],
+      ["2026-Q2", 0],
+      ["2026-Q3", 300],
+    ])
+    expect(out.some((p) => p.quarter === "2026-Q4")).toBe(false)
+  })
+
+  it("marks the current quarter partial", () => {
+    const out = quarterlyIncomeSeries([bucket("2026-Q1", 100), bucket("2026-Q2", 200)], new Date("2026-05-10T00:00:00Z"))
+    expect(out.map((p) => p.partial)).toEqual([false, true])
+  })
+
+  it("groups a March 31 / April 1 pair into Q1 and Q2 once each", () => {
+    // The daily aggregation already bucketed the two receipts; the quarterly
+    // series must not move an April receipt into Q1 or double count it.
+    const out = quarterlyIncomeSeries([bucket("2026-Q1", 100), bucket("2026-Q2", 50)], new Date("2026-04-02T00:00:00Z"))
+    expect(out.reduce((s, p) => s + p.total, 0)).toBe(150)
+  })
+
+  it("returns nothing when there are no quarters", () => {
+    expect(quarterlyIncomeSeries([])).toEqual([])
+  })
+})
