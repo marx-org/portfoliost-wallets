@@ -13,6 +13,7 @@ import { resolveChartScope, type ChartScopeInput, type ResolvedChartScope } from
 import { getScopedDailySeries, publishedFactsCondition, type PublishedGeneration } from "../services/charting/queries.js"
 import {
   allocationByAssetType,
+  allocationBySector,
   allocationByStockCategory,
   costAndValueByLabel,
   stockCategoryLabel,
@@ -247,7 +248,6 @@ export function createChartingRoutes(db?: DB) {
     const accountIds = await effectiveAccountIds(database, identity.id, scope)
     const projection = await scopeProjection(database, accountIds)
 
-    const bySector = new Map<string, number>()
     const byCurrency = new Map<string, number>()
     let total = 0
     if (projection.published.length > 0) {
@@ -265,7 +265,6 @@ export function createChartingRoutes(db?: DB) {
         const rows = await database
           .select({
             value: chartPositionDaily.value,
-            sector: positions.sector,
             instrumentCurrency: positions.instrumentCurrency,
           })
           .from(chartPositionDaily)
@@ -274,14 +273,13 @@ export function createChartingRoutes(db?: DB) {
         for (const r of rows) {
           const v = Number(r.value)
           total += v
-          const sector = r.sector || "UNKNOWN"
-          bySector.set(sector, (bySector.get(sector) ?? 0) + v)
           const ccy = r.instrumentCurrency || "USD"
           byCurrency.set(ccy, (byCurrency.get(ccy) ?? 0) + v)
         }
       }
     }
     const asset = await allocationByAssetType(database, projection.published)
+    const sector = await allocationBySector(database, projection.published)
     const slice = (key: string, value: number) => ({ key, label: key, value, percent: total > 0 ? Math.round((value / total) * 1000) / 10 : null, sourceCurrency: null, sourceValue: null, unknown: key === "UNKNOWN" })
     // Dividend-stock categories are a STOCK-only denominator: cash, bonds and
     // derivatives are excluded, and an unassigned stock is `not_classified`.
@@ -307,7 +305,7 @@ export function createChartingRoutes(db?: DB) {
       coverage: coverage(projection, accountIds.length),
       byCurrency: [...byCurrency].map(([k, v]) => slice(k, v)),
       byAssetType: asset.slices.map((s) => slice(s.key, s.value)),
-      bySector: [...bySector].map(([k, v]) => slice(k, v)),
+      bySector: sector.slices.map((s) => slice(s.key, s.value)),
       byCategory: category.slices.map(categorySlice),
       byLabel: [],
       byCostBasis: costValue.groups.map((g) => ({

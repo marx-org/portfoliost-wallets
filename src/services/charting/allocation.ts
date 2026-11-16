@@ -326,3 +326,63 @@ export async function allocationByAssetType(
     .sort((a, b) => b.value - a.value)
   return { slices, total: round8(total) }
 }
+
+/**
+ * Current market value by sector (feature #253, sub-issue #268).
+ *
+ * One slice per `positions.sector` at the latest published day, descending by
+ * value. The existing portfolio Allocation donut/table and the Charting sector
+ * renderer share this aggregation; an unknown/missing sector is exposed as
+ * `UNKNOWN` rather than dropped. Cash is a ledger balance, not a position-day
+ * fact, so it is not part of this universe.
+ */
+export interface SectorSlice {
+  key: string
+  value: number
+}
+
+export interface SectorAllocation {
+  /** Descending by value; zero-value sectors omitted. */
+  slices: SectorSlice[]
+  /** Denominator: the total the percentages are relative to. */
+  total: number
+}
+
+export async function allocationBySector(
+  db: DB,
+  published: PublishedGeneration[],
+): Promise<SectorAllocation> {
+  if (published.length === 0) return { slices: [], total: 0 }
+  const scopeCondition = publishedFactsCondition(
+    chartPositionDaily.portfolioId,
+    chartPositionDaily.generation,
+    published,
+  )
+  const [latest] = await db
+    .select({ d: max(chartPositionDaily.day) })
+    .from(chartPositionDaily)
+    .where(scopeCondition)
+  const latestDay = latest?.d ?? null
+  if (!latestDay) return { slices: [], total: 0 }
+
+  const rows = await db
+    .select({ sector: positions.sector, value: chartPositionDaily.value })
+    .from(chartPositionDaily)
+    .innerJoin(positions, eq(positions.id, chartPositionDaily.positionId))
+    .where(and(scopeCondition, eq(chartPositionDaily.day, latestDay)))
+
+  const totals = new Map<string, number>()
+  let total = 0
+  for (const r of rows) {
+    const value = Number(r.value)
+    if (!Number.isFinite(value)) continue
+    total += value
+    const key = r.sector || "UNKNOWN"
+    totals.set(key, (totals.get(key) ?? 0) + value)
+  }
+  const slices = [...totals]
+    .map(([key, value]) => ({ key, value: round8(value) }))
+    .filter((s) => s.value !== 0)
+    .sort((a, b) => b.value - a.value)
+  return { slices, total: round8(total) }
+}
