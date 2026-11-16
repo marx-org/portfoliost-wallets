@@ -2,7 +2,7 @@ import { describe, expect, it, beforeEach } from "vitest"
 import { createTestDb } from "../../db/test-db.js"
 import { chartEventFacts, labels, portfolios, positionLabels, positions } from "../../db/schema.js"
 import type { DB } from "../../db/index.js"
-import { aggregateIncome, annualIncomeEquivalent, annualIncomeSeries, cumulativeIncomeSeries, monthlyIncomeSeries, quarterlyIncomeSeries, linearTrend } from "./income.js"
+import { aggregateIncome, annualIncomeEquivalent, annualIncomeSeries, cumulativeIncomeSeries, monthlyIncomeSeries, quarterlyIncomeSeries, quarterlyIncomeGrowth, linearTrend } from "./income.js"
 
 let db: DB
 
@@ -378,5 +378,42 @@ describe("quarterlyIncomeSeries", () => {
 
   it("returns nothing when there are no quarters", () => {
     expect(quarterlyIncomeSeries([])).toEqual([])
+  })
+})
+
+describe("quarterlyIncomeGrowth", () => {
+  const series = (...totals: Array<[number, number, number]>) =>
+    quarterlyIncomeSeries(
+      totals.map(([y, q, t]) => ({
+        period: `${y}-Q${q}`,
+        dividends: t,
+        interest: 0,
+        options: 0,
+        total: t,
+      })),
+      new Date("2026-05-10T00:00:00Z"),
+    )
+
+  it("computes 100→125 as +25% and 100→80 as −20%", () => {
+    const out = quarterlyIncomeGrowth(series([2025, 1, 100], [2026, 1, 125], [2025, 2, 100], [2026, 2, 80]))
+    const q1 = out.find((p) => p.quarter === "2026-Q1")!
+    const q2 = out.find((p) => p.quarter === "2026-Q2")!
+    expect(q1).toMatchObject({ current: 125, prior: 100, changePercent: 25 })
+    expect(q2).toMatchObject({ current: 80, prior: 100, changePercent: -20 })
+  })
+
+  it("treats a zero prior quarter as undefined, not infinity or 100%", () => {
+    const out = quarterlyIncomeGrowth(series([2025, 1, 0], [2026, 1, 50]))
+    expect(out.find((p) => p.quarter === "2026-Q1")).toMatchObject({ current: 50, prior: 0, changePercent: null })
+  })
+
+  it("leaves a missing prior quarter missing", () => {
+    const out = quarterlyIncomeGrowth(series([2026, 1, 50]))
+    expect(out.find((p) => p.quarter === "2026-Q1")).toMatchObject({ prior: null, changePercent: null })
+  })
+
+  it("carries the partial flag for the current quarter", () => {
+    const out = quarterlyIncomeGrowth(series([2025, 2, 100], [2026, 2, 120]))
+    expect(out.find((p) => p.quarter === "2026-Q2")).toMatchObject({ partial: true })
   })
 })
