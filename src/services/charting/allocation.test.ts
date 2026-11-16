@@ -10,7 +10,7 @@ import {
   stockChartCategories,
 } from "../../db/schema.js"
 import type { DB } from "../../db/index.js"
-import { allocationByStockCategory, costAndValueByLabel } from "./allocation.js"
+import { allocationByStockCategory, allocationByAssetType, costAndValueByLabel } from "./allocation.js"
 
 let db: DB
 
@@ -271,5 +271,66 @@ describe("costAndValueByLabel", () => {
   it("returns nothing for an empty scope", async () => {
     const out = await costAndValueByLabel(db, "user-1", [], all)
     expect(out).toEqual({ groups: [] })
+  })
+})
+
+describe("allocationByAssetType", () => {
+  it("splits value by canonical asset type, largest first", async () => {
+    const pf = await addPortfolio("A")
+    const stock = await addPosition(pf, "AAPL", { assetType: "STOCK" })
+    const bond = await addPosition(pf, "BND", { assetType: "BOND" })
+    await addFact(pf, stock, "2026-01-02", "80")
+    await addFact(pf, bond, "2026-01-02", "20")
+
+    const out = await allocationByAssetType(db, [pub(pf)])
+    expect(out.total).toBe(100)
+    expect(out.slices).toEqual([
+      { key: "STOCK", value: 80 },
+      { key: "BOND", value: 20 },
+    ])
+  })
+
+  it("keeps ETF/fund and an unknown type separate, and never drops unknown", async () => {
+    const pf = await addPortfolio("A")
+    const stock = await addPosition(pf, "AAPL", { assetType: "STOCK" })
+    const etf = await addPosition(pf, "ETF", { assetType: "FUND" })
+    const mystery = await addPosition(pf, "???", { assetType: "MYSTERY" })
+    await addFact(pf, stock, "2026-01-02", "50")
+    await addFact(pf, etf, "2026-01-02", "30")
+    await addFact(pf, mystery, "2026-01-02", "20")
+
+    const out = await allocationByAssetType(db, [pub(pf)])
+    expect(out.slices).toEqual([
+      { key: "STOCK", value: 50 },
+      { key: "FUND", value: 30 },
+      { key: "MYSTERY", value: 20 },
+    ])
+  })
+
+  it("sums the same symbol held in two accounts once per attributed holding", async () => {
+    const pf1 = await addPortfolio("A")
+    const pf2 = await addPortfolio("B")
+    const aapl1 = await addPosition(pf1, "AAPL", { assetType: "STOCK" })
+    const aapl2 = await addPosition(pf2, "AAPL", { assetType: "STOCK" })
+    await addFact(pf1, aapl1, "2026-01-02", "40")
+    await addFact(pf2, aapl2, "2026-01-02", "40")
+
+    const out = await allocationByAssetType(db, [pub(pf1), pub(pf2)])
+    expect(out.slices).toEqual([{ key: "STOCK", value: 80 }])
+  })
+
+  it("uses only the latest published day", async () => {
+    const pf = await addPortfolio("A")
+    const stock = await addPosition(pf, "AAPL", { assetType: "STOCK" })
+    await addFact(pf, stock, "2026-01-01", "100")
+    await addFact(pf, stock, "2026-01-02", "120")
+
+    const out = await allocationByAssetType(db, [pub(pf)])
+    expect(out.total).toBe(120)
+  })
+
+  it("returns nothing for an empty scope", async () => {
+    const out = await allocationByAssetType(db, [])
+    expect(out).toEqual({ slices: [], total: 0 })
   })
 })
