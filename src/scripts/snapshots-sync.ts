@@ -41,7 +41,7 @@ import { portfolios } from "../db/schema.js"
 import { runBackfillRecent } from "../services/backfill.js"
 import { refreshQuotes } from "../services/quotes.js"
 import { resolveServiceToken } from "../services/instruments-fx.js"
-import { recomputeDirtyCharting } from "../services/charting/invalidation.js"
+import { refreshFleetChartingFacts } from "../services/charting/invalidation.js"
 
 async function main() {
   // Before touching the DB: a pass that cannot price is refused by the write
@@ -99,13 +99,15 @@ async function main() {
     }
   }
   console.log(`[snapshotsync] done: ok=${ok} failed=${failed}`)
-  // Charting facts are stale for any portfolio whose transactions changed
-  // since the last refresh (recalc-queue marked them). Rebuild only those, at a
-  // fresh generation, reusing the service token; a charting failure is logged
-  // and does not fail the snapshot pass.
+  // Charting facts are bootstrapped once, then extended/re-priced in a bounded
+  // tail window; mutations restate from the earliest dirty date. Reusing the
+  // service token keeps this in the scheduled refresh lifecycle, and a charting
+  // failure is logged without failing the snapshot pass.
   try {
-    const chart = await recomputeDirtyCharting(db, token, { now: new Date() })
-    console.log(`[snapshotsync] charting: rebuilt=${chart.rebuilt} failed=${chart.failed}`)
+    const chart = await refreshFleetChartingFacts(db, token, { now: new Date() })
+    console.log(
+      `[snapshotsync] charting: refreshed=${chart.refreshed} bootstrapped=${chart.bootstrapped} failed=${chart.failed}`
+    )
   } catch (err) {
     console.error("[snapshotsync] charting recompute failed:", err)
   }
