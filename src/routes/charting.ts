@@ -11,7 +11,12 @@ import {
 } from "../db/schema.js"
 import { resolveChartScope, type ChartScopeInput, type ResolvedChartScope } from "../services/charting/scope.js"
 import { getScopedDailySeries, publishedFactsCondition, type PublishedGeneration } from "../services/charting/queries.js"
-import { allocationByStockCategory, costAndValueByLabel, stockCategoryLabel } from "../services/charting/allocation.js"
+import {
+  allocationByAssetType,
+  allocationByStockCategory,
+  costAndValueByLabel,
+  stockCategoryLabel,
+} from "../services/charting/allocation.js"
 import {
   aggregateIncome,
   annualIncomeEquivalent,
@@ -242,7 +247,6 @@ export function createChartingRoutes(db?: DB) {
     const accountIds = await effectiveAccountIds(database, identity.id, scope)
     const projection = await scopeProjection(database, accountIds)
 
-    const byAsset = new Map<string, number>()
     const bySector = new Map<string, number>()
     const byCurrency = new Map<string, number>()
     let total = 0
@@ -260,9 +264,7 @@ export function createChartingRoutes(db?: DB) {
       if (latestDay) {
         const rows = await database
           .select({
-            positionId: chartPositionDaily.positionId,
             value: chartPositionDaily.value,
-            assetType: positions.assetType,
             sector: positions.sector,
             instrumentCurrency: positions.instrumentCurrency,
           })
@@ -272,8 +274,6 @@ export function createChartingRoutes(db?: DB) {
         for (const r of rows) {
           const v = Number(r.value)
           total += v
-          const asset = r.assetType || "UNKNOWN"
-          byAsset.set(asset, (byAsset.get(asset) ?? 0) + v)
           const sector = r.sector || "UNKNOWN"
           bySector.set(sector, (bySector.get(sector) ?? 0) + v)
           const ccy = r.instrumentCurrency || "USD"
@@ -281,6 +281,7 @@ export function createChartingRoutes(db?: DB) {
         }
       }
     }
+    const asset = await allocationByAssetType(database, projection.published)
     const slice = (key: string, value: number) => ({ key, label: key, value, percent: total > 0 ? Math.round((value / total) * 1000) / 10 : null, sourceCurrency: null, sourceValue: null, unknown: key === "UNKNOWN" })
     // Dividend-stock categories are a STOCK-only denominator: cash, bonds and
     // derivatives are excluded, and an unassigned stock is `not_classified`.
@@ -305,7 +306,7 @@ export function createChartingRoutes(db?: DB) {
       scope: toScopeDto(scope),
       coverage: coverage(projection, accountIds.length),
       byCurrency: [...byCurrency].map(([k, v]) => slice(k, v)),
-      byAssetType: [...byAsset].map(([k, v]) => slice(k, v)),
+      byAssetType: asset.slices.map((s) => slice(s.key, s.value)),
       bySector: [...bySector].map(([k, v]) => slice(k, v)),
       byCategory: category.slices.map(categorySlice),
       byLabel: [],

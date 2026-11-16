@@ -265,3 +265,64 @@ export async function costAndValueByLabel(
     })),
   }
 }
+/**
+ * Current market value by asset type (feature #253, sub-issue #267).
+ *
+ * One slice per canonical asset type across the scoped current positions, in the
+ * account base currency. This is the same `byAssetType` the allocation endpoint
+ * and the portfolio Allocation table use; it is extracted here so the charting
+ * renderer and any future caller share one aggregation. Asset types are the
+ * canonical `positions.asset_type` values (STOCK, BOND, FUND, …); an unknown
+ * type is exposed as `UNKNOWN`, never silently dropped. Cash is a ledger balance,
+ * not a position-day fact, so it is not part of this position universe.
+ */
+export interface AssetTypeSlice {
+  key: string
+  value: number
+}
+
+export interface AssetTypeAllocation {
+  /** Descending by value; zero-value types omitted. */
+  slices: AssetTypeSlice[]
+  /** Denominator: the total the percentages are relative to. */
+  total: number
+}
+
+export async function allocationByAssetType(
+  db: DB,
+  published: PublishedGeneration[],
+): Promise<AssetTypeAllocation> {
+  if (published.length === 0) return { slices: [], total: 0 }
+  const scopeCondition = publishedFactsCondition(
+    chartPositionDaily.portfolioId,
+    chartPositionDaily.generation,
+    published,
+  )
+  const [latest] = await db
+    .select({ d: max(chartPositionDaily.day) })
+    .from(chartPositionDaily)
+    .where(scopeCondition)
+  const latestDay = latest?.d ?? null
+  if (!latestDay) return { slices: [], total: 0 }
+
+  const rows = await db
+    .select({ assetType: positions.assetType, value: chartPositionDaily.value })
+    .from(chartPositionDaily)
+    .innerJoin(positions, eq(positions.id, chartPositionDaily.positionId))
+    .where(and(scopeCondition, eq(chartPositionDaily.day, latestDay)))
+
+  const totals = new Map<string, number>()
+  let total = 0
+  for (const r of rows) {
+    const value = Number(r.value)
+    if (!Number.isFinite(value)) continue
+    total += value
+    const key = r.assetType || "UNKNOWN"
+    totals.set(key, (totals.get(key) ?? 0) + value)
+  }
+  const slices = [...totals]
+    .map(([key, value]) => ({ key, value: round8(value) }))
+    .filter((s) => s.value !== 0)
+    .sort((a, b) => b.value - a.value)
+  return { slices, total: round8(total) }
+}
