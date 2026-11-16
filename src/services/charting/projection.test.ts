@@ -206,6 +206,40 @@ describe("buildChartFacts", () => {
     expect(contribution).toBe(1000)
   })
 
+  it("carries the previous close into a window that starts on a non-trading day", async () => {
+    const pf = await addPortfolio("user-1", "A")
+    const pos = await addPosition("user-1", pf, "AAPL")
+    await addTx({ userId: "user-1", portfolioId: pf, positionId: pos, type: "BUY", instrumentSymbol: "AAPL", assetType: "STOCK", quantity: "10", price: "100", currency: "USD", exchangeRate: "1", executedAt: new Date("2026-01-01T00:00:00Z") })
+
+    // A weekend/holiday tail: the source has no bar inside [from, to] but returns
+    // the previous close when asked (includePrevious). Without it the rebuild
+    // would write value 0 for both days — the bug that emptied the last two days
+    // of the production chart.
+    const fetcher = async (
+      symbol: string,
+      _from: string,
+      _to: string,
+      _authToken: string,
+      _signal?: AbortSignal,
+      _currency?: string,
+      _baseCcy?: string,
+      includePrevious?: boolean,
+    ): Promise<PriceBarSeries | null> =>
+      includePrevious
+        ? { symbol, dates: ["2025-12-31"], closes: [100], stale: false }
+        : { symbol, dates: [], closes: [], stale: false }
+
+    await buildChartFacts(db, pf, "token", { generation: 1, from: "2026-01-01", to: "2026-01-02", fetcher })
+
+    const rows = await db.select().from(chartPositionDaily).where(eq(chartPositionDaily.generation, 1))
+    expect(rows).toHaveLength(2)
+    expect(Number(rows[0].value)).toBe(1000)
+    // A carried close is still a known price; `carriedForward` is what marks it
+    // as reused rather than a real bar for that day.
+    expect(rows[0].priceKnown).toBe(true)
+    expect(rows[0].carriedForward).toBe(true)
+  })
+
   it("restates from transactions dated before the window and reflects a backdated edit or delete", async () => {
     const pf = await addPortfolio("user-1", "A")
     const pos = await addPosition("user-1", pf, "AAPL")

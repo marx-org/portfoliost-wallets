@@ -253,10 +253,17 @@ export async function buildChartFacts(
   }
   const symbols = [...symbolCcy.keys()]
   const fetcher = opts.fetcher
+  // Every symbol asks for the bar BEFORE the window. A window that starts on a
+  // non-trading day (the 2-day refresh tail lands on weekends and holidays) has
+  // no bars of its own, and without the previous close buildPriceMap has nothing
+  // to carry forward — it writes value 0 for every day in the window and wipes
+  // the last two days of the chart. The extra bar is outside [from, to], so it
+  // is used only as the carry-forward source; facts are still written for the
+  // window alone.
   const priceSeries = symbols.length
     ? await fetchPriceSeries(
         symbols, from, to, authToken, fetcher, opts.signal,
-        targetCcy, declaredBase, base, new Set<string>(),
+        targetCcy, declaredBase, base, new Set(symbols),
       )
     : new Map<string, PriceBarSeries>()
   const priceMaps = new Map<string, Map<string, number>>()
