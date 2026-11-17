@@ -10,7 +10,7 @@ import {
   stockChartCategories,
 } from "../../db/schema.js"
 import type { DB } from "../../db/index.js"
-import { allocationByStockCategory, allocationByAssetType, allocationBySector, allocationByCurrency, holdingsComposition, costAndValueByLabel } from "./allocation.js"
+import { allocationByStockCategory, allocationByAssetType, allocationBySector, allocationByCurrency, holdingsComposition, profitValuePoints, costAndValueByLabel } from "./allocation.js"
 
 let db: DB
 
@@ -25,7 +25,7 @@ async function addPortfolio(name: string) {
 async function addPosition(
   portfolioId: string,
   symbol: string,
-  opts: { assetType?: string; instrumentCurrency?: string; sector?: string } = {},
+  opts: { assetType?: string; instrumentCurrency?: string; sector?: string; isOpen?: boolean } = {},
 ) {
   const [pos] = await db
     .insert(positions)
@@ -35,6 +35,7 @@ async function addPosition(
       assetType: opts.assetType ?? "STOCK",
       instrumentCurrency: opts.instrumentCurrency ?? "USD",
       ...(opts.sector ? { sector: opts.sector } : {}),
+      ...(opts.isOpen != null ? { isOpen: opts.isOpen } : {}),
     })
     .returning({ id: positions.id })
   await db.insert(positionPortfolios).values({ positionId: pos.id, portfolioId })
@@ -60,6 +61,29 @@ async function addFactBasis(
     day,
     value,
     remainingBasis,
+    quantity: "1",
+  })
+}
+
+async function addFactFull(
+  portfolioId: string,
+  positionId: string,
+  day: string,
+  value: string,
+  remainingBasis: string,
+  realizedGain: string,
+  income: string,
+  generation = 1,
+) {
+  await db.insert(chartPositionDaily).values({
+    generation,
+    portfolioId,
+    positionId,
+    day,
+    value,
+    remainingBasis,
+    realizedGain,
+    income,
     quantity: "1",
   })
 }
@@ -492,5 +516,79 @@ describe("holdingsComposition", () => {
   it("returns nothing for an empty scope", async () => {
     const out = await holdingsComposition(db, [], { displayCurrency: "USD", convert: identity })
     expect(out).toEqual({ slices: [], total: 0, currency: "USD" })
+  })
+})
+
+describe("profitValuePoints", () => {
+  const identity = async (_from: string, amount: number) => amount
+
+  it("computes total profit as unrealized + realized + dividends, x = market value", async () => {
+    const pf = await addPortfolio("A")
+    const aapl = await addPosition(pf, "AAPL", { assetType: "STOCK", instrumentCurrency: "USD" })
+    // value 90, basis 100 -> unrealized -10; realized 30; dividends 5.
+    await addFactFull(pf, aapl, "2026-01-02", "90", "100", "30", "5")
+
+    const out = await profitValuePoints(db, [pub(pf)], { displayCurrency: "USD", convert: identity })
+    expect(out.points).toHaveLength(1)
+    expect(out.points[0]).toMatchObject({
+      marketValue: 90,
+      realized: 30,
+      unrealized: -10,
+      dividends: 5,
+      totalProfit: 25,
+      assetType: "STOCK",
+      accounts: ["A"],
+    })
+  })
+
+  it("aggregates the same identity across accounts without duplicating realized events", async () => {
+    const pf1 = await addPortfolio("A")
+    const pf2 = await addPortfolio("B")
+    const aapl1 = await addPosition(pf1, "AAPL", { assetType: "STOCK", instrumentCurrency: "USD" })
+    const aapl2 = await addPosition(pf2, "AAPL", { assetType: "STOCK", instrumentCurrency: "USD" })
+    await addFactFull(pf1, aapl1, "2026-01-02", "60", "50", "10", "0")
+    await addFactFull(pf2, aapl2, "2026-01-02", "30", "40", "20", "5")
+
+    const out = await profitValuePoints(db, [pub(pf1), pub(pf2)], { displayCurrency: "USD", convert: identity })
+    expect(out.points).toHaveLength(1)
+    expect(out.points[0]).toMatchObject({ marketValue: 90, realized: 30, dividends: 5, totalProfit: 35 })
+    expect(out.points[0].accounts).toEqual(["A", "B"])
+  })
+
+  it("keeps a stock and a same-ticker option separate", async () => {
+    const pf = await addPortfolio("A")
+    const stock = await addPosition(pf, "AAPL", { assetType: "STOCK", instrumentCurrency: "USD" })
+    const option = await addPosition(pf, "AAPL", { assetType: "OPTION", instrumentCurrency: "USD" })
+    await addFactFull(pf, stock, "2026-01-02", "90", "80", "0", "0")
+    await addFactFull(pf, option, "2026-01-02", "10", "5", "0", "0")
+
+    const out = await profitValuePoints(db, [pub(pf)], { displayCurrency: "USD", convert: identity })
+    expect(out.points).toHaveLength(2)
+    expect(new Set(out.points.map((p) => p.assetType))).toEqual(new Set(["STOCK", "OPTION"]))
+  })
+
+  it("keeps a closed/zero-value holding accessible at x=0", async () => {
+    const pf = await addPortfolio("A")
+    const old = await addPosition(pf, "OLD", { assetType: "STOCK", instrumentCurrency: "USD", isOpen: false })
+    await addFactFull(pf, old, "2026-01-02", "0", "0", "30", "5")
+
+    const out = await profitValuePoints(db, [pub(pf)], { displayCurrency: "USD", convert: identity })
+    const point = out.points.find((p) => p.key.startsWith("STOCK|OLD|"))
+    expect(point, JSON.stringify(out.points)).toMatchObject({ marketValue: 0, totalProfit: 35 })
+  })
+
+  it("uses only the latest published day", async () => {
+    const pf = await addPortfolio("A")
+    const aapl = await addPosition(pf, "AAPL", { assetType: "STOCK", instrumentCurrency: "USD" })
+    await addFactFull(pf, aapl, "2026-01-01", "80", "70", "0", "0")
+    await addFactFull(pf, aapl, "2026-01-02", "100", "80", "5", "5")
+
+    const out = await profitValuePoints(db, [pub(pf)], { displayCurrency: "USD", convert: identity })
+    expect(out.points[0]).toMatchObject({ marketValue: 100, realized: 5, dividends: 5, totalProfit: 30 })
+  })
+
+  it("returns nothing for an empty scope", async () => {
+    const out = await profitValuePoints(db, [], { displayCurrency: "USD", convert: identity })
+    expect(out).toEqual({ points: [], currency: "USD" })
   })
 })

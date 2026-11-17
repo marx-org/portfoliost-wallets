@@ -136,6 +136,35 @@ describe("charting routes", () => {
     expect(Array.isArray(body.benchmarks)).toBe(true)
   })
 
+  it("serves the profit/value scatter with profit decomposition", async () => {
+    const h = await makeHarness("user-1")
+    await seed(h)
+    const app = await boot(h)
+    const res = await app.request("/api/portfolios/charting/performance", { headers: h.headers })
+    expect(res.status).toBe(200)
+    const body = (await res.json()) as {
+      scatter: Array<{
+        symbol: string
+        assetType: string | null
+        accounts: string[]
+        marketValue: number
+        totalProfit: number
+        realized: number | null
+        unrealized: number | null
+        dividends: number | null
+      }>
+    }
+    const point = body.scatter.find((p) => p.symbol.startsWith("STOCK|AAPL|"))
+    expect(point, JSON.stringify(body.scatter)).toBeTruthy()
+    expect(point!.marketValue).toBe(1100)
+    expect(point!.accounts.length).toBeGreaterThan(0)
+    // profit = realized + unrealized + dividends
+    expect(point!.totalProfit).toBeCloseTo(
+      (point!.realized ?? 0) + (point!.unrealized ?? 0) + (point!.dividends ?? 0),
+      4,
+    )
+  })
+
   it("rejects a malformed account id with 422", async () => {
     const h = await makeHarness("user-1")
     await seed(h)

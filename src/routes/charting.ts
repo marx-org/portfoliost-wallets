@@ -18,6 +18,7 @@ import {
   allocationByStockCategory,
   costAndValueByLabel,
   holdingsComposition,
+  profitValuePoints,
   stockCategoryLabel,
 } from "../services/charting/allocation.js"
 import { resolvedFxRate } from "../services/instruments-fx.js"
@@ -244,6 +245,17 @@ export function createChartingRoutes(db?: DB) {
             labelIds: scope.labelIds,
           })
         : []
+    const authToken = c.req.header("Authorization") ?? null
+    const convertToDisplay = async (from: string, amount: number): Promise<number | null> => {
+      if (!from) return null
+      if (from === scope.currency) return amount
+      const r = await resolvedFxRate(authToken, from, scope.currency)
+      return r ? amount * r.rate : null
+    }
+    const scatter = await profitValuePoints(database, projection.published, {
+      displayCurrency: scope.currency,
+      convert: convertToDisplay,
+    })
     const body: ChartPerformanceData = {
       currency: scope.currency,
       scope: { ...toScopeDto(scope), benchmarks: benchmarkSymbols },
@@ -262,7 +274,17 @@ export function createChartingRoutes(db?: DB) {
         simple: null,
       })),
       quarterly: quarterlyReturns(series.points),
-      scatter: [],
+      scatter: scatter.points.map((p) => ({
+        symbol: p.key,
+        name: p.name,
+        assetType: p.assetType,
+        accounts: p.accounts,
+        marketValue: p.marketValue,
+        totalProfit: p.totalProfit,
+        realized: p.realized,
+        unrealized: p.unrealized,
+        dividends: p.dividends,
+      })),
       benchmarks,
     }
     return c.json(body satisfies ChartPerformanceData)
