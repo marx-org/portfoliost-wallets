@@ -3580,6 +3580,13 @@ export interface components {
             date: string;
             balance: number;
         };
+        /** @description One cash-balance line (per real account, or the combined total). */
+        ChartCashSeries: {
+            /** @description Account id */
+            key: string;
+            label: string;
+            points: components["schemas"]["ChartCashPoint"][];
+        };
         ChartContributionPoint: {
             year: number;
             contributions?: number;
@@ -3592,6 +3599,8 @@ export interface components {
             scope: components["schemas"]["ChartScope"];
             coverage: components["schemas"]["ChartCoverage"];
             balanceHistory?: components["schemas"]["ChartCashPoint"][];
+            /** @description One line per selected real account plus the combined total */
+            series?: components["schemas"]["ChartCashSeries"][];
             annualContributions?: components["schemas"]["ChartContributionPoint"][];
         };
         Portfolio: {

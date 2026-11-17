@@ -165,6 +165,22 @@ describe("charting routes", () => {
     )
   })
 
+  it("serves per-account cash balance series plus a combined total", async () => {
+    const h = await makeHarness("user-1")
+    const pf = await seed(h)
+    const app = await boot(h)
+    const res = await app.request(`/api/portfolios/charting/cash?accounts=${pf}`, { headers: h.headers })
+    expect(res.status).toBe(200)
+    const body = (await res.json()) as {
+      balanceHistory: Array<{ date: string; balance: number }>
+      series: Array<{ key: string; label: string; points: Array<{ date: string; balance: number }> }>
+    }
+    expect(body.series.length).toBeGreaterThanOrEqual(2)
+    expect(body.series.at(-1)?.label).toBe("Total")
+    expect(body.balanceHistory).toEqual(body.series.at(-1)?.points)
+    expect(body.balanceHistory.length).toBeGreaterThan(0)
+  })
+
   it("rejects a malformed account id with 422", async () => {
     const h = await makeHarness("user-1")
     await seed(h)
