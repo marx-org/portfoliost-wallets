@@ -10,7 +10,7 @@ import {
   stockChartCategories,
 } from "../../db/schema.js"
 import type { DB } from "../../db/index.js"
-import { allocationByStockCategory, allocationByAssetType, allocationBySector, costAndValueByLabel } from "./allocation.js"
+import { allocationByStockCategory, allocationByAssetType, allocationBySector, allocationByCurrency, costAndValueByLabel } from "./allocation.js"
 
 let db: DB
 
@@ -379,5 +379,56 @@ describe("allocationBySector", () => {
   it("returns nothing for an empty scope", async () => {
     const out = await allocationBySector(db, [])
     expect(out).toEqual({ slices: [], total: 0 })
+  })
+})
+
+describe("allocationByCurrency", () => {
+  it("converts to the display currency before weighting: 100 USD + 100 PLN = 80/20", async () => {
+    const pf = await addPortfolio("A") // base USD
+    const usd = await addPosition(pf, "AAPL", { instrumentCurrency: "USD" })
+    const pln = await addPosition(pf, "CDR", { instrumentCurrency: "PLN" })
+    // Facts are in the account base (USD): 100 USD and 25 USD (= 100 PLN at 4).
+    await addFact(pf, usd, "2026-01-02", "100")
+    await addFact(pf, pln, "2026-01-02", "25")
+
+    const out = await allocationByCurrency(db, [pub(pf)], {
+      displayCurrency: "PLN",
+      convert: async (from, amount) => (from === "USD" ? amount * 4 : amount),
+    })
+    expect(out.total).toBe(500)
+    expect(out.slices).toEqual([
+      { key: "USD", value: 400, unknown: false },
+      { key: "PLN", value: 100, unknown: false },
+    ])
+  })
+
+  it("keeps the value when the display currency equals the account base", async () => {
+    const pf = await addPortfolio("A")
+    const usd = await addPosition(pf, "AAPL", { instrumentCurrency: "USD" })
+    await addFact(pf, usd, "2026-01-02", "100")
+
+    const out = await allocationByCurrency(db, [pub(pf)], {
+      displayCurrency: "USD",
+      convert: async (_from, amount) => amount,
+    })
+    expect(out.slices).toEqual([{ key: "USD", value: 100, unknown: false }])
+  })
+
+  it("flags a denomination whose rate cannot be resolved instead of inventing 1:1", async () => {
+    const pf = await addPortfolio("A")
+    const usd = await addPosition(pf, "AAPL", { instrumentCurrency: "USD" })
+    await addFact(pf, usd, "2026-01-02", "100")
+
+    const out = await allocationByCurrency(db, [pub(pf)], {
+      displayCurrency: "PLN",
+      convert: async () => null,
+    })
+    expect(out.total).toBe(0)
+    expect(out.slices).toEqual([{ key: "USD", value: 0, unknown: true }])
+  })
+
+  it("returns nothing for an empty scope", async () => {
+    const out = await allocationByCurrency(db, [], { displayCurrency: "USD", convert: async () => 1 })
+    expect(out).toEqual({ slices: [], total: 0, currency: "USD" })
   })
 })

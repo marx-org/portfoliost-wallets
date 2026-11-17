@@ -1,5 +1,5 @@
 import { Hono } from "hono"
-import { and, eq, inArray, max, sql } from "drizzle-orm"
+import { and, eq, inArray, sql } from "drizzle-orm"
 import { userIdentityMiddleware } from "../auth.js"
 import { getDb, type DB } from "../db/index.js"
 import {
@@ -7,17 +7,18 @@ import {
   chartPositionDaily,
   chartProjectionState,
   portfolios,
-  positions,
 } from "../db/schema.js"
 import { resolveChartScope, type ChartScopeInput, type ResolvedChartScope } from "../services/charting/scope.js"
 import { getScopedDailySeries, publishedFactsCondition, type PublishedGeneration } from "../services/charting/queries.js"
 import {
   allocationByAssetType,
+  allocationByCurrency,
   allocationBySector,
   allocationByStockCategory,
   costAndValueByLabel,
   stockCategoryLabel,
 } from "../services/charting/allocation.js"
+import { resolvedFxRate } from "../services/instruments-fx.js"
 import {
   aggregateIncome,
   annualIncomeEquivalent,
@@ -252,39 +253,29 @@ export function createChartingRoutes(db?: DB) {
     const accountIds = await effectiveAccountIds(database, identity.id, scope)
     const projection = await scopeProjection(database, accountIds)
 
-    const byCurrency = new Map<string, number>()
-    let total = 0
-    if (projection.published.length > 0) {
-      const scopeCondition = publishedFactsCondition(
-        chartPositionDaily.portfolioId,
-        chartPositionDaily.generation,
-        projection.published,
-      )
-      const [maxRow] = await database
-        .select({ d: max(chartPositionDaily.day) })
-        .from(chartPositionDaily)
-        .where(scopeCondition)
-      const latestDay = maxRow?.d ?? null
-      if (latestDay) {
-        const rows = await database
-          .select({
-            value: chartPositionDaily.value,
-            instrumentCurrency: positions.instrumentCurrency,
-          })
-          .from(chartPositionDaily)
-          .innerJoin(positions, eq(positions.id, chartPositionDaily.positionId))
-          .where(and(scopeCondition, eq(chartPositionDaily.day, latestDay)))
-        for (const r of rows) {
-          const v = Number(r.value)
-          total += v
-          const ccy = r.instrumentCurrency || "USD"
-          byCurrency.set(ccy, (byCurrency.get(ccy) ?? 0) + v)
-        }
-      }
-    }
     const asset = await allocationByAssetType(database, projection.published)
     const sector = await allocationBySector(database, projection.published)
-    const slice = (key: string, value: number) => ({ key, label: key, value, percent: total > 0 ? Math.round((value / total) * 1000) / 10 : null, sourceCurrency: null, sourceValue: null, unknown: key === "UNKNOWN" })
+    const authToken = c.req.header("Authorization")
+    // Convert each account-base value into the requested display currency before
+    // grouping by denomination; an unresolvable rate is exposed as unknown.
+    const currency = await allocationByCurrency(database, projection.published, {
+      displayCurrency: scope.currency,
+      convert: async (from, amount) => {
+        if (!from) return null
+        if (from === scope.currency) return amount
+        const r = await resolvedFxRate(authToken, from, scope.currency)
+        return r ? amount * r.rate : null
+      },
+    })
+    const sliceWith = (key: string, value: number, total: number, unknown = false) => ({
+      key,
+      label: key,
+      value,
+      percent: total > 0 ? Math.round((value / total) * 1000) / 10 : null,
+      sourceCurrency: null,
+      sourceValue: null,
+      unknown,
+    })
     // Dividend-stock categories are a STOCK-only denominator: cash, bonds and
     // derivatives are excluded, and an unassigned stock is `not_classified`.
     const category = await allocationByStockCategory(database, identity.id, projection.published)
@@ -307,9 +298,9 @@ export function createChartingRoutes(db?: DB) {
       currency: scope.currency,
       scope: toScopeDto(scope),
       coverage: coverage(projection, accountIds.length),
-      byCurrency: [...byCurrency].map(([k, v]) => slice(k, v)),
-      byAssetType: asset.slices.map((s) => slice(s.key, s.value)),
-      bySector: sector.slices.map((s) => slice(s.key, s.value)),
+      byCurrency: currency.slices.map((s) => sliceWith(s.key, s.value, currency.total, s.unknown)),
+      byAssetType: asset.slices.map((s) => sliceWith(s.key, s.value, asset.total)),
+      bySector: sector.slices.map((s) => sliceWith(s.key, s.value, sector.total)),
       byCategory: category.slices.map(categorySlice),
       byLabel: [],
       byCostBasis: costValue.groups.map((g) => ({
