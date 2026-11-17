@@ -16,9 +16,11 @@ import {
   allocationBySector,
   allocationByStockCategory,
   costAndValueByLabel,
+  holdingsComposition,
   stockCategoryLabel,
 } from "../services/charting/allocation.js"
 import { resolvedFxRate } from "../services/instruments-fx.js"
+import { cashBalances } from "../services/cashLedger.js"
 import {
   aggregateIncome,
   annualIncomeEquivalent,
@@ -255,17 +257,46 @@ export function createChartingRoutes(db?: DB) {
 
     const asset = await allocationByAssetType(database, projection.published)
     const sector = await allocationBySector(database, projection.published)
-    const authToken = c.req.header("Authorization")
+    const authToken = c.req.header("Authorization") ?? null
     // Convert each account-base value into the requested display currency before
     // grouping by denomination; an unresolvable rate is exposed as unknown.
+    const convertToDisplay = async (from: string, amount: number): Promise<number | null> => {
+      if (!from) return null
+      if (from === scope.currency) return amount
+      const r = await resolvedFxRate(authToken, from, scope.currency)
+      return r ? amount * r.rate : null
+    }
     const currency = await allocationByCurrency(database, projection.published, {
       displayCurrency: scope.currency,
-      convert: async (from, amount) => {
-        if (!from) return null
-        if (from === scope.currency) return amount
-        const r = await resolvedFxRate(authToken, from, scope.currency)
-        return r ? amount * r.rate : null
-      },
+      convert: convertToDisplay,
+    })
+    // Current cash per scoped account, from the wallets ledger, converted into
+    // the display currency. A ledger/FX failure leaves cash out rather than
+    // inventing a zero.
+    let cash = 0
+    if (accountIds.length > 0) {
+      const bases = await database
+        .select({ id: portfolios.id, baseCurrency: portfolios.baseCurrency })
+        .from(portfolios)
+        .where(inArray(portfolios.id, accountIds))
+      const baseById = new Map(bases.map((b) => [b.id, b.baseCurrency]))
+      for (const id of accountIds) {
+        try {
+          const balances = await cashBalances(database, authToken, id)
+          const base = baseById.get(id) ?? ""
+          const amount = balances.get(base) ?? 0
+          if (!amount) continue
+          const converted = await convertToDisplay(base, amount)
+          if (converted != null) cash += converted
+        } catch {
+          // Leave cash out of this account; the position composition is still valid.
+        }
+      }
+    }
+    const composition = await holdingsComposition(database, projection.published, {
+      displayCurrency: scope.currency,
+      convert: convertToDisplay,
+      cash,
     })
     const sliceWith = (key: string, value: number, total: number, unknown = false) => ({
       key,
@@ -312,7 +343,15 @@ export function createChartingRoutes(db?: DB) {
         percentValue: null,
         unknown: false,
       })),
-      positions: [],
+      positions: composition.slices.map((s) => ({
+        key: s.key,
+        label: s.label,
+        value: s.value,
+        percent: composition.total > 0 ? Math.round((s.value / composition.total) * 1000) / 10 : null,
+        sourceCurrency: null,
+        sourceValue: null,
+        unknown: s.unknown,
+      })),
     }
     return c.json(body satisfies ChartAllocationData)
   })

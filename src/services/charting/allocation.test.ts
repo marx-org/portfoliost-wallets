@@ -10,7 +10,7 @@ import {
   stockChartCategories,
 } from "../../db/schema.js"
 import type { DB } from "../../db/index.js"
-import { allocationByStockCategory, allocationByAssetType, allocationBySector, allocationByCurrency, costAndValueByLabel } from "./allocation.js"
+import { allocationByStockCategory, allocationByAssetType, allocationBySector, allocationByCurrency, holdingsComposition, costAndValueByLabel } from "./allocation.js"
 
 let db: DB
 
@@ -429,6 +429,68 @@ describe("allocationByCurrency", () => {
 
   it("returns nothing for an empty scope", async () => {
     const out = await allocationByCurrency(db, [], { displayCurrency: "USD", convert: async () => 1 })
+    expect(out).toEqual({ slices: [], total: 0, currency: "USD" })
+  })
+})
+
+describe("holdingsComposition", () => {
+  const identity = async (_from: string, amount: number) => amount
+
+  it("groups by canonical identity and adds the cash bucket", async () => {
+    const pf = await addPortfolio("A")
+    const aapl = await addPosition(pf, "AAPL", { assetType: "STOCK", instrumentCurrency: "USD" })
+    const bond = await addPosition(pf, "BND", { assetType: "BOND", instrumentCurrency: "USD" })
+    await addFact(pf, aapl, "2026-01-02", "150")
+    await addFact(pf, bond, "2026-01-02", "50")
+
+    const out = await holdingsComposition(db, [pub(pf)], { displayCurrency: "USD", convert: identity, cash: 25 })
+    expect(out.slices).toEqual([
+      { key: "STOCK|AAPL|USD", label: "AAPL", assetType: "STOCK", value: 150, unknown: false },
+      { key: "BOND|BND|USD", label: "BND", assetType: "BOND", value: 50, unknown: false },
+      { key: "CASH", label: "Cash", assetType: "CASH", value: 25, unknown: false },
+    ])
+    expect(out.total).toBe(225)
+  })
+
+  it("aggregates the same stock across accounts but never merges a same-ticker option", async () => {
+    const pf1 = await addPortfolio("A")
+    const pf2 = await addPortfolio("B")
+    const stock1 = await addPosition(pf1, "AAPL", { assetType: "STOCK", instrumentCurrency: "USD" })
+    const stock2 = await addPosition(pf2, "AAPL", { assetType: "STOCK", instrumentCurrency: "USD" })
+    const option = await addPosition(pf2, "AAPL", { assetType: "OPTION", instrumentCurrency: "USD" })
+    await addFact(pf1, stock1, "2026-01-02", "100")
+    await addFact(pf2, stock2, "2026-01-02", "50")
+    await addFact(pf2, option, "2026-01-02", "20")
+
+    const out = await holdingsComposition(db, [pub(pf1), pub(pf2)], { displayCurrency: "USD", convert: identity })
+    const stock = out.slices.find((s) => s.assetType === "STOCK")
+    const opt = out.slices.find((s) => s.assetType === "OPTION")
+    expect(stock?.value).toBe(150)
+    expect(opt?.value).toBe(20)
+  })
+
+  it("keeps a negative cash balance signed in the table and total", async () => {
+    const pf = await addPortfolio("A")
+    const aapl = await addPosition(pf, "AAPL", { assetType: "STOCK", instrumentCurrency: "USD" })
+    await addFact(pf, aapl, "2026-01-02", "100")
+
+    const out = await holdingsComposition(db, [pub(pf)], { displayCurrency: "USD", convert: identity, cash: -30 })
+    expect(out.slices.find((s) => s.key === "CASH")?.value).toBe(-30)
+    expect(out.total).toBe(70)
+  })
+
+  it("uses only the latest published day", async () => {
+    const pf = await addPortfolio("A")
+    const aapl = await addPosition(pf, "AAPL", { assetType: "STOCK", instrumentCurrency: "USD" })
+    await addFact(pf, aapl, "2026-01-01", "100")
+    await addFact(pf, aapl, "2026-01-02", "120")
+
+    const out = await holdingsComposition(db, [pub(pf)], { displayCurrency: "USD", convert: identity })
+    expect(out.total).toBe(120)
+  })
+
+  it("returns nothing for an empty scope", async () => {
+    const out = await holdingsComposition(db, [], { displayCurrency: "USD", convert: identity })
     expect(out).toEqual({ slices: [], total: 0, currency: "USD" })
   })
 })

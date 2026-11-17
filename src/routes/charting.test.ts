@@ -104,6 +104,24 @@ describe("charting routes", () => {
     if (current) expect(current.partial).toBe(true)
   })
 
+  it("serves the holdings composition with positions and a cash slice", async () => {
+    const h = await makeHarness("user-1")
+    await seed(h)
+    const app = await boot(h)
+    const res = await app.request("/api/portfolios/charting/allocation", { headers: h.headers })
+    expect(res.status).toBe(200)
+    const body = (await res.json()) as {
+      positions: Array<{ key: string; label: string; value: number; unknown: boolean }>
+    }
+    const stock = body.positions.find((p) => p.key.startsWith("STOCK|"))
+    expect(stock?.value).toBe(1100)
+    // The seed's ledger yields a cash balance; the composition exposes it as a
+    // signed CASH slice rather than silently dropping cash.
+    const cash = body.positions.find((p) => p.key === "CASH")
+    expect(cash, JSON.stringify(body.positions)).toBeTruthy()
+    expect(typeof cash!.value).toBe("number")
+  })
+
   it("rejects a malformed account id with 422", async () => {
     const h = await makeHarness("user-1")
     await seed(h)
