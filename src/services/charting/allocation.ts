@@ -1,6 +1,6 @@
 import { and, eq, inArray, max } from "drizzle-orm"
 import type { DB } from "../../db/index.js"
-import { chartPositionDaily, labels, positions, positionLabels, stockChartCategories } from "../../db/schema.js"
+import { chartPositionDaily, labels, portfolios, positions, positionLabels, stockChartCategories } from "../../db/schema.js"
 import { publishedFactsCondition, type PublishedGeneration } from "./queries.js"
 import { STOCK_CHART_CATEGORIES } from "./categories.js"
 
@@ -385,4 +385,95 @@ export async function allocationBySector(
     .filter((s) => s.value !== 0)
     .sort((a, b) => b.value - a.value)
   return { slices, total: round8(total) }
+}
+
+/**
+ * Currency-denomination weights in a comparable display currency (feature
+ * #253, sub-issue #266).
+ *
+ * The facts store each position's value in its ACCOUNT base currency, so the
+ * old by-currency rows added EUR + USD + PLN as if they were one number. This
+ * converts every position from its account base into the requested display
+ * currency first, then groups by the instrument's denomination currency. The
+ * denominator is therefore a single comparable total, and each slice's `value`
+ * is in that display currency while `key` is the denomination.
+ *
+ * A position whose rate cannot be resolved is not silently treated as 1:1: its
+ * value is left out of the comparable total and the denomination is flagged
+ * `unknown`. Cash is a ledger balance, not a position-day fact, so it is not
+ * part of this position universe.
+ */
+export interface CurrencySlice {
+  /** Instrument denomination currency (e.g. USD, PLN). */
+  key: string
+  /** Comparable value in the display currency. */
+  value: number
+  unknown: boolean
+}
+
+export interface CurrencyAllocation {
+  slices: CurrencySlice[]
+  /** Denominator: the comparable total the percentages are relative to. */
+  total: number
+  currency: string
+}
+
+export async function allocationByCurrency(
+  db: DB,
+  published: PublishedGeneration[],
+  opts: {
+    displayCurrency: string
+    /** Convert an amount from a source currency into the display currency; null = unknown. */
+    convert: (from: string, amount: number) => Promise<number | null>
+  },
+): Promise<CurrencyAllocation> {
+  const currency = opts.displayCurrency
+  if (published.length === 0) return { slices: [], total: 0, currency }
+  const scopeCondition = publishedFactsCondition(
+    chartPositionDaily.portfolioId,
+    chartPositionDaily.generation,
+    published,
+  )
+  const [latest] = await db
+    .select({ d: max(chartPositionDaily.day) })
+    .from(chartPositionDaily)
+    .where(scopeCondition)
+  const latestDay = latest?.d ?? null
+  if (!latestDay) return { slices: [], total: 0, currency }
+
+  const rows = await db
+    .select({
+      baseCurrency: portfolios.baseCurrency,
+      instrumentCurrency: positions.instrumentCurrency,
+      value: chartPositionDaily.value,
+    })
+    .from(chartPositionDaily)
+    .innerJoin(positions, eq(positions.id, chartPositionDaily.positionId))
+    .innerJoin(portfolios, eq(portfolios.id, chartPositionDaily.portfolioId))
+    .where(and(scopeCondition, eq(chartPositionDaily.day, latestDay)))
+
+  const totals = new Map<string, { value: number; unknown: boolean }>()
+  let total = 0
+  for (const r of rows) {
+    const amount = Number(r.value)
+    if (!Number.isFinite(amount)) continue
+    const key = r.instrumentCurrency || "UNKNOWN"
+    const base = r.baseCurrency || ""
+    const converted = await opts.convert(base, amount)
+    if (converted == null || !Number.isFinite(converted)) {
+      const cur = totals.get(key) ?? { value: 0, unknown: false }
+      cur.unknown = true
+      totals.set(key, cur)
+      continue
+    }
+    total += converted
+    const cur = totals.get(key) ?? { value: 0, unknown: false }
+    cur.value += converted
+    totals.set(key, cur)
+  }
+  const slices = [...totals]
+    .map(([key, v]) => ({ key, value: round8(v.value), unknown: v.unknown }))
+    .filter((s) => s.value !== 0 || s.unknown)
+    .sort((a, b) => b.value - a.value)
+  return { slices, total: round8(total), currency }
 }
