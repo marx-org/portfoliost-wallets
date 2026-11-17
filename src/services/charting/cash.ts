@@ -1,4 +1,6 @@
 import type { DB } from "../../db/index.js"
+import { inArray } from "drizzle-orm"
+import { portfolios } from "../../db/schema.js"
 import type { PublishedGeneration } from "./queries.js"
 import { cashBalanceSeries } from "../cashLedger.js"
 
@@ -63,6 +65,12 @@ export async function cashBalanceSeriesForScope(
   const from = opts.from ?? yearsAgo(1, now)
   const to = opts.to ?? now.toISOString().slice(0, 10)
 
+  const names = await db
+    .select({ id: portfolios.id, name: portfolios.name })
+    .from(portfolios)
+    .where(inArray(portfolios.id, published.map((p) => p.portfolioId)))
+  const nameById = new Map(names.map((n) => [n.id, n.name]))
+
   const series: CashBalanceSeries[] = []
   const totalByDate = new Map<string, number>()
 
@@ -71,7 +79,7 @@ export async function cashBalanceSeriesForScope(
     const points = [...balances.entries()]
       .sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0))
       .map(([date, balance]) => ({ date, balance }))
-    series.push({ key: p.portfolioId, label: p.portfolioId, points })
+    series.push({ key: p.portfolioId, label: nameById.get(p.portfolioId) ?? p.portfolioId, points })
     for (const [date, balance] of balances) {
       totalByDate.set(date, (totalByDate.get(date) ?? 0) + balance)
     }
