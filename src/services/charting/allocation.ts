@@ -477,3 +477,108 @@ export async function allocationByCurrency(
     .sort((a, b) => b.value - a.value)
   return { slices, total: round8(total), currency }
 }
+
+/**
+ * Current composition of all holdings (feature #253, sub-issue #271).
+ *
+ * Market value per instrument identity (asset type + symbol + instrument
+ * currency, so a same-ticker option or a different listing never merges) plus
+ * the scoped cash balance, converted into the display currency. The result is
+ * sorted descending; the renderer groups the tail into an expandable "Other".
+ * Closed/zero-value holdings do not appear. A signed cash balance is kept signed
+ * in the data; the pie basis is disclosed by the renderer.
+ *
+ * Cash is read from the wallets cash ledger by the caller and passed in already
+ * converted, so this function stays a fact aggregation.
+ */
+export interface HoldingSlice {
+  /** Canonical instrument identity (or the cash bucket). */
+  key: string
+  label: string
+  assetType: string
+  /** Comparable value in the display currency; cash may be negative. */
+  value: number
+  unknown: boolean
+}
+
+export interface HoldingsComposition {
+  /** Descending by value; zero-value rows omitted. */
+  slices: HoldingSlice[]
+  /** Sum of all slice values (signed, so cash can reduce it). */
+  total: number
+  currency: string
+}
+
+export async function holdingsComposition(
+  db: DB,
+  published: PublishedGeneration[],
+  opts: {
+    displayCurrency: string
+    /** Convert an account-base amount into the display currency; null = unknown. */
+    convert: (from: string, amount: number) => Promise<number | null>
+    /** Cash already converted into the display currency, if available. */
+    cash?: number
+  },
+): Promise<HoldingsComposition> {
+  const currency = opts.displayCurrency
+  if (published.length === 0) return { slices: [], total: 0, currency }
+  const scopeCondition = publishedFactsCondition(
+    chartPositionDaily.portfolioId,
+    chartPositionDaily.generation,
+    published,
+  )
+  const [latest] = await db
+    .select({ d: max(chartPositionDaily.day) })
+    .from(chartPositionDaily)
+    .where(scopeCondition)
+  const latestDay = latest?.d ?? null
+
+  const groups = new Map<string, HoldingSlice>()
+  let total = 0
+  if (latestDay) {
+    const rows = await db
+      .select({
+        baseCurrency: portfolios.baseCurrency,
+        symbol: positions.symbol,
+        companyName: positions.companyName,
+        assetType: positions.assetType,
+        instrumentCurrency: positions.instrumentCurrency,
+        value: chartPositionDaily.value,
+      })
+      .from(chartPositionDaily)
+      .innerJoin(positions, eq(positions.id, chartPositionDaily.positionId))
+      .innerJoin(portfolios, eq(portfolios.id, chartPositionDaily.portfolioId))
+      .where(and(scopeCondition, eq(chartPositionDaily.day, latestDay)))
+
+    for (const r of rows) {
+      const amount = Number(r.value)
+      if (!Number.isFinite(amount)) continue
+      const key = `${r.assetType || "UNKNOWN"}|${r.symbol ?? ""}|${r.instrumentCurrency ?? ""}`
+      const converted = await opts.convert(r.baseCurrency || "", amount)
+      const existing = groups.get(key) ?? {
+        key,
+        label: r.companyName || r.symbol || key,
+        assetType: r.assetType || "UNKNOWN",
+        value: 0,
+        unknown: false,
+      }
+      if (converted == null || !Number.isFinite(converted)) existing.unknown = true
+      else existing.value += converted
+      groups.set(key, existing)
+    }
+  }
+
+  if (typeof opts.cash === "number" && Number.isFinite(opts.cash) && opts.cash !== 0) {
+    groups.set("CASH", { key: "CASH", label: "Cash", assetType: "CASH", value: opts.cash, unknown: false })
+  }
+
+  const slices = [...groups.values()]
+    .filter((s) => s.value !== 0 || s.unknown)
+    .sort((a, b) => b.value - a.value)
+  for (const s of slices) total += s.value
+  return {
+    slices: slices.map((s) => ({ ...s, value: round8(s.value) })),
+    total: round8(total),
+    currency,
+  }
+}
