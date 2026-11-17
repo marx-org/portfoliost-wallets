@@ -40,6 +40,7 @@ import {
   type StockCategoryAssignment,
 } from "../services/charting/categories.js"
 import { monthlyPayerCoverage } from "../services/charting/payerCoverage.js"
+import { cashBalanceSeriesForScope } from "../services/charting/cash.js"
 import type { components } from "../generated/api-types.js"
 
 type ChartIncomeData = components["schemas"]["ChartIncomeData"]
@@ -426,11 +427,18 @@ export function createChartingRoutes(db?: DB) {
         annual.set(y, cur)
       }
     }
+    const cash = await cashBalanceSeriesForScope(database, projection.published, {
+      from: scope.from,
+      to: scope.to,
+      displayCurrency: scope.currency,
+      authToken: c.req.header("Authorization") ?? null,
+    })
     const body: ChartCashData = {
       currency: scope.currency,
       scope: toScopeDto(scope),
       coverage: coverage(projection, accountIds.length),
-      balanceHistory: [],
+      balanceHistory: cash.total,
+      series: cash.series,
       annualContributions: [...annual]
         .sort((a, b) => a[0] - b[0])
         .map(([year, v]) => ({ year, contributions: v.contributions, withdrawals: v.withdrawals, net: v.contributions - v.withdrawals, partial: false })),
