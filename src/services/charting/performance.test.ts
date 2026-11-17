@@ -9,7 +9,7 @@ import {
   positions,
 } from "../../db/schema.js"
 import type { DB } from "../../db/index.js"
-import { getScopedPerformance } from "./performance.js"
+import { getScopedPerformance, quarterlyReturns } from "./performance.js"
 
 let db: DB
 
@@ -119,5 +119,79 @@ describe("getScopedPerformance", () => {
   it("returns nothing for an empty scope", async () => {
     const out = await getScopedPerformance(db, [])
     expect(out.points).toEqual([])
+  })
+})
+
+describe("quarterlyReturns", () => {
+  const point = (date: string, value: number, invested: number) => ({
+    date,
+    value,
+    capitalBasis: invested,
+    invested,
+    cumulativeIncome: 0,
+    cumulativeOptions: 0,
+  })
+
+  it("gives a deposit-only increase zero investment TWR", () => {
+    const out = quarterlyReturns(
+      [point("2026-01-01", 100, 100), point("2026-02-01", 200, 200)],
+      new Date("2026-03-15T00:00:00Z"),
+    )
+    const q1 = out.find((p) => p.quarter === "2026-Q1")!
+    expect(q1.twr).toBe(0)
+    expect(q1.netGainChange).toBe(0)
+  })
+
+  it("computes net-gain change as 20% for 100/100 -> 150/120, not 50%", () => {
+    const out = quarterlyReturns(
+      [point("2026-01-01", 100, 100), point("2026-03-31", 100, 100), point("2026-06-30", 150, 120)],
+      new Date("2026-07-15T00:00:00Z"),
+    )
+    const q2 = out.find((p) => p.quarter === "2026-Q2")!
+    expect(q2.netGainChange).toBe(20)
+    // Flow-neutral TWR: 150 / (100 + 20) − 1 = 25%.
+    expect(q2.twr).toBe(25)
+  })
+
+  it("chains quarterly TWR into the annual index, not a sum of percentages", () => {
+    const out = quarterlyReturns(
+      [point("2026-01-01", 100, 100), point("2026-03-31", 110, 100), point("2026-06-30", 132, 100)],
+      new Date("2026-07-15T00:00:00Z"),
+    )
+    const q1 = out.find((p) => p.quarter === "2026-Q1")!
+    const q2 = out.find((p) => p.quarter === "2026-Q2")!
+    expect(q1.twr).toBe(10)
+    expect(q2.twr).toBe(20)
+    const chained = ((1 + q1.twr! / 100) * (1 + q2.twr! / 100) - 1) * 100
+    expect(chained).toBeCloseTo(32, 6)
+  })
+
+  it("leaves net-gain change undefined when the ending value is zero", () => {
+    const out = quarterlyReturns(
+      [point("2026-01-01", 100, 100), point("2026-03-31", 100, 100), point("2026-06-30", 0, 100)],
+      new Date("2026-07-15T00:00:00Z"),
+    )
+    const q2 = out.find((p) => p.quarter === "2026-Q2")!
+    expect(q2.netGainChange).toBeNull()
+  })
+
+  it("marks the current quarter partial", () => {
+    const now = new Date()
+    const q = `Q${Math.floor(now.getUTCMonth() / 3) + 1}`
+    const out = quarterlyReturns(
+      [point(`${now.getUTCFullYear()}-01-01`, 100, 100), point(`${now.toISOString().slice(0, 10)}`, 110, 100)],
+      now,
+    )
+    const current = out.find((p) => p.quarter.endsWith(q) && p.quarter.startsWith(String(now.getUTCFullYear())))
+    expect(current?.partial).toBe(true)
+  })
+
+  it("marks a first quarter that starts mid-quarter partial", () => {
+    const out = quarterlyReturns(
+      [point("2026-02-15", 100, 100), point("2026-03-31", 110, 100)],
+      new Date("2026-04-15T00:00:00Z"),
+    )
+    const q1 = out.find((p) => p.quarter === "2026-Q1")!
+    expect(q1.partial).toBe(true)
   })
 })
