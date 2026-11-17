@@ -10,7 +10,7 @@ import {
 } from "../db/schema.js"
 import { resolveChartScope, type ChartScopeInput, type ResolvedChartScope } from "../services/charting/scope.js"
 import { publishedFactsCondition, type PublishedGeneration } from "../services/charting/queries.js"
-import { getScopedPerformance } from "../services/charting/performance.js"
+import { getScopedPerformance, getScopedBenchmarkSeries } from "../services/charting/performance.js"
 import {
   allocationByAssetType,
   allocationByCurrency,
@@ -227,9 +227,26 @@ export function createChartingRoutes(db?: DB) {
       to: scope.to,
       labelIds: scope.labelIds,
     })
+    const benchmarkSymbols = (c.req.query("benchmarks") ?? "")
+      .split(",")
+      .map((s) => s.trim().toUpperCase())
+      .filter(Boolean)
+    const benchmarkFrom = scope.from ?? series.points[0]?.date
+    const benchmarkTo = scope.to ?? series.points.at(-1)?.date
+    const benchmarks =
+      benchmarkSymbols.length > 0 && benchmarkFrom && benchmarkTo
+        ? await getScopedBenchmarkSeries(database, projection.published, {
+            from: benchmarkFrom,
+            to: benchmarkTo,
+            baseCurrency: scope.currency,
+            authToken: c.req.header("Authorization") ?? null,
+            symbols: benchmarkSymbols,
+            labelIds: scope.labelIds,
+          })
+        : []
     const body: ChartPerformanceData = {
       currency: scope.currency,
-      scope: toScopeDto(scope),
+      scope: { ...toScopeDto(scope), benchmarks: benchmarkSymbols },
       coverage: coverage(projection, accountIds.length),
       series: series.points.map((p) => ({
         date: p.date,
@@ -246,6 +263,7 @@ export function createChartingRoutes(db?: DB) {
       })),
       quarterly: [],
       scatter: [],
+      benchmarks,
     }
     return c.json(body satisfies ChartPerformanceData)
   })

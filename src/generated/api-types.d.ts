@@ -3365,6 +3365,8 @@ export interface components {
             to?: string | null;
             /** @description Virtual portfolios resolved to their underlying real positions; never counted as extra capital on top of the real accounts. */
             virtualAccountIds?: string[];
+            /** @description Benchmark symbols to mirror into (e.g. SPY, QQQ). Empty/absent = none. */
+            benchmarks?: string[];
         };
         ChartMissingCoverage: {
             /** @description Machine-readable reason code */
@@ -3554,6 +3556,20 @@ export interface components {
             series?: components["schemas"]["ChartPerformancePoint"][];
             quarterly?: components["schemas"]["ChartQuarterlyReturnPoint"][];
             scatter?: components["schemas"]["ChartScatterPoint"][];
+            benchmarks?: components["schemas"]["ChartBenchmarkSeries"][];
+        };
+        ChartBenchmarkPoint: {
+            /** Format: date */
+            date: string;
+            value: number;
+        };
+        ChartBenchmarkSeries: {
+            symbol: string;
+            name: string;
+            absoluteTimeSeries: components["schemas"]["ChartBenchmarkPoint"][];
+            timeSeries?: components["schemas"]["ChartBenchmarkPoint"][];
+            returnPercent?: number | null;
+            volatility?: number | null;
         };
         ChartCashPoint: {
             /** Format: date */

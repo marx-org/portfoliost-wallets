@@ -122,6 +122,20 @@ describe("charting routes", () => {
     expect(typeof cash!.value).toBe("number")
   })
 
+  it("echoes requested benchmarks and returns a (possibly empty) benchmark list", async () => {
+    const h = await makeHarness("user-1")
+    await seed(h)
+    const app = await boot(h)
+    const res = await app.request("/api/portfolios/charting/performance?benchmarks=SPY,QQQ", { headers: h.headers })
+    expect(res.status).toBe(200)
+    const body = (await res.json()) as {
+      scope: { benchmarks?: string[] }
+      benchmarks: Array<{ symbol: string; absoluteTimeSeries: Array<{ date: string; value: number }> }>
+    }
+    expect(body.scope.benchmarks).toEqual(["SPY", "QQQ"])
+    expect(Array.isArray(body.benchmarks)).toBe(true)
+  })
+
   it("rejects a malformed account id with 422", async () => {
     const h = await makeHarness("user-1")
     await seed(h)
