@@ -57,7 +57,10 @@ export async function cashBalanceSeriesForScope(
   if (published.length === 0) return { series: [], total: [], currency }
 
   const now = new Date()
-  const from = opts.from ?? yearsAgo(5, now)
+  // One year by default: the ledger series is daily, and a 5-year All-scope
+  // fan-out (10 accounts × ~1800 days × per-day FX) is too slow for a chart
+  // read. Callers widen it with from/to.
+  const from = opts.from ?? yearsAgo(1, now)
   const to = opts.to ?? now.toISOString().slice(0, 10)
 
   const series: CashBalanceSeries[] = []
