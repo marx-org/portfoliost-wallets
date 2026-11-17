@@ -1,7 +1,9 @@
-import { and, gte, inArray, lte } from "drizzle-orm"
+import { and, eq, gte, inArray, lte, sql } from "drizzle-orm"
 import type { DB } from "../../db/index.js"
-import { chartEventFacts, positionLabels } from "../../db/schema.js"
+import { chartEventFacts, chartPositionDaily, positionLabels, portfolios } from "../../db/schema.js"
 import { getScopedDailySeries, publishedFactsCondition, type PublishedGeneration } from "./queries.js"
+import { resolvedFxRate } from "../instruments-fx.js"
+import { buildBenchmarkSeries } from "../backfill.js"
 
 /**
  * Scoped performance series (feature #253, sub-issue #272).
@@ -113,4 +115,134 @@ export async function getScopedPerformance(
       }
     }),
   }
+}
+/**
+ * Flow-mirrored benchmark series for the scoped accounts (feature #253,
+ * sub-issue #273).
+ *
+ * Reuses the SAME engine as the portfolio analytics overlay
+ * (`buildBenchmarkSeries`): the scoped accounts' external cash flows are
+ * aggregated per day, the scope's starting value seeds the mirror, and each
+ * requested symbol is mirrored into that flow schedule. No new pricing source
+ * and no second benchmark engine. A symbol with no price history is omitted
+ * (a coverage gap), never a flat/zero line.
+ */
+
+export interface BenchmarkSeries {
+  symbol: string
+  name: string
+  /** Flow-mirrored absolute values (same currency as the portfolio line). */
+  absoluteTimeSeries: Array<{ date: string; value: number }>
+  /** Indexed values (first point = 100). */
+  timeSeries: Array<{ date: string; value: number }>
+  returnPercent: number
+  volatility: number
+}
+
+export async function getScopedBenchmarkSeries(
+  db: DB,
+  published: PublishedGeneration[],
+  opts: {
+    from: string
+    to: string
+    baseCurrency: string
+    authToken: string | null
+    symbols: string[]
+    labelIds?: string[]
+  },
+): Promise<BenchmarkSeries[]> {
+  if (published.length === 0 || opts.symbols.length === 0) return []
+  const labelIds = opts.labelIds ?? []
+  const base = opts.baseCurrency.toUpperCase()
+
+  const convert = async (from: string, amount: number): Promise<number | null> => {
+    const f = (from || "").toUpperCase()
+    if (!f) return null
+    if (f === base) return amount
+    const r = await resolvedFxRate(opts.authToken, f, base)
+    return r ? amount * r.rate : null
+  }
+
+  const scopeCondition = publishedFactsCondition(chartEventFacts.portfolioId, chartEventFacts.generation, published)
+  const positionScope = publishedFactsCondition(chartPositionDaily.portfolioId, chartPositionDaily.generation, published)
+  const flowConds = [
+    scopeCondition,
+    gte(chartEventFacts.eventDate, opts.from),
+    lte(chartEventFacts.eventDate, opts.to),
+    inArray(chartEventFacts.receiptKind, ["contribution", "withdrawal"]),
+  ]
+  if (labelIds.length > 0) {
+    const labelled = db
+      .select({ id: positionLabels.positionId })
+      .from(positionLabels)
+      .where(inArray(positionLabels.labelId, labelIds))
+    flowConds.push(inArray(chartEventFacts.positionId, labelled))
+  }
+  const flowRows = await db
+    .select({
+      date: chartEventFacts.eventDate,
+      kind: chartEventFacts.receiptKind,
+      amount: chartEventFacts.amountBase,
+      baseCurrency: portfolios.baseCurrency,
+    })
+    .from(chartEventFacts)
+    .innerJoin(portfolios, eq(portfolios.id, chartEventFacts.portfolioId))
+    .where(and(...flowConds))
+
+  const flows = new Map<string, number>()
+  for (const r of flowRows) {
+    const amount = Number(r.amount)
+    if (!Number.isFinite(amount)) continue
+    const converted = await convert(r.baseCurrency || "", Math.abs(amount))
+    if (converted == null) continue
+    const delta = r.kind === "contribution" ? converted : -converted
+    flows.set(r.date, (flows.get(r.date) ?? 0) + delta)
+  }
+
+  // Seed = the scoped portfolio value at the first visible day, converted into
+  // the display currency (per account base, then summed).
+  const daily = await getScopedDailySeries(db, published, opts.from, opts.to, labelIds)
+  const firstDay = daily.points[0]?.date
+  let seedValue = 0
+  if (firstDay) {
+    const seedRows = await db
+      .select({
+        baseCurrency: portfolios.baseCurrency,
+        value: sql<string>`coalesce(sum(${chartPositionDaily.value}), 0)`,
+      })
+      .from(chartPositionDaily)
+      .innerJoin(portfolios, eq(portfolios.id, chartPositionDaily.portfolioId))
+      .where(and(positionScope, eq(chartPositionDaily.day, firstDay)))
+      .groupBy(portfolios.id, portfolios.baseCurrency)
+    for (const r of seedRows) {
+      const converted = await convert(r.baseCurrency || "", Number(r.value))
+      if (converted != null) seedValue += converted
+    }
+  }
+
+  const out: BenchmarkSeries[] = []
+  for (const symbol of opts.symbols) {
+    try {
+      const series = await buildBenchmarkSeries(symbol, opts.from, opts.to, opts.authToken ?? "", symbol, {
+        db,
+        baseCurrency: base,
+        flows,
+        seedValue,
+        calcType: "timeWeighted",
+      })
+      if (!series) continue
+      out.push({
+        symbol: series.symbol,
+        name: series.name,
+        absoluteTimeSeries: series.absoluteTimeSeries,
+        timeSeries: series.timeSeries,
+        returnPercent: series.returnPercent,
+        volatility: series.volatility,
+      })
+    } catch {
+      // No price history / instruments unavailable: a coverage gap, not a 500
+      // and never a fabricated flat benchmark line.
+    }
+  }
+  return out
 }
