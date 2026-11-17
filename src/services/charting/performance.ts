@@ -4,6 +4,7 @@ import { chartEventFacts, chartPositionDaily, positionLabels, portfolios } from 
 import { getScopedDailySeries, publishedFactsCondition, type PublishedGeneration } from "./queries.js"
 import { resolvedFxRate } from "../instruments-fx.js"
 import { buildBenchmarkSeries } from "../backfill.js"
+import { buildTwr } from "../returnColumns.js"
 
 /**
  * Scoped performance series (feature #253, sub-issue #272).
@@ -245,4 +246,88 @@ export async function getScopedBenchmarkSeries(
     }
   }
   return out
+}
+
+/**
+ * Quarterly returns (feature #253, sub-issue #274).
+ *
+ * Two modes on the SAME quarter boundaries, from the scoped value/capital series:
+ *   - `twr`: index-chained time-weighted return between quarter boundaries
+ *     (flow-neutral, so a deposit is not a market gain).
+ *   - `netGainChange`: the sheet-style `100 * ((Vq − Cq) − (Vprev − Cprev)) / Vq`,
+ *     where `C` is cumulative EXTERNAL NET CONTRIBUTIONS — not remaining cost
+ *     basis. A zero/unknown denominator is `null`, never 0 or infinity.
+ * The first quarter is measured from the first visible point (or flagged
+ * partial), and the current calendar quarter is always partial.
+ */
+
+export interface QuarterlyReturnPoint {
+  quarter: string
+  endingValue: number
+  cumulativeNetContributions: number
+  twr: number | null
+  netGainChange: number | null
+  partial: boolean
+}
+
+function quarterOf(date: string): { key: string; year: number; q: number; start: string } {
+  const year = Number(date.slice(0, 4))
+  const month = Number(date.slice(5, 7))
+  const q = Math.floor((month - 1) / 3) + 1
+  return { key: `${year}-Q${q}`, year, q, start: `${year}-${String((q - 1) * 3 + 1).padStart(2, "0")}-01` }
+}
+
+export function quarterlyReturns(series: ScopedPerformancePoint[], now: Date = new Date()): QuarterlyReturnPoint[] {
+  if (series.length === 0) return []
+
+  // Flow-neutral index over the whole series; daily flows are the change in
+  // cumulative external net contributions (invested).
+  const values = series.map((p) => p.value)
+  const flows = series.map((p, i) => (i === 0 ? 0 : p.invested - series[i - 1].invested))
+  const twrIndex = buildTwr(values, flows)
+
+  const groups = new Map<string, { endingValue: number; invested: number; twrIndex: number; partial: boolean }>()
+  for (let i = 0; i < series.length; i++) {
+    const p = series[i]
+    const { key } = quarterOf(p.date)
+    groups.set(key, {
+      endingValue: p.value,
+      invested: p.invested,
+      twrIndex: twrIndex[i] ?? 1,
+      partial: false,
+    })
+  }
+
+  const quarters = [...groups.keys()].sort()
+  const current = quarterOf(new Date().toISOString().slice(0, 10)).key
+  const firstKey = quarters[0]
+  const firstStart = quarterOf(series[0].date).start
+  const firstPartial = series[0].date > firstStart
+
+  return quarters.map((q, idx) => {
+    const g = groups.get(q)!
+    const prev = idx > 0 ? groups.get(quarters[idx - 1]) : undefined
+    const prevValue = prev?.endingValue ?? series[0].value
+    const prevInvested = prev?.invested ?? series[0].invested
+    // buildTwr's index is in percent (first point = 100), so the first quarter's
+    // base is the first index, not 1.
+    const prevIndex = prev?.twrIndex ?? twrIndex[0] ?? 100
+
+    const twr =
+      Number.isFinite(g.twrIndex) && prevIndex !== 0 ? round((g.twrIndex / prevIndex - 1) * 100) : null
+    const denominator = g.endingValue
+    const netGainChange =
+      denominator !== 0
+        ? round(100 * ((g.endingValue - g.invested) - (prevValue - prevInvested)) / denominator)
+        : null
+
+    return {
+      quarter: q,
+      endingValue: round(g.endingValue),
+      cumulativeNetContributions: round(g.invested),
+      twr,
+      netGainChange,
+      partial: q === current || (q === firstKey && firstPartial),
+    }
+  })
 }

@@ -10,7 +10,7 @@ import {
 } from "../db/schema.js"
 import { resolveChartScope, type ChartScopeInput, type ResolvedChartScope } from "../services/charting/scope.js"
 import { publishedFactsCondition, type PublishedGeneration } from "../services/charting/queries.js"
-import { getScopedPerformance, getScopedBenchmarkSeries } from "../services/charting/performance.js"
+import { getScopedPerformance, getScopedBenchmarkSeries, quarterlyReturns } from "../services/charting/performance.js"
 import {
   allocationByAssetType,
   allocationByCurrency,
@@ -261,7 +261,7 @@ export function createChartingRoutes(db?: DB) {
         mwr: null,
         simple: null,
       })),
-      quarterly: [],
+      quarterly: quarterlyReturns(series.points),
       scatter: [],
       benchmarks,
     }
