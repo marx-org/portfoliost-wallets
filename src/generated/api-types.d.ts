@@ -3540,8 +3540,12 @@ export interface components {
             partial?: boolean;
         };
         ChartScatterPoint: {
+            /** @description Canonical instrument identity (asset type + symbol + instrument currency) */
             symbol: string;
             name?: string | null;
+            assetType?: string | null;
+            /** @description Account names holding this identity */
+            accounts?: string[];
             marketValue: number;
             /** @description Realized + unrealized + received dividends under existing P/L rules */
             totalProfit: number;

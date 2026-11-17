@@ -1,4 +1,4 @@
-import { and, eq, inArray, max } from "drizzle-orm"
+import { and, eq, inArray, lte, max, sql } from "drizzle-orm"
 import type { DB } from "../../db/index.js"
 import { chartPositionDaily, labels, portfolios, positions, positionLabels, stockChartCategories } from "../../db/schema.js"
 import { publishedFactsCondition, type PublishedGeneration } from "./queries.js"
@@ -581,4 +581,151 @@ export async function holdingsComposition(
     total: round8(total),
     currency,
   }
+}
+
+/**
+ * Market value vs total profit scatter (feature #253, sub-issue #275).
+ *
+ * One point per canonical instrument identity (asset type + symbol + instrument
+ * currency, so a same-ticker option or a different listing stays distinct), at
+ * the latest published day. Total profit is the existing realized + unrealized +
+ * received-dividend P/L: `unrealized = marketValue − remainingBasis`. Values are
+ * converted into the display currency before comparison. A position with zero
+ * market value (e.g. sold on the latest day) is kept as an x=0 point rather
+ * than dropped, so its historic profit stays accessible.
+ */
+export interface ProfitValuePoint {
+  /** Canonical identity: assetType|symbol|instrumentCurrency. */
+  key: string
+  symbol: string
+  name: string
+  assetType: string
+  accounts: string[]
+  marketValue: number
+  totalProfit: number
+  realized: number
+  unrealized: number
+  dividends: number
+}
+
+export interface ProfitValueScatter {
+  points: ProfitValuePoint[]
+  currency: string
+}
+
+export async function profitValuePoints(
+  db: DB,
+  published: PublishedGeneration[],
+  opts: {
+    displayCurrency: string
+    /** Convert an account-base amount into the display currency; null = unknown. */
+    convert: (from: string, amount: number) => Promise<number | null>
+  },
+): Promise<ProfitValueScatter> {
+  const currency = opts.displayCurrency
+  if (published.length === 0) return { points: [], currency }
+  const scopeCondition = publishedFactsCondition(
+    chartPositionDaily.portfolioId,
+    chartPositionDaily.generation,
+    published,
+  )
+  const [latest] = await db
+    .select({ d: max(chartPositionDaily.day) })
+    .from(chartPositionDaily)
+    .where(scopeCondition)
+  const latestDay = latest?.d ?? null
+  if (!latestDay) return { points: [], currency }
+
+  const rows = await db
+    .select({
+      positionId: chartPositionDaily.positionId,
+      portfolioId: portfolios.id,
+      portfolioName: portfolios.name,
+      baseCurrency: portfolios.baseCurrency,
+      symbol: positions.symbol,
+      companyName: positions.companyName,
+      assetType: positions.assetType,
+      instrumentCurrency: positions.instrumentCurrency,
+      value: chartPositionDaily.value,
+      remainingBasis: chartPositionDaily.remainingBasis,
+    })
+    .from(chartPositionDaily)
+    .innerJoin(positions, eq(positions.id, chartPositionDaily.positionId))
+    .innerJoin(portfolios, eq(portfolios.id, chartPositionDaily.portfolioId))
+    .where(and(scopeCondition, eq(chartPositionDaily.day, latestDay)))
+
+  // Realized gains and dividends are cumulative per position; the latest day
+  // only carries that day's slice, so sum the whole published history.
+  const sumRows = await db
+    .select({
+      positionId: chartPositionDaily.positionId,
+      realized: sql<string>`coalesce(sum(${chartPositionDaily.realizedGain}), 0)`,
+      dividends: sql<string>`coalesce(sum(${chartPositionDaily.income}), 0)`,
+    })
+    .from(chartPositionDaily)
+    .where(and(scopeCondition, lte(chartPositionDaily.day, latestDay)))
+    .groupBy(chartPositionDaily.positionId)
+  const sums = new Map(
+    sumRows.map((r) => [r.positionId, { realized: Number(r.realized), dividends: Number(r.dividends) }]),
+  )
+
+  const groups = new Map<
+    string,
+    {
+      point: ProfitValuePoint
+      accounts: Set<string>
+    }
+  >()
+  for (const r of rows) {
+    const base = r.baseCurrency || ""
+    const value = Number(r.value)
+    const basis = Number(r.remainingBasis)
+    const realized = sums.get(r.positionId)?.realized ?? 0
+    const dividends = sums.get(r.positionId)?.dividends ?? 0
+    if (![value, basis, realized, dividends].every((n) => Number.isFinite(n))) continue
+    const convertedValue = await opts.convert(base, value)
+    const convertedBasis = await opts.convert(base, basis)
+    const convertedRealized = await opts.convert(base, realized)
+    const convertedDividends = await opts.convert(base, dividends)
+    if (
+      convertedValue == null ||
+      convertedBasis == null ||
+      convertedRealized == null ||
+      convertedDividends == null
+    ) {
+      continue
+    }
+    const key = `${r.assetType || "UNKNOWN"}|${r.symbol ?? ""}|${r.instrumentCurrency ?? ""}`
+    const unrealized = convertedValue - convertedBasis
+    const existing = groups.get(key)
+    if (existing) {
+      existing.point.marketValue += convertedValue
+      existing.point.realized += convertedRealized
+      existing.point.unrealized += unrealized
+      existing.point.dividends += convertedDividends
+      existing.point.totalProfit += convertedRealized + unrealized + convertedDividends
+      existing.accounts.add(r.portfolioName)
+    } else {
+      groups.set(key, {
+        point: {
+          key,
+          symbol: r.symbol ?? key,
+          name: r.companyName || r.symbol || key,
+          assetType: r.assetType || "UNKNOWN",
+          accounts: [],
+          marketValue: convertedValue,
+          totalProfit: convertedRealized + unrealized + convertedDividends,
+          realized: convertedRealized,
+          unrealized,
+          dividends: convertedDividends,
+        },
+        accounts: new Set([r.portfolioName]),
+      })
+    }
+  }
+
+  const points = [...groups.values()]
+    .map(({ point, accounts }) => ({ ...point, accounts: [...accounts].sort() }))
+    .sort((a, b) => b.marketValue - a.marketValue)
+  return { points, currency }
 }
