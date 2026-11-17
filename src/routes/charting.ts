@@ -9,7 +9,8 @@ import {
   portfolios,
 } from "../db/schema.js"
 import { resolveChartScope, type ChartScopeInput, type ResolvedChartScope } from "../services/charting/scope.js"
-import { getScopedDailySeries, publishedFactsCondition, type PublishedGeneration } from "../services/charting/queries.js"
+import { publishedFactsCondition, type PublishedGeneration } from "../services/charting/queries.js"
+import { getScopedPerformance } from "../services/charting/performance.js"
 import {
   allocationByAssetType,
   allocationByCurrency,
@@ -221,7 +222,11 @@ export function createChartingRoutes(db?: DB) {
     const scope = await resolveChartScope(database, identity.id, input)
     const accountIds = await effectiveAccountIds(database, identity.id, scope)
     const projection = await scopeProjection(database, accountIds)
-    const series = await getScopedDailySeries(database, projection.published, scope.from, scope.to)
+    const series = await getScopedPerformance(database, projection.published, {
+      from: scope.from,
+      to: scope.to,
+      labelIds: scope.labelIds,
+    })
     const body: ChartPerformanceData = {
       currency: scope.currency,
       scope: toScopeDto(scope),
@@ -229,10 +234,10 @@ export function createChartingRoutes(db?: DB) {
       series: series.points.map((p) => ({
         date: p.date,
         value: p.value,
-        invested: p.netFlow,
-        capitalBasis: p.remainingBasis,
-        cumulativeIncome: p.income,
-        cumulativeOptions: null,
+        invested: p.invested,
+        capitalBasis: p.capitalBasis,
+        cumulativeIncome: p.cumulativeIncome,
+        cumulativeOptions: p.cumulativeOptions,
         unpricedValue: null,
         carriedValue: null,
         twr: null,
