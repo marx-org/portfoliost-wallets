@@ -1,6 +1,6 @@
-import { and, eq, or, gte, lte, sql, type Column } from "drizzle-orm"
+import { and, eq, gte, inArray, lte, or, sql, type Column } from "drizzle-orm"
 import type { DB } from "../../db/index.js"
-import { chartPositionDaily } from "../../db/schema.js"
+import { chartPositionDaily, positionLabels } from "../../db/schema.js"
 
 /**
  * One scoped account pinned to the generation its facts are published at.
@@ -62,6 +62,7 @@ export async function getScopedDailySeries(
   published: PublishedGeneration[],
   from?: string | null,
   to?: string | null,
+  labelIds: string[] = [],
 ): Promise<ScopedDailySeries> {
   if (published.length === 0) return { generation: 0, points: [] }
   const conds = [
@@ -69,6 +70,15 @@ export async function getScopedDailySeries(
   ]
   if (from) conds.push(gte(chartPositionDaily.day, from))
   if (to) conds.push(lte(chartPositionDaily.day, to))
+  if (labelIds.length > 0) {
+    // A subquery, not a join: a position carrying two selected labels is read
+    // once (overlapping labels intersect, not add).
+    const labelled = db
+      .select({ id: positionLabels.positionId })
+      .from(positionLabels)
+      .where(inArray(positionLabels.labelId, labelIds))
+    conds.push(inArray(chartPositionDaily.positionId, labelled))
+  }
 
   const rows = await db
     .select({
