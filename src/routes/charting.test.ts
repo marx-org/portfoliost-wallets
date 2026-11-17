@@ -87,6 +87,23 @@ describe("charting routes", () => {
     expect(filtered.byCostBasis).toEqual([])
   })
 
+  it("serves monthly payer coverage for current holdings", async () => {
+    const h = await makeHarness("user-1")
+    await seed(h)
+    const app = await boot(h)
+    const res = await app.request("/api/portfolios/charting/income", { headers: h.headers })
+    expect(res.status).toBe(200)
+    const body = (await res.json()) as {
+      payerCoverage: Array<{ year: number; month: number; count: number; partial: boolean }>
+    }
+    const jan = body.payerCoverage.find((m) => m.year === 2026 && m.month === 1)
+    expect(jan?.count).toBe(1)
+    // The current month and later are partial, never a full-year forecast.
+    const now = new Date()
+    const current = body.payerCoverage.find((m) => m.year === now.getUTCFullYear() && m.month === now.getUTCMonth() + 1)
+    if (current) expect(current.partial).toBe(true)
+  })
+
   it("rejects a malformed account id with 422", async () => {
     const h = await makeHarness("user-1")
     await seed(h)

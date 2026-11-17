@@ -34,6 +34,7 @@ import {
   upsertStockCategory,
   type StockCategoryAssignment,
 } from "../services/charting/categories.js"
+import { monthlyPayerCoverage } from "../services/charting/payerCoverage.js"
 import type { components } from "../generated/api-types.js"
 
 type ChartIncomeData = components["schemas"]["ChartIncomeData"]
@@ -182,6 +183,9 @@ export function createChartingRoutes(db?: DB) {
     const annual = annualIncomeSeries(agg.annual)
     const quarterly = quarterlyIncomeSeries(agg.quarterly)
     const quarterlyGrowth = quarterlyIncomeGrowth(quarterly)
+    const payerCoverage = await monthlyPayerCoverage(database, identity.id, projection.published, {
+      labelIds: scope.labelIds,
+    })
     const body: ChartIncomeData = {
       currency: scope.currency,
       scope: toScopeDto(scope),
@@ -200,7 +204,7 @@ export function createChartingRoutes(db?: DB) {
       })),
       dailyAverageByYear: annualIncomeEquivalent(annual, "day"),
       monthlyAverageByYear: annualIncomeEquivalent(annual, "month"),
-      payerCoverage: [],
+      payerCoverage,
     }
     return c.json(body satisfies ChartIncomeData)
   })
