@@ -241,3 +241,265 @@ export async function annualContributions(
       unknown: v.unknown,
     }))
 }
+
+/**
+ * Cumulative external owner funding over time, one line per selected real
+ * broker account plus the combined total (feature #253, sub-issue #278).
+ *
+ * This is the running sum of `contribution` minus `withdrawal` facts from
+ * `chart_event_facts`, in the display currency. It is the per-account analogue
+ * of the "Invested" overlay the performance chart shows in aggregate: each
+ * account gets its own line, so a per-account funding timeline (screenshot 10)
+ * can be read directly. Internal `transfer` legs are excluded, because they are
+ * internal moves, not owner funding — the same boundary `annualContributions`
+ * uses. The sum is never clipped to the visible window: it is cumulative since
+ * the first recorded funding event, and the window only limits which dates are
+ * emitted (an opening point is prepended when a `from` is set).
+ *
+ * The read is bounded (funding facts only) and never replays trades, rebuilds
+ * prices or calls a provider. An amount whose base currency cannot be converted
+ * marks the account's running totals as a partial sum (`unknown`).
+ */
+
+export interface CumulativeContributionPoint {
+  date: string
+  /** Running cumulative net owner funding (deposits − withdrawals). */
+  net: number
+  /** Running cumulative deposits. */
+  contributions: number
+  /** Running cumulative withdrawals as a positive magnitude. */
+  withdrawals: number
+  /** Some event amount could not be converted; the running totals are a partial sum. */
+  unknown: boolean
+}
+
+export interface CumulativeContributionSeries {
+  /** Account id, or the combined-total key. */
+  key: string
+  label: string
+  points: CumulativeContributionPoint[]
+}
+
+export interface ScopedCumulativeContributions {
+  series: CumulativeContributionSeries[]
+  /** Combined total across the selected real accounts. */
+  total: CumulativeContributionPoint[]
+  currency: string
+}
+
+export interface CumulativeContributionsOptions {
+  /** Convert an account-base amount into the display currency, or null if unknown. */
+  convert: (from: string, amount: number) => Promise<number | null>
+  /** The display currency every point is expressed in. */
+  displayCurrency: string
+  /** Selected position/cash labels. Empty = All. */
+  labelIds?: string[]
+  /** Inclusive window start; omitted = from the first event. */
+  from?: string | null
+  /** Inclusive window end; omitted = to the last event. */
+  to?: string | null
+}
+
+interface FundingDelta {
+  contributions: number
+  withdrawals: number
+  unknown: boolean
+}
+
+function emptyDelta(): FundingDelta {
+  return { contributions: 0, withdrawals: 0, unknown: false }
+}
+
+function signedNet(d: FundingDelta): number {
+  return d.contributions - d.withdrawals
+}
+
+export async function cumulativeContributions(
+  db: DB,
+  published: PublishedGeneration[],
+  opts: CumulativeContributionsOptions,
+): Promise<ScopedCumulativeContributions> {
+  const currency = opts.displayCurrency
+  if (published.length === 0) return { series: [], total: [], currency }
+
+  const labelIds = opts.labelIds ?? []
+  const conds = [
+    publishedFactsCondition(chartEventFacts.portfolioId, chartEventFacts.generation, published),
+    inArray(chartEventFacts.receiptKind, ["contribution", "withdrawal"]),
+  ]
+  if (labelIds.length > 0) {
+    const labelledPositions = db
+      .select({ id: positionLabels.positionId })
+      .from(positionLabels)
+      .where(inArray(positionLabels.labelId, labelIds))
+    const labelledCash = db
+      .select({ id: portfolioCashTransactionLabels.cashTransactionId })
+      .from(portfolioCashTransactionLabels)
+      .where(inArray(portfolioCashTransactionLabels.labelId, labelIds))
+    conds.push(
+      or(
+        inArray(chartEventFacts.positionId, labelledPositions),
+        inArray(chartEventFacts.linkedPositionId, labelledPositions),
+        inArray(chartEventFacts.sourceCashTransactionId, labelledCash),
+      ),
+    )
+  }
+
+  const rows = await db
+    .select({
+      portfolioId: chartEventFacts.portfolioId,
+      date: chartEventFacts.eventDate,
+      kind: chartEventFacts.receiptKind,
+      amount: chartEventFacts.amountBase,
+      baseCurrency: portfolios.baseCurrency,
+    })
+    .from(chartEventFacts)
+    .innerJoin(portfolios, eq(portfolios.id, chartEventFacts.portfolioId))
+    .where(and(...conds))
+
+  const names = await db
+    .select({ id: portfolios.id, name: portfolios.name })
+    .from(portfolios)
+    .where(inArray(portfolios.id, published.map((p) => p.portfolioId)))
+  const nameById = new Map(names.map((n) => [n.id, n.name]))
+
+  // Per account, per date deltas, accumulated in date order.
+  const perAccount = new Map<string, Map<string, FundingDelta>>()
+  for (const r of rows) {
+    const amount = Number(r.amount)
+    if (!Number.isFinite(amount)) continue
+    const converted = await opts.convert(r.baseCurrency || "", Math.abs(amount))
+    const days = perAccount.get(r.portfolioId) ?? new Map<string, FundingDelta>()
+    const d = days.get(r.date) ?? emptyDelta()
+    if (converted == null || !Number.isFinite(converted)) {
+      d.unknown = true
+    } else if (r.kind === "contribution") {
+      d.contributions += converted
+    } else if (r.kind === "withdrawal") {
+      d.withdrawals += converted
+    }
+    days.set(r.date, d)
+    perAccount.set(r.portfolioId, days)
+  }
+
+  // Cumulative running totals per account, keyed by the account's event dates.
+  const cumulativeByAccount = new Map<string, Map<string, FundingDelta>>()
+  for (const [portfolioId, days] of perAccount) {
+    const dates = [...days.keys()].sort()
+    let contributions = 0
+    let withdrawals = 0
+    let unknown = false
+    const cum = new Map<string, FundingDelta>()
+    for (const date of dates) {
+      const d = days.get(date)!
+      contributions += d.contributions
+      withdrawals += d.withdrawals
+      unknown = unknown || d.unknown
+      cum.set(date, { contributions, withdrawals, unknown })
+    }
+    cumulativeByAccount.set(portfolioId, cum)
+  }
+
+  // Value of an account's cumulative series as of a date (last event <= date).
+  function valueAt(cum: Map<string, FundingDelta> | undefined, date: string): FundingDelta {
+    if (!cum || cum.size === 0) return emptyDelta()
+    let last: FundingDelta = emptyDelta()
+    for (const [d, v] of cum) {
+      if (d <= date) last = v
+      else break
+    }
+    return last
+  }
+
+  // The union of every account's event dates, clipped to the visible window.
+  const allDates = [...new Set([...cumulativeByAccount.values()].flatMap((m) => [...m.keys()]))].sort()
+  const from = opts.from ?? null
+  const to = opts.to ?? null
+  const displayDates = allDates.filter((d) => (!from || d >= from) && (!to || d <= to))
+
+  // Emit points for one account over the window, with an opening carry-in.
+  function pointsFor(cum: Map<string, FundingDelta> | undefined): CumulativeContributionPoint[] {
+    const points: CumulativeContributionPoint[] = []
+    if (from) {
+      const opening = valueAt(cum, from)
+      if (opening.contributions !== 0 || opening.withdrawals !== 0 || opening.unknown) {
+        points.push({
+          date: from,
+          net: roundAmount(signedNet(opening)),
+          contributions: roundAmount(opening.contributions),
+          withdrawals: roundAmount(opening.withdrawals),
+          unknown: opening.unknown,
+        })
+      }
+    }
+    for (const date of displayDates) {
+      const v = cum?.get(date)
+      if (!v) continue
+      points.push({
+        date,
+        net: roundAmount(signedNet(v)),
+        contributions: roundAmount(v.contributions),
+        withdrawals: roundAmount(v.withdrawals),
+        unknown: v.unknown,
+      })
+    }
+    return points
+  }
+
+  const series: CumulativeContributionSeries[] = []
+  for (const p of published) {
+    series.push({
+      key: p.portfolioId,
+      label: nameById.get(p.portfolioId) ?? p.portfolioId,
+      points: pointsFor(cumulativeByAccount.get(p.portfolioId)),
+    })
+  }
+
+  // Combined total: at each display date, sum every account's cumulative value.
+  const accountCums = [...cumulativeByAccount.values()]
+  const total: CumulativeContributionPoint[] = []
+  if (from) {
+    const opening = accountCums.reduce(
+      (acc, cum) => {
+        const v = valueAt(cum, from)
+        acc.contributions += v.contributions
+        acc.withdrawals += v.withdrawals
+        acc.unknown = acc.unknown || v.unknown
+        return acc
+      },
+      emptyDelta(),
+    )
+    if (opening.contributions !== 0 || opening.withdrawals !== 0 || opening.unknown) {
+      total.push({
+        date: from,
+        net: roundAmount(signedNet(opening)),
+        contributions: roundAmount(opening.contributions),
+        withdrawals: roundAmount(opening.withdrawals),
+        unknown: opening.unknown,
+      })
+    }
+  }
+  for (const date of displayDates) {
+    const v = accountCums.reduce(
+      (acc, cum) => {
+        const day = valueAt(cum, date)
+        acc.contributions += day.contributions
+        acc.withdrawals += day.withdrawals
+        acc.unknown = acc.unknown || day.unknown
+        return acc
+      },
+      emptyDelta(),
+    )
+    total.push({
+      date,
+      net: roundAmount(signedNet(v)),
+      contributions: roundAmount(v.contributions),
+      withdrawals: roundAmount(v.withdrawals),
+      unknown: v.unknown,
+    })
+  }
+
+  series.push({ key: TOTAL_KEY, label: "Total", points: total })
+
+  return { series, total, currency }
+}

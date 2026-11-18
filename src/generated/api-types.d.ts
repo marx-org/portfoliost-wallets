@@ -3587,6 +3587,26 @@ export interface components {
             label: string;
             points: components["schemas"]["ChartCashPoint"][];
         };
+        /** @description Cumulative external owner funding as of a date, measured from the first recorded funding event. */
+        ChartContributionSeriesPoint: {
+            /** Format: date */
+            date: string;
+            /** @description Running cumulative net owner funding (deposits minus withdrawals) in the chart display currency. */
+            net: number;
+            /** @description Running cumulative deposits in the chart display currency. */
+            contributions?: number;
+            /** @description Running cumulative withdrawals as a positive magnitude in the chart display currency. */
+            withdrawals?: number;
+            /** @description True when at least one event amount could not be converted into the display currency; the running totals are then a partial sum. */
+            unknown?: boolean;
+        };
+        /** @description One cumulative-contributions line (per real account, or the combined total). */
+        ChartContributionSeries: {
+            /** @description Account id */
+            key: string;
+            label: string;
+            points: components["schemas"]["ChartContributionSeriesPoint"][];
+        };
         ChartContributionPoint: {
             year: number;
             /** @description Owner deposits in the chart display currency. */
@@ -3610,6 +3630,8 @@ export interface components {
             /** @description One line per selected real account plus the combined total */
             series?: components["schemas"]["ChartCashSeries"][];
             annualContributions?: components["schemas"]["ChartContributionPoint"][];
+            /** @description Cumulative net external owner funding over time: one line per selected real account plus the combined total. Computed from the funding events (deposits, withdrawals and cash/in-kind transfer legs) as a running sum. */
+            cumulativeContributions?: components["schemas"]["ChartContributionSeries"][];
         };
         Portfolio: {
             /** Format: uuid */

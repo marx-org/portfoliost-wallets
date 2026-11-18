@@ -9,7 +9,7 @@ import {
   portfolioTransactions,
 } from "../../db/schema.js"
 import type { DB } from "../../db/index.js"
-import { annualContributions, cashBalanceSeriesForScope } from "./cash.js"
+import { annualContributions, cashBalanceSeriesForScope, cumulativeContributions } from "./cash.js"
 
 let db: DB
 
@@ -319,5 +319,87 @@ describe("annualContributions", () => {
   it("returns nothing for an empty scope", async () => {
     const out = await annualContributions(db, [], { convert: identity, now: fixedNow })
     expect(out).toEqual([])
+  })
+})
+
+describe("cumulativeContributions", () => {
+  const identity = async (_from: string, amount: number) => amount
+  const opts = (over: Partial<Parameters<typeof cumulativeContributions>[2]> = {}) =>
+    ({ convert: identity, displayCurrency: "USD", ...over }) as Parameters<typeof cumulativeContributions>[2]
+
+  it("runs a per-account cumulative line and a combined total", async () => {
+    const a = await addPortfolio("A")
+    const b = await addPortfolio("B")
+    await addFact(a, "contribution", "1000", "2026-01-01")
+    await addFact(a, "withdrawal", "200", "2026-02-01")
+    await addFact(a, "contribution", "500", "2026-03-01")
+    await addFact(b, "contribution", "300", "2026-01-15")
+
+    const out = await cumulativeContributions(db, [pub(a), pub(b)], opts())
+    const aLine = out.series.find((s) => s.key === a)!
+    expect(aLine.points).toEqual([
+      { date: "2026-01-01", net: 1000, contributions: 1000, withdrawals: 0, unknown: false },
+      { date: "2026-02-01", net: 800, contributions: 1000, withdrawals: 200, unknown: false },
+      { date: "2026-03-01", net: 1300, contributions: 1500, withdrawals: 200, unknown: false },
+    ])
+
+    const bLine = out.series.find((s) => s.key === b)!
+    expect(bLine.points).toEqual([
+      { date: "2026-01-15", net: 300, contributions: 300, withdrawals: 0, unknown: false },
+    ])
+
+    // Combined total is the union of both accounts' dates, each account summed.
+    expect(out.total).toEqual([
+      { date: "2026-01-01", net: 1000, contributions: 1000, withdrawals: 0, unknown: false },
+      { date: "2026-01-15", net: 1300, contributions: 1300, withdrawals: 0, unknown: false },
+      { date: "2026-02-01", net: 1100, contributions: 1300, withdrawals: 200, unknown: false },
+      { date: "2026-03-01", net: 1600, contributions: 1800, withdrawals: 200, unknown: false },
+    ])
+    expect(out.series.at(-1)?.label).toBe("Total")
+  })
+
+  it("carries an opening point into a window without clipping the cumulative", async () => {
+    const pf = await addPortfolio("A")
+    await addFact(pf, "contribution", "1000", "2026-01-01")
+    await addFact(pf, "contribution", "500", "2026-03-01")
+
+    const out = await cumulativeContributions(db, [pub(pf)], opts({ from: "2026-02-01", to: "2026-04-01" }))
+    const line = out.series.find((s) => s.key === pf)!
+    expect(line.points).toEqual([
+      { date: "2026-02-01", net: 1000, contributions: 1000, withdrawals: 0, unknown: false },
+      { date: "2026-03-01", net: 1500, contributions: 1500, withdrawals: 0, unknown: false },
+    ])
+    expect(out.total).toEqual(line.points)
+  })
+
+  it("excludes transfers (internal, not owner funding)", async () => {
+    const a = await addPortfolio("A")
+    await addFact(a, "contribution", "1000", "2026-01-01")
+    await addFact(a, "transfer", "200", "2026-02-01")
+
+    const out = await cumulativeContributions(db, [pub(a)], opts())
+    const line = out.series.find((s) => s.key === a)!
+    expect(line.points.map((p) => p.date)).toEqual(["2026-01-01"])
+  })
+
+  it("marks a partial sum when an amount cannot be converted", async () => {
+    const [row] = await db.insert(portfolios).values({ userId: "user-1", name: "A", baseCurrency: "EUR" }).returning({ id: portfolios.id })
+    const pf = row.id
+    await addFact(pf, "contribution", "1000", "2026-01-01")
+    await addFact(pf, "contribution", "200", "2026-02-01")
+    const out = await cumulativeContributions(db, [pub(pf)], {
+      convert: async (_from, _amount) => null,
+      displayCurrency: "USD",
+    })
+    const line = out.series.find((s) => s.key === pf)!
+    const feb = line.points.find((p) => p.date === "2026-02-01")!
+    expect(feb.contributions).toBe(0)
+    expect(feb.net).toBe(0)
+    expect(feb.unknown).toBe(true)
+  })
+
+  it("returns an empty series for an empty scope", async () => {
+    const out = await cumulativeContributions(db, [], opts())
+    expect(out).toEqual({ series: [], total: [], currency: "USD" })
   })
 })
