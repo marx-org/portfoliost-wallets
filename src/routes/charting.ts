@@ -40,7 +40,7 @@ import {
   type StockCategoryAssignment,
 } from "../services/charting/categories.js"
 import { monthlyPayerCoverage } from "../services/charting/payerCoverage.js"
-import { annualContributions, cashBalanceSeriesForScope } from "../services/charting/cash.js"
+import { annualContributions, cashBalanceSeriesForScope, cumulativeContributions } from "../services/charting/cash.js"
 import type { components } from "../generated/api-types.js"
 
 type ChartIncomeData = components["schemas"]["ChartIncomeData"]
@@ -471,6 +471,15 @@ export function createChartingRoutes(db?: DB) {
           displayCurrency: scope.currency,
           authToken,
         })
+    const cumulative = isVirtual
+      ? { series: [], total: [], currency: scope.currency }
+      : await cumulativeContributions(database, projection.published, {
+          convert: convertToDisplay,
+          displayCurrency: scope.currency,
+          labelIds,
+          from: scope.from,
+          to: scope.to,
+        })
     const body: ChartCashData = {
       currency: scope.currency,
       scope: toScopeDto(scope),
@@ -478,6 +487,7 @@ export function createChartingRoutes(db?: DB) {
       balanceHistory: cash.total,
       series: cash.series,
       annualContributions: annual,
+      cumulativeContributions: cumulative.series,
     }
     return c.json(body satisfies ChartCashData)
   })
