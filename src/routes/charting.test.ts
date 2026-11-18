@@ -301,9 +301,11 @@ describe("charting routes", () => {
     expect(alloc.byAssetType[0].value).toBe(1100)
 
     const cash = (await (await app.request("/api/portfolios/charting/cash", { headers: h.headers })).json()) as {
-      annualContributions: Array<{ year: number; contributions: number }>
+      annualContributions: Array<{ year: number; contributions: number; withdrawals: number; net: number; transfers: number; partial: boolean; unknown: boolean }>
     }
-    expect(cash.annualContributions).toEqual([{ year: 2026, contributions: 1000, withdrawals: 0, net: 1000, partial: false }])
+    expect(cash.annualContributions).toEqual([
+      { year: 2026, contributions: 1000, withdrawals: 0, net: 1000, transfers: 0, partial: true, unknown: false },
+    ])
   })
 
   it("sums accounts published at different generations", async () => {

@@ -40,7 +40,7 @@ import {
   type StockCategoryAssignment,
 } from "../services/charting/categories.js"
 import { monthlyPayerCoverage } from "../services/charting/payerCoverage.js"
-import { cashBalanceSeriesForScope } from "../services/charting/cash.js"
+import { annualContributions, cashBalanceSeriesForScope } from "../services/charting/cash.js"
 import type { components } from "../generated/api-types.js"
 
 type ChartIncomeData = components["schemas"]["ChartIncomeData"]
@@ -440,33 +440,36 @@ export function createChartingRoutes(db?: DB) {
     const scope = await resolveChartScope(database, identity.id, input)
     const accountIds = await effectiveAccountIds(database, identity.id, scope)
     const projection = await scopeProjection(database, accountIds)
+    const labelIds = effectiveLabelIds(scope)
+    const authToken = c.req.header("Authorization") ?? null
 
     // A virtual portfolio is a positions-only view with no cash ledger, so the
     // cash/funding charts are empty in virtual mode rather than showing the real
     // accounts' cash (which the virtual view does not own).
     const isVirtual = scope.kind === "virtual"
-    const annual = new Map<number, { contributions: number; withdrawals: number }>()
-    if (!isVirtual && projection.published.length > 0) {
-      const rows = await database
-        .select({ year: sql<string>`extract(year from ${chartEventFacts.eventDate})`, kind: chartEventFacts.receiptKind, amount: chartEventFacts.amountBase })
-        .from(chartEventFacts)
-        .where(publishedFactsCondition(chartEventFacts.portfolioId, chartEventFacts.generation, projection.published))
-      for (const r of rows) {
-        const y = Number(r.year)
-        const cur = annual.get(y) ?? { contributions: 0, withdrawals: 0 }
-        const amt = Number(r.amount)
-        if (r.kind === "contribution") cur.contributions += amt
-        else if (r.kind === "withdrawal") cur.withdrawals += Math.abs(amt)
-        annual.set(y, cur)
-      }
+    // Convert each account-base amount into the requested display currency before
+    // grouping by year; an unresolvable rate leaves the year marked incomplete.
+    const convertToDisplay = async (from: string, amount: number): Promise<number | null> => {
+      if (!from) return null
+      if (from === scope.currency) return amount
+      const r = await resolvedFxRate(authToken, from, scope.currency)
+      return r ? amount * r.rate : null
     }
+    const annual = isVirtual
+      ? []
+      : await annualContributions(database, projection.published, {
+          convert: convertToDisplay,
+          labelIds,
+          from: scope.from,
+          to: scope.to,
+        })
     const cash = isVirtual
       ? { series: [], total: [], currency: scope.currency }
       : await cashBalanceSeriesForScope(database, projection.published, {
           from: scope.from,
           to: scope.to,
           displayCurrency: scope.currency,
-          authToken: c.req.header("Authorization") ?? null,
+          authToken,
         })
     const body: ChartCashData = {
       currency: scope.currency,
@@ -474,9 +477,7 @@ export function createChartingRoutes(db?: DB) {
       coverage: coverage(projection, accountIds.length),
       balanceHistory: cash.total,
       series: cash.series,
-      annualContributions: [...annual]
-        .sort((a, b) => a[0] - b[0])
-        .map(([year, v]) => ({ year, contributions: v.contributions, withdrawals: v.withdrawals, net: v.contributions - v.withdrawals, partial: false })),
+      annualContributions: annual,
     }
     return c.json(body satisfies ChartCashData)
   })

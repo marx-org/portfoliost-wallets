@@ -3589,10 +3589,18 @@ export interface components {
         };
         ChartContributionPoint: {
             year: number;
+            /** @description Owner deposits in the chart display currency. */
             contributions?: number;
+            /** @description Owner withdrawals as a positive magnitude in the chart display currency. */
             withdrawals?: number;
+            /** @description Signed net external owner funding: contributions minus withdrawals. */
             net: number;
+            /** @description Signed net cash/in-kind transfer legs in the selected scope. Internal pairs cancel; a transfer crossing the selected account boundary remains visible here rather than being counted as owner funding. */
+            transfers?: number;
+            /** @description True when the calendar year is still in progress or the displayed totals are incomplete. */
             partial?: boolean;
+            /** @description True when at least one source amount could not be converted into the display currency; the totals are then a partial sum, not a complete annual figure. */
+            unknown?: boolean;
         };
         ChartCashData: {
             currency: string;
