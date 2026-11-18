@@ -1,7 +1,7 @@
 import { and, eq, inArray, lte, max, sql } from "drizzle-orm"
 import type { DB } from "../../db/index.js"
 import { chartPositionDaily, labels, portfolios, positions, positionLabels, stockChartCategories } from "../../db/schema.js"
-import { publishedFactsCondition, type PublishedGeneration } from "./queries.js"
+import { labelledPositionIds, publishedFactsCondition, type PublishedGeneration } from "./queries.js"
 import { STOCK_CHART_CATEGORIES } from "./categories.js"
 
 /**
@@ -52,6 +52,7 @@ export async function allocationByStockCategory(
   db: DB,
   userId: string,
   published: PublishedGeneration[],
+  labelIds: string[] = [],
 ): Promise<StockCategoryAllocation> {
   if (published.length === 0) return { slices: [], total: 0 }
   const scopeCondition = publishedFactsCondition(
@@ -80,6 +81,7 @@ export async function allocationByStockCategory(
         scopeCondition,
         eq(chartPositionDaily.day, latestDay),
         eq(positions.assetType, "STOCK"),
+        ...(labelIds.length > 0 ? [inArray(chartPositionDaily.positionId, labelledPositionIds(db, labelIds))] : []),
       ),
     )
   if (rows.length === 0) return { slices: [], total: 0 }
@@ -291,6 +293,7 @@ export interface AssetTypeAllocation {
 export async function allocationByAssetType(
   db: DB,
   published: PublishedGeneration[],
+  labelIds: string[] = [],
 ): Promise<AssetTypeAllocation> {
   if (published.length === 0) return { slices: [], total: 0 }
   const scopeCondition = publishedFactsCondition(
@@ -309,7 +312,13 @@ export async function allocationByAssetType(
     .select({ assetType: positions.assetType, value: chartPositionDaily.value })
     .from(chartPositionDaily)
     .innerJoin(positions, eq(positions.id, chartPositionDaily.positionId))
-    .where(and(scopeCondition, eq(chartPositionDaily.day, latestDay)))
+    .where(
+      and(
+        scopeCondition,
+        eq(chartPositionDaily.day, latestDay),
+        ...(labelIds.length > 0 ? [inArray(chartPositionDaily.positionId, labelledPositionIds(db, labelIds))] : []),
+      ),
+    )
 
   const totals = new Map<string, number>()
   let total = 0
@@ -351,6 +360,7 @@ export interface SectorAllocation {
 export async function allocationBySector(
   db: DB,
   published: PublishedGeneration[],
+  labelIds: string[] = [],
 ): Promise<SectorAllocation> {
   if (published.length === 0) return { slices: [], total: 0 }
   const scopeCondition = publishedFactsCondition(
@@ -369,7 +379,13 @@ export async function allocationBySector(
     .select({ sector: positions.sector, value: chartPositionDaily.value })
     .from(chartPositionDaily)
     .innerJoin(positions, eq(positions.id, chartPositionDaily.positionId))
-    .where(and(scopeCondition, eq(chartPositionDaily.day, latestDay)))
+    .where(
+      and(
+        scopeCondition,
+        eq(chartPositionDaily.day, latestDay),
+        ...(labelIds.length > 0 ? [inArray(chartPositionDaily.positionId, labelledPositionIds(db, labelIds))] : []),
+      ),
+    )
 
   const totals = new Map<string, number>()
   let total = 0
@@ -425,9 +441,12 @@ export async function allocationByCurrency(
     displayCurrency: string
     /** Convert an amount from a source currency into the display currency; null = unknown. */
     convert: (from: string, amount: number) => Promise<number | null>
+    /** Restrict to positions carrying any of these labels. */
+    labelIds?: string[]
   },
 ): Promise<CurrencyAllocation> {
   const currency = opts.displayCurrency
+  const labelIds = opts.labelIds ?? []
   if (published.length === 0) return { slices: [], total: 0, currency }
   const scopeCondition = publishedFactsCondition(
     chartPositionDaily.portfolioId,
@@ -450,7 +469,13 @@ export async function allocationByCurrency(
     .from(chartPositionDaily)
     .innerJoin(positions, eq(positions.id, chartPositionDaily.positionId))
     .innerJoin(portfolios, eq(portfolios.id, chartPositionDaily.portfolioId))
-    .where(and(scopeCondition, eq(chartPositionDaily.day, latestDay)))
+    .where(
+      and(
+        scopeCondition,
+        eq(chartPositionDaily.day, latestDay),
+        ...(labelIds.length > 0 ? [inArray(chartPositionDaily.positionId, labelledPositionIds(db, labelIds))] : []),
+      ),
+    )
 
   const totals = new Map<string, { value: number; unknown: boolean }>()
   let total = 0
@@ -518,9 +543,12 @@ export async function holdingsComposition(
     convert: (from: string, amount: number) => Promise<number | null>
     /** Cash already converted into the display currency, if available. */
     cash?: number
+    /** Restrict to positions carrying any of these labels. */
+    labelIds?: string[]
   },
 ): Promise<HoldingsComposition> {
   const currency = opts.displayCurrency
+  const labelIds = opts.labelIds ?? []
   if (published.length === 0) return { slices: [], total: 0, currency }
   const scopeCondition = publishedFactsCondition(
     chartPositionDaily.portfolioId,
@@ -548,7 +576,13 @@ export async function holdingsComposition(
       .from(chartPositionDaily)
       .innerJoin(positions, eq(positions.id, chartPositionDaily.positionId))
       .innerJoin(portfolios, eq(portfolios.id, chartPositionDaily.portfolioId))
-      .where(and(scopeCondition, eq(chartPositionDaily.day, latestDay)))
+      .where(
+        and(
+          scopeCondition,
+          eq(chartPositionDaily.day, latestDay),
+          ...(labelIds.length > 0 ? [inArray(chartPositionDaily.positionId, labelledPositionIds(db, labelIds))] : []),
+        ),
+      )
 
     for (const r of rows) {
       const amount = Number(r.value)
@@ -620,9 +654,12 @@ export async function profitValuePoints(
     displayCurrency: string
     /** Convert an account-base amount into the display currency; null = unknown. */
     convert: (from: string, amount: number) => Promise<number | null>
+    /** Restrict to positions carrying any of these labels. */
+    labelIds?: string[]
   },
 ): Promise<ProfitValueScatter> {
   const currency = opts.displayCurrency
+  const labelIds = opts.labelIds ?? []
   if (published.length === 0) return { points: [], currency }
   const scopeCondition = publishedFactsCondition(
     chartPositionDaily.portfolioId,
@@ -652,7 +689,13 @@ export async function profitValuePoints(
     .from(chartPositionDaily)
     .innerJoin(positions, eq(positions.id, chartPositionDaily.positionId))
     .innerJoin(portfolios, eq(portfolios.id, chartPositionDaily.portfolioId))
-    .where(and(scopeCondition, eq(chartPositionDaily.day, latestDay)))
+    .where(
+      and(
+        scopeCondition,
+        eq(chartPositionDaily.day, latestDay),
+        ...(labelIds.length > 0 ? [inArray(chartPositionDaily.positionId, labelledPositionIds(db, labelIds))] : []),
+      ),
+    )
 
   // Realized gains and dividends are cumulative per position; the latest day
   // only carries that day's slice, so sum the whole published history.
@@ -663,7 +706,13 @@ export async function profitValuePoints(
       dividends: sql<string>`coalesce(sum(${chartPositionDaily.income}), 0)`,
     })
     .from(chartPositionDaily)
-    .where(and(scopeCondition, lte(chartPositionDaily.day, latestDay)))
+    .where(
+      and(
+        scopeCondition,
+        lte(chartPositionDaily.day, latestDay),
+        ...(labelIds.length > 0 ? [inArray(chartPositionDaily.positionId, labelledPositionIds(db, labelIds))] : []),
+      ),
+    )
     .groupBy(chartPositionDaily.positionId)
   const sums = new Map(
     sumRows.map((r) => [r.positionId, { realized: Number(r.realized), dividends: Number(r.dividends) }]),

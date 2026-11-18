@@ -58,6 +58,79 @@ describe("charting routes", () => {
     expect(body.series[1].value).toBe(1100)
   })
 
+  it("virtual scope reads the label's positions without duplicating normal All", async () => {
+    const h = await makeHarness("user-1")
+    const [pf] = await h.db
+      .insert(portfolios)
+      .values({ userId: h.user.id, name: "Real", baseCurrency: "USD" })
+      .returning({ id: portfolios.id })
+    const pos = await insertPosition(h.db, { userId: h.user.id, symbol: "AAPL", portfolioId: pf.id })
+    await h.db.insert(portfolioTransactions).values({ userId: h.user.id, portfolioId: pf.id, positionId: pos.id, type: "BUY", instrumentSymbol: "AAPL", assetType: "STOCK", quantity: "10", price: "100", currency: "USD", exchangeRate: "1", executedAt: new Date("2026-01-01T00:00:00Z") })
+    await h.db.insert(portfolioTransactions).values({ userId: h.user.id, portfolioId: pf.id, positionId: pos.id, type: "DIVIDEND", instrumentSymbol: "AAPL", assetType: "STOCK", quantity: "10", price: "0.5", currency: "USD", exchangeRate: "1", executedAt: new Date("2026-01-02T00:00:00Z") })
+    await buildChartFacts(h.db, pf.id, "token", { generation: 1, from: "2026-01-01", to: "2026-01-02", fetcher: fakeFetcher({ AAPL: { dates: ["2026-01-01", "2026-01-02"], closes: [100, 110] } }) })
+    const [label] = await h.db.insert(labels).values({ userId: h.user.id, name: "Growth", color: "#112233" }).returning({ id: labels.id })
+    await h.db.insert(positionLabels).values({ positionId: pos.id, labelId: label.id })
+    const [virtualRow] = await h.db
+      .insert(portfolios)
+      .values({ userId: h.user.id, name: "Growth view", baseCurrency: "USD", isVirtual: true, labelId: label.id })
+      .returning({ id: portfolios.id })
+    const virtual = virtualRow.id
+
+    const app = await boot(h)
+    const res = await app.request("/api/portfolios/charting/performance?kind=virtual", { headers: h.headers })
+    expect(res.status).toBe(200)
+    const body = (await res.json()) as {
+      series: { value: number }[]
+      scope: { accountIds: string[]; virtualAccountIds: string[] }
+    }
+    // The virtual view resolves to the labelled position, at the real account's facts.
+    expect(body.series.length).toBe(2)
+    expect(body.series[1].value).toBe(1100)
+    // All-virtual selects every virtual portfolio, so no explicit id is echoed.
+    expect(body.scope.virtualAccountIds).toEqual([])
+    expect(body.scope.accountIds).toEqual([])
+
+    // Selecting the virtual portfolio explicitly echoes its id and is equivalent.
+    const explicitBody = (await (
+      await app.request(`/api/portfolios/charting/performance?kind=virtual&accounts=${virtual}`, { headers: h.headers })
+    ).json()) as { series: { value: number }[]; scope: { virtualAccountIds: string[] } }
+    expect(explicitBody.series[1].value).toBe(1100)
+    expect(explicitBody.scope.virtualAccountIds).toEqual([virtual])
+
+    // Normal All is NOT doubled by the virtual portfolio.
+    const normal = (await (
+      await app.request("/api/portfolios/charting/performance", { headers: h.headers })
+    ).json()) as { series: { value: number }[] }
+    expect(normal.series[1].value).toBe(1100)
+
+    // A virtual portfolio has no cash ledger, so the cash chart is empty.
+    const cash = (await (
+      await app.request("/api/portfolios/charting/cash?kind=virtual", { headers: h.headers })
+    ).json()) as { balanceHistory: unknown[]; annualContributions: unknown[] }
+    expect(cash.balanceHistory).toEqual([])
+    expect(cash.annualContributions).toEqual([])
+  })
+
+  it("allocation respects the virtual label constraint", async () => {
+    const h = await makeHarness("user-1")
+    const [pf] = await h.db
+      .insert(portfolios)
+      .values({ userId: h.user.id, name: "Real", baseCurrency: "USD" })
+      .returning({ id: portfolios.id })
+    const pos = await insertPosition(h.db, { userId: h.user.id, symbol: "AAPL", portfolioId: pf.id })
+    await h.db.insert(portfolioTransactions).values({ userId: h.user.id, portfolioId: pf.id, positionId: pos.id, type: "BUY", instrumentSymbol: "AAPL", assetType: "STOCK", quantity: "10", price: "100", currency: "USD", exchangeRate: "1", executedAt: new Date("2026-01-01T00:00:00Z") })
+    await buildChartFacts(h.db, pf.id, "token", { generation: 1, from: "2026-01-01", to: "2026-01-01", fetcher: fakeFetcher({ AAPL: { dates: ["2026-01-01"], closes: [110] } }) })
+    const [label] = await h.db.insert(labels).values({ userId: h.user.id, name: "Growth", color: "#112233" }).returning({ id: labels.id })
+    await h.db.insert(positionLabels).values({ positionId: pos.id, labelId: label.id })
+    await h.db.insert(portfolios).values({ userId: h.user.id, name: "Growth view", baseCurrency: "USD", isVirtual: true, labelId: label.id })
+
+    const app = await boot(h)
+    const body = (await (
+      await app.request("/api/portfolios/charting/allocation?kind=virtual", { headers: h.headers })
+    ).json()) as { byAssetType: Array<{ key: string; value: number }> }
+    expect(body.byAssetType).toEqual([{ key: "STOCK", label: "STOCK", value: 1100, percent: 100, sourceCurrency: null, sourceValue: null, unknown: false }])
+  })
+
   it("serves cost basis vs market value per label", async () => {
     const h = await makeHarness("user-1")
     const [pf] = await h.db.insert(portfolios).values({ userId: h.user.id, name: "A", baseCurrency: "USD" }).returning({ id: portfolios.id })

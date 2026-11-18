@@ -15,6 +15,18 @@ export interface PublishedGeneration {
 }
 
 /**
+ * Subquery of the position ids carrying any of `labelIds`. Used as an
+ * `inArray` right-hand side so a position with two selected labels is matched
+ * ONCE (overlapping labels intersect, not add).
+ */
+export function labelledPositionIds(db: DB, labelIds: string[]) {
+  return db
+    .select({ id: positionLabels.positionId })
+    .from(positionLabels)
+    .where(inArray(positionLabels.labelId, labelIds))
+}
+
+/**
  * Restrict a facts table to each scoped account's own published generation.
  * Returns `false` for an empty scope so a caller can never read generation-0
  * rows that do not exist.

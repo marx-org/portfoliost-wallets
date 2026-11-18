@@ -87,25 +87,47 @@ export function createChartingRoutes(db?: DB) {
       from: q.from ?? null,
       to: q.to ?? null,
       metric: q.metric,
+      kind: q.kind ?? null,
     }
   }
 
   const toScopeDto = (s: ResolvedChartScope): ChartScopeDto => ({
     accountIds: s.accountIds,
+    virtualAccountIds: s.virtualAccountIds,
     labelIds: s.labelIds,
     currency: s.currency,
     from: s.from,
     to: s.to,
   })
 
-  /** The real accounts a resolved scope reads facts from (All → every owned real account). */
-  async function effectiveAccountIds(database: DB, userId: string, scope: ResolvedChartScope): Promise<string[]> {
-    if (!scope.allAccounts) return scope.accountIds
+  /** All owned real (non-virtual) account ids — the only accounts with facts. */
+  async function allRealAccountIds(database: DB, userId: string): Promise<string[]> {
     const rows = await database
       .select({ id: portfolios.id })
       .from(portfolios)
       .where(and(eq(portfolios.userId, userId), eq(portfolios.isVirtual, false)))
     return rows.map((r) => r.id)
+  }
+
+  /**
+   * The real accounts a resolved scope reads facts from. A virtual scope is a
+   * label-defined view over the real accounts, so it always reads every real
+   * account and narrows by label; a normal scope reads the selected real
+   * accounts, or all of them when All.
+   */
+  async function effectiveAccountIds(database: DB, userId: string, scope: ResolvedChartScope): Promise<string[]> {
+    if (scope.kind === "virtual" || scope.allAccounts) return allRealAccountIds(database, userId)
+    return scope.accountIds
+  }
+
+  /**
+   * The position-label constraint for this scope. In virtual mode the selected
+   * virtual portfolios' labels are the universe (a virtual portfolio is a
+   * read-only view over the positions carrying its label); in normal mode the
+   * explicit label filter applies.
+   */
+  function effectiveLabelIds(scope: ResolvedChartScope): string[] {
+    return scope.kind === "virtual" ? scope.virtualLabelIds : scope.labelIds
   }
 
   /**
@@ -180,17 +202,18 @@ export function createChartingRoutes(db?: DB) {
     const scope = await resolveChartScope(database, identity.id, input)
     const accountIds = await effectiveAccountIds(database, identity.id, scope)
     const projection = await scopeProjection(database, accountIds)
-    const agg = await aggregateIncome(database, projection.published, scope.from, scope.to, scope.labelIds)
+    const labelIds = effectiveLabelIds(scope)
+    const agg = await aggregateIncome(database, projection.published, scope.from, scope.to, labelIds)
     const monthly = monthlyIncomeSeries(agg)
     const cumulative = await cumulativeIncomeSeries(database, projection.published, monthly, {
       from: scope.from,
-      labelIds: scope.labelIds,
+      labelIds,
     })
     const annual = annualIncomeSeries(agg.annual)
     const quarterly = quarterlyIncomeSeries(agg.quarterly)
     const quarterlyGrowth = quarterlyIncomeGrowth(quarterly)
     const payerCoverage = await monthlyPayerCoverage(database, identity.id, projection.published, {
-      labelIds: scope.labelIds,
+      labelIds,
     })
     const body: ChartIncomeData = {
       currency: scope.currency,
@@ -224,10 +247,11 @@ export function createChartingRoutes(db?: DB) {
     const scope = await resolveChartScope(database, identity.id, input)
     const accountIds = await effectiveAccountIds(database, identity.id, scope)
     const projection = await scopeProjection(database, accountIds)
+    const labelIds = effectiveLabelIds(scope)
     const series = await getScopedPerformance(database, projection.published, {
       from: scope.from,
       to: scope.to,
-      labelIds: scope.labelIds,
+      labelIds,
     })
     const benchmarkSymbols = (c.req.query("benchmarks") ?? "")
       .split(",")
@@ -243,7 +267,7 @@ export function createChartingRoutes(db?: DB) {
             baseCurrency: scope.currency,
             authToken: c.req.header("Authorization") ?? null,
             symbols: benchmarkSymbols,
-            labelIds: scope.labelIds,
+            labelIds,
           })
         : []
     const authToken = c.req.header("Authorization") ?? null
@@ -256,6 +280,7 @@ export function createChartingRoutes(db?: DB) {
     const scatter = await profitValuePoints(database, projection.published, {
       displayCurrency: scope.currency,
       convert: convertToDisplay,
+      labelIds,
     })
     const body: ChartPerformanceData = {
       currency: scope.currency,
@@ -300,9 +325,10 @@ export function createChartingRoutes(db?: DB) {
     const scope = await resolveChartScope(database, identity.id, input)
     const accountIds = await effectiveAccountIds(database, identity.id, scope)
     const projection = await scopeProjection(database, accountIds)
+    const labelIds = effectiveLabelIds(scope)
 
-    const asset = await allocationByAssetType(database, projection.published)
-    const sector = await allocationBySector(database, projection.published)
+    const asset = await allocationByAssetType(database, projection.published, labelIds)
+    const sector = await allocationBySector(database, projection.published, labelIds)
     const authToken = c.req.header("Authorization") ?? null
     // Convert each account-base value into the requested display currency before
     // grouping by denomination; an unresolvable rate is exposed as unknown.
@@ -315,12 +341,14 @@ export function createChartingRoutes(db?: DB) {
     const currency = await allocationByCurrency(database, projection.published, {
       displayCurrency: scope.currency,
       convert: convertToDisplay,
+      labelIds,
     })
     // Current cash per scoped account, from the wallets ledger, converted into
     // the display currency. A ledger/FX failure leaves cash out rather than
-    // inventing a zero.
+    // inventing a zero. A virtual portfolio is a positions-only view with no
+    // cash ledger, so it contributes no cash.
     let cash = 0
-    if (accountIds.length > 0) {
+    if (scope.kind !== "virtual" && accountIds.length > 0) {
       const bases = await database
         .select({ id: portfolios.id, baseCurrency: portfolios.baseCurrency })
         .from(portfolios)
@@ -343,6 +371,7 @@ export function createChartingRoutes(db?: DB) {
       displayCurrency: scope.currency,
       convert: convertToDisplay,
       cash,
+      labelIds,
     })
     const sliceWith = (key: string, value: number, total: number, unknown = false) => ({
       key,
@@ -355,7 +384,7 @@ export function createChartingRoutes(db?: DB) {
     })
     // Dividend-stock categories are a STOCK-only denominator: cash, bonds and
     // derivatives are excluded, and an unassigned stock is `not_classified`.
-    const category = await allocationByStockCategory(database, identity.id, projection.published)
+    const category = await allocationByStockCategory(database, identity.id, projection.published, labelIds)
     const categorySlice = (s: { key: string; value: number }) => ({
       key: s.key,
       label: stockCategoryLabel(s.key),
@@ -369,7 +398,7 @@ export function createChartingRoutes(db?: DB) {
     // rows are not a partition and their sum is not a portfolio total.
     const costValue = await costAndValueByLabel(database, identity.id, projection.published, {
       allLabels: scope.allLabels,
-      labelIds: scope.labelIds,
+      labelIds,
     })
     const body: ChartAllocationData = {
       currency: scope.currency,
@@ -412,8 +441,12 @@ export function createChartingRoutes(db?: DB) {
     const accountIds = await effectiveAccountIds(database, identity.id, scope)
     const projection = await scopeProjection(database, accountIds)
 
+    // A virtual portfolio is a positions-only view with no cash ledger, so the
+    // cash/funding charts are empty in virtual mode rather than showing the real
+    // accounts' cash (which the virtual view does not own).
+    const isVirtual = scope.kind === "virtual"
     const annual = new Map<number, { contributions: number; withdrawals: number }>()
-    if (projection.published.length > 0) {
+    if (!isVirtual && projection.published.length > 0) {
       const rows = await database
         .select({ year: sql<string>`extract(year from ${chartEventFacts.eventDate})`, kind: chartEventFacts.receiptKind, amount: chartEventFacts.amountBase })
         .from(chartEventFacts)
@@ -427,12 +460,14 @@ export function createChartingRoutes(db?: DB) {
         annual.set(y, cur)
       }
     }
-    const cash = await cashBalanceSeriesForScope(database, projection.published, {
-      from: scope.from,
-      to: scope.to,
-      displayCurrency: scope.currency,
-      authToken: c.req.header("Authorization") ?? null,
-    })
+    const cash = isVirtual
+      ? { series: [], total: [], currency: scope.currency }
+      : await cashBalanceSeriesForScope(database, projection.published, {
+          from: scope.from,
+          to: scope.to,
+          displayCurrency: scope.currency,
+          authToken: c.req.header("Authorization") ?? null,
+        })
     const body: ChartCashData = {
       currency: scope.currency,
       scope: toScopeDto(scope),
@@ -454,12 +489,13 @@ export function createChartingRoutes(db?: DB) {
     if (hasMalformedIds(input)) return c.json({ error: "ValidationError", message: "malformed id" }, 422)
     const scope = await resolveChartScope(database, identity.id, input)
     const accountIds = await effectiveAccountIds(database, identity.id, scope)
+    const labelIds = effectiveLabelIds(scope)
     const all = await listStockCategories(database, identity.id)
     let rows: StockCategoryAssignment[] = all
     // An account/label filter narrows the assignment table to the scoped STOCK
     // holdings; All returns every assignment the caller owns.
-    if (!scope.allAccounts || !scope.allLabels) {
-      const stocks = await listHoldableStocks(database, identity.id, { accountIds, labelIds: scope.labelIds })
+    if (!scope.allAccounts || !scope.allLabels || labelIds.length > 0) {
+      const stocks = await listHoldableStocks(database, identity.id, { accountIds, labelIds })
       const allowed = new Set(stocks.map((s) => `${s.symbol}|${s.instrumentCurrency}`))
       rows = all.filter((a) => allowed.has(`${a.symbol}|${a.instrumentCurrency}`))
     }

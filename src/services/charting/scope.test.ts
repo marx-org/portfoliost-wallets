@@ -6,10 +6,10 @@ import { resolveChartScope } from "./scope.js"
 
 let db: DB
 
-async function addPortfolio(userId: string, name: string, isVirtual = false) {
+async function addPortfolio(userId: string, name: string, isVirtual = false, labelId: string | null = null) {
   const [row] = await db
     .insert(portfolios)
-    .values({ userId, name, baseCurrency: "USD", isVirtual })
+    .values({ userId, name, baseCurrency: "USD", isVirtual, labelId })
     .returning({ id: portfolios.id })
   return row.id
 }
@@ -33,16 +33,55 @@ describe("resolveChartScope", () => {
     expect(scope.currency).toBe("USD")
   })
 
-  it("splits real and virtual accounts and drops a foreign account", async () => {
+  it("normal mode keeps real accounts, drops virtual and foreign accounts", async () => {
     const real = await addPortfolio("user-1", "Real")
     const virtual = await addPortfolio("user-1", "Virtual", true)
     const foreign = await addPortfolio("user-2", "Foreign")
 
     const scope = await resolveChartScope(db, "user-1", { accountIds: [real, virtual, foreign] })
     expect(scope.allAccounts).toBe(false)
+    expect(scope.kind).toBe("normal")
     expect(scope.accountIds).toEqual([real])
-    expect(scope.virtualAccountIds).toEqual([virtual])
+    expect(scope.virtualAccountIds).toEqual([])
+    expect(scope.virtualLabelIds).toEqual([])
     expect(scope.accountIds).not.toContain(foreign)
+  })
+
+  it("virtual mode resolves virtual accounts to their labels and drops real/foreign ids", async () => {
+    const label = await addLabel("user-1", "Growth")
+    const real = await addPortfolio("user-1", "Real")
+    const virtual = await addPortfolio("user-1", "Virtual", true, label)
+    const foreign = await addPortfolio("user-2", "Foreign", true, label)
+
+    const scope = await resolveChartScope(db, "user-1", { accountIds: [real, virtual, foreign], kind: "virtual" })
+    expect(scope.allAccounts).toBe(false)
+    expect(scope.kind).toBe("virtual")
+    expect(scope.accountIds).toEqual([])
+    expect(scope.virtualAccountIds).toEqual([virtual])
+    expect(scope.virtualLabelIds).toEqual([label])
+  })
+
+  it("virtual All resolves to every owned virtual portfolio's label", async () => {
+    const a = await addLabel("user-1", "A")
+    const b = await addLabel("user-1", "B")
+    await addPortfolio("user-1", "Real")
+    await addPortfolio("user-1", "VA", true, a)
+    await addPortfolio("user-1", "VB", true, b)
+
+    const scope = await resolveChartScope(db, "user-1", { kind: "virtual" })
+    expect(scope.allAccounts).toBe(true)
+    expect(scope.kind).toBe("virtual")
+    expect(scope.accountIds).toEqual([])
+    expect(scope.virtualLabelIds.sort()).toEqual([a, b].sort())
+  })
+
+  it("normal All never resolves virtual labels", async () => {
+    const a = await addLabel("user-1", "A")
+    await addPortfolio("user-1", "VA", true, a)
+    const scope = await resolveChartScope(db, "user-1", {})
+    expect(scope.allAccounts).toBe(true)
+    expect(scope.kind).toBe("normal")
+    expect(scope.virtualLabelIds).toEqual([])
   })
 
   it("does not broaden to All when every supplied account id is malformed", async () => {
