@@ -368,6 +368,10 @@ describe("POST /api/portfolios/:id/recompute (plan §27.2)", () => {
     expect(facts.length).toBeGreaterThan(1)
     expect(Number(facts[0].value)).toBeCloseTo(1500)
     expect(Number(facts[facts.length - 1].value)).toBeCloseTo(1550)
+    // The recompute restates through TODAY, not the backfill's default yesterday:
+    // it publishes a fresh generation and prunes the old one, so stopping at
+    // yesterday would delete today's rows (portfoliost#136).
+    expect(facts[facts.length - 1].day).toBe(new Date().toISOString().slice(0, 10))
   })
 
   it("POST /:id/recompute skips charting facts for a virtual portfolio", async () => {
