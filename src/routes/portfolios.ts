@@ -20,7 +20,7 @@ import { getPortfolioCalendar } from "../services/portfolioCalendar.js"
 import { getBackfillStatus, getGapSymbols, buildBenchmarkSeries, forcePortfolioRecalc, hasBackfillableHistory, markBackfillPending, recalcPortfolioSeries } from "../services/backfill.js"
 import { enqueueBackfill } from "../services/backfill-runner.js"
 import { recomputeChartingForPortfolio, refreshChartingFacts } from "../services/charting/invalidation.js"
-import { cashBalances, dailyExternalFlows, externalCashInvested } from "../services/cashLedger.js"
+import { cashBalances, dailyExternalFlows, externalCashInvested, toDateStr } from "../services/cashLedger.js"
 import { debugEnabled, debugLog } from "../services/debug.js"
 import { buildPortfolioCash } from "./portfolio-cash.js"
 import {
@@ -1491,7 +1491,17 @@ async function resolveAggregateBase(
         .catch(() => undefined)
     } else {
       void forcePortfolioRecalc(database, id, token)
-        .then(() => (pf.isVirtual ? undefined : recomputeChartingForPortfolio(database, id, token, { now: new Date() })))
+        // Charting facts are restated through TODAY, not the backfill's default
+        // yesterday. A full recompute publishes a fresh generation and prunes
+        // older ones; stopping at yesterday would drop the today rows the
+        // scheduled pass had already published (portfoliost#136: a full recompute
+        // on 2026-11-20 removed 2026-11-20 for two accounts and the All-scope
+        // chart showed a ~328k one-day drop).
+        .then(() =>
+          pf.isVirtual
+            ? undefined
+            : recomputeChartingForPortfolio(database, id, token, { now: new Date(), to: toDateStr(new Date()) ?? undefined }),
+        )
         .catch(() => undefined)
     }
     return c.json({ backfillStatus: "pending" } satisfies components["schemas"]["BackfillRecomputeResponse"])
