@@ -74,6 +74,28 @@ describe("buildChartFacts", () => {
     expect(Number(byDay.get("2026-01-03")!.realizedGain)).toBe(40)
   })
 
+  it("attributes a TRANSFER_OUT with no position_id to its source lot (does not inflate the position)", async () => {
+    const pf = await addPortfolio("user-1", "A")
+    const pos = await addPosition("user-1", pf, "AAPL")
+
+    const buy = await addTx({ userId: "user-1", portfolioId: pf, positionId: pos, type: "BUY", instrumentSymbol: "AAPL", assetType: "STOCK", quantity: "10", price: "100", currency: "USD", exchangeRate: "1", executedAt: new Date("2026-01-01T00:00:00Z") })
+    // A transfer-out is a portfolio-level row: it carries no position_id of its
+    // own, but it names the source lot it drew from. 4 of the 10 shares leave.
+    await addTx({ userId: "user-1", portfolioId: pf, positionId: null, type: "TRANSFER_OUT", instrumentSymbol: "AAPL", assetType: "STOCK", quantity: "4", price: "100", currency: "USD", exchangeRate: "1", sourceTransactionId: buy.id, executedAt: new Date("2026-01-02T00:00:00Z") })
+
+    const fetcher = fakeFetcher({ AAPL: { dates: ["2026-01-01", "2026-01-02"], closes: [100, 100] } })
+
+    const res = await buildChartFacts(db, pf, "token", { generation: 1, from: "2026-01-01", to: "2026-01-02", fetcher })
+    expect(res.positionRows).toBeGreaterThan(0)
+
+    const facts = await db.select().from(chartPositionDaily).where(eq(chartPositionDaily.generation, 1))
+    const last = facts.filter((f) => f.day === "2026-01-02")
+    expect(last).toHaveLength(1)
+    // 10 bought − 4 transferred out = 6, NOT 10 (the pre-fix bug skipped the
+    // position-less TRANSFER_OUT and left the position at its pre-transfer size).
+    expect(Number(last[0].quantity)).toBe(6)
+  })
+
   it("emits normalized income/cash event facts", async () => {
     const pf = await addPortfolio("user-1", "A")
     const pos = await addPosition("user-1", pf, "AAPL")
