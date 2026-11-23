@@ -913,10 +913,21 @@ async function resolveAggregateBase(
       : []
     const database = getDbInstance()
 
+    // §68 — the aggregate is the SUM OF ACCOUNTS, so it must count the same
+    // portfolios /total-metrics does: the casual (non-virtual) ones only. A
+    // virtual portfolio is a read-only VIEW over the instruments carrying a
+    // label — the SAME `positions` rows a casual portfolio already holds, looked
+    // at through a different lens — so its value is already inside the casual
+    // total. Summing it here too double-counts every mirrored position: the
+    // cumulative Performance tab read ~692k high against Accounts balance,
+    // which is the four virtual portfolios' value counted a second time.
+    // `portfolioRows` feeds the pending check, the aggregate base, the gap scan
+    // and the benchmark flows below, so the filter belongs on the one query
+    // they all read, not sprinkled through each.
     const portfolioRows = await database
       .select({ id: portfolios.id, baseCurrency: portfolios.baseCurrency, isVirtual: portfolios.isVirtual })
       .from(portfolios)
-      .where(sql`${portfolios.userId} = ${identity.id}`)
+      .where(and(sql`${portfolios.userId} = ${identity.id}`, eq(portfolios.isVirtual, false)))
 
     // §72.7 — a READ, kept deliberately: the dashboard must be able to say a
     // portfolio is mid-rebuild. What was removed is the `runBackfill` this used
@@ -965,13 +976,17 @@ async function resolveAggregateBase(
       })
       .from(valueSnapshots)
       .innerJoin(portfolios, eq(valueSnapshots.portfolioId, portfolios.id))
+      // §68 — exclude virtual portfolios here too, for the same reason the
+      // portfolioRows query above does: a virtual portfolio's snapshots are a
+      // second reading of positions a casual portfolio already contributes, so
+      // summing them inflates the aggregate curve. This is the query that feeds
+      // `sumSnapshotsByDateForwardFilled` → the value line on the chart.
       .where(
-        cutoff
-          ? and(
-              sql`${portfolios.userId} = ${identity.id}`,
-              sql`${valueSnapshots.snapshotDate} >= ${cutoff}`,
-            )
-          : sql`${portfolios.userId} = ${identity.id}`,
+        and(
+          sql`${portfolios.userId} = ${identity.id}`,
+          eq(portfolios.isVirtual, false),
+          cutoff ? sql`${valueSnapshots.snapshotDate} >= ${cutoff}` : undefined,
+        ),
       )
       .orderBy(asc(valueSnapshots.snapshotDate))
 
