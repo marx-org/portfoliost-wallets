@@ -134,6 +134,7 @@ export async function buildChartFacts(
       realizedGainLoss: portfolioTransactions.realizedGainLoss,
       convertedRealizedGainLoss: portfolioTransactions.convertedRealizedGainLoss,
       externalId: portfolioTransactions.externalId,
+      sourceTransactionId: portfolioTransactions.sourceTransactionId,
       executedAt: portfolioTransactions.executedAt,
     })
     .from(portfolioTransactions)
@@ -188,13 +189,29 @@ export async function buildChartFacts(
   const realizedByPosDay = new Map<string, number>()
   const days = calendarDays(from, to)
 
+  // A TRANSFER_OUT that moved a specific lot out of this portfolio carries no
+  // position_id of its own — it is a portfolio-level row — but its
+  // `source_transaction_id` names the original BUY whose lot it drew, and that
+  // BUY carries the position. Resolving through it is what keeps the
+  // transfer-out on the position's running quantity. Skipping it (the old
+  // `if (!tx.positionId) continue`) never subtracts the shares it removed, so
+  // the position is inflated: PROD Equate+ SAP.DE replayed to 469.35 shares
+  // against a real 18.57 (BUY 499.57 − TRANSFER_OUT 481.00), adding ~369k PLN
+  // to the Charting → Performance aggregate.
+  const positionById = new Map<string, string>()
   for (const tx of txRows) {
-    if (!tx.positionId) continue
+    if (tx.positionId) positionById.set(tx.id, tx.positionId)
+  }
+
+  for (const tx of txRows) {
+    const positionId =
+      tx.positionId ?? (tx.sourceTransactionId ? positionById.get(tx.sourceTransactionId) : undefined)
+    if (!positionId) continue
     const date = toDateStr(tx.executedAt)
     if (!date) continue
     // Received income (DIVIDEND) and realized gain (SELL) are attributed to the
     // day regardless of whether the row moves quantity (DIVIDEND does not).
-    const key = `${tx.positionId}|${date}`
+    const key = `${positionId}|${date}`
     if (tx.type === "DIVIDEND") {
       const rate0 = num(tx.exchangeRate) || 1
       const amount = tx.convertedTotalAmount != null ? num(tx.convertedTotalAmount) : Math.abs(num(tx.quantity)) * num(tx.price) * rate0
@@ -206,14 +223,14 @@ export async function buildChartFacts(
     }
     const sign = quantitySign(tx.type)
     if (sign === 0) continue
-    if (tx.symbol) positionSymbol.set(tx.positionId, tx.symbol)
-    positionInstrumentCcy.set(tx.positionId, tx.instrumentCurrency)
+    if (tx.symbol) positionSymbol.set(positionId, tx.symbol)
+    positionInstrumentCcy.set(positionId, tx.instrumentCurrency)
     const delta = sign * num(tx.quantity)
     const rate = num(tx.exchangeRate) || 1
     const costDelta = sign * Math.abs(delta) * num(tx.price) * rate
-    const arr = positionEvents.get(tx.positionId) ?? []
+    const arr = positionEvents.get(positionId) ?? []
     arr.push({ date, delta, costDelta })
-    positionEvents.set(tx.positionId, arr)
+    positionEvents.set(positionId, arr)
   }
 
   // 3. Per-position daily quantity/cost maps.
