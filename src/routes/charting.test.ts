@@ -1,4 +1,4 @@
-import { describe, expect, it, beforeEach } from "vitest"
+import { describe, expect, it, beforeEach, vi } from "vitest"
 import { Hono } from "hono"
 import { eq } from "drizzle-orm"
 import { makeHarness, insertPosition } from "./test-utils.js"
@@ -56,6 +56,33 @@ describe("charting routes", () => {
     const body = (await res.json()) as { series: { date: string; value: number }[] }
     expect(body.series.length).toBe(2)
     expect(body.series[1].value).toBe(1100)
+  })
+
+  it("converts the series into the requested display currency", async () => {
+    const h = await makeHarness("user-1")
+    await seed(h)
+    const app = await boot(h)
+    process.env.INSTRUMENTS_URL = "http://instruments:3000"
+    // USD→PLN at 4. The seeded series ends at 1100 USD → 4400 PLN.
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () =>
+        new Response(JSON.stringify({ rate: 4, asOf: new Date().toISOString() }), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        }),
+      ),
+    )
+    try {
+      const res = await app.request("/api/portfolios/charting/performance?currency=PLN", { headers: h.headers })
+      expect(res.status).toBe(200)
+      const body = (await res.json()) as { currency: string; series: { value: number }[] }
+      expect(body.currency).toBe("PLN")
+      expect(body.series[1].value).toBe(4400)
+    } finally {
+      vi.unstubAllGlobals()
+      delete process.env.INSTRUMENTS_URL
+    }
   })
 
   it("virtual scope reads the label's positions without duplicating normal All", async () => {

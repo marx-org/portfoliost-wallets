@@ -61,6 +61,13 @@ interface ScopeProjection {
   generation: number
   complete: boolean
   stale: boolean
+  /**
+   * The currency the facts are stored in — every scoped account's base currency.
+   * The route converts comparable series from this into the requested display
+   * currency before responding. All accounts share one base in practice; when
+   * they do not, the first is used (a mixed-base aggregate is already undefined).
+   */
+  sourceCurrency: string
 }
 
 function hasMalformedIds(input: ChartScopeInput): boolean {
@@ -131,6 +138,29 @@ export function createChartingRoutes(db?: DB) {
   }
 
   /**
+   * Latest-rate converter from the facts' source currency into the requested
+   * display currency. The rest of the app converts for display at the latest
+   * rate; charting must do the same or a non-base selection is merely relabeled
+   * (the values stay in the account base but wear the requested symbol). A rate
+   * that cannot be resolved leaves the value untouched, matching the app's
+   * degrade-to-base behaviour. Rates are cached per request.
+   */
+  function makeRateConverter(authToken: string | null) {
+    const cache = new Map<string, number | null>()
+    return async (from: string, to: string): Promise<number | null> => {
+      const src = (from || "").toUpperCase()
+      const dst = (to || "").toUpperCase()
+      if (!src || !dst || src === dst) return 1
+      const key = `${src}>${dst}`
+      if (cache.has(key)) return cache.get(key) ?? null
+      const r = await resolvedFxRate(authToken, src, dst)
+      const rate = r ? r.rate : null
+      cache.set(key, rate)
+      return rate
+    }
+  }
+
+  /**
    * Which scoped accounts have published facts, and at which generation.
    * Generations are per portfolio: an account whose projection has never run
    * contributes nothing and is reported in `coverage.missing`; it must not drag
@@ -138,18 +168,24 @@ export function createChartingRoutes(db?: DB) {
    * published generation in the scope, and each account is read at its own.
    */
   async function scopeProjection(database: DB, accountIds: string[]): Promise<ScopeProjection> {
-    if (accountIds.length === 0) return { published: [], missing: [], generation: 0, complete: false, stale: false }
+    if (accountIds.length === 0)
+      return { published: [], missing: [], generation: 0, complete: false, stale: false, sourceCurrency: "USD" }
     const rows = await database
       .select({
         portfolioId: portfolios.id,
         name: portfolios.name,
         generation: chartProjectionState.generation,
         status: chartProjectionState.status,
+        baseCurrency: portfolios.baseCurrency,
       })
       .from(portfolios)
       .leftJoin(chartProjectionState, eq(chartProjectionState.portfolioId, portfolios.id))
       .where(inArray(portfolios.id, accountIds))
     const byPortfolio = new Map(rows.map((r) => [r.portfolioId, r]))
+    // The facts are stored in each account's base currency; the common one is
+    // the source for display conversion.
+    const sourceCurrency =
+      [...new Set(rows.map((r) => (r.baseCurrency ?? "").toUpperCase()).filter(Boolean))][0] ?? "USD"
 
     const published: PublishedGeneration[] = []
     const missing: ChartMissingCoverage[] = []
@@ -161,7 +197,8 @@ export function createChartingRoutes(db?: DB) {
       }
       published.push({ portfolioId: id, generation: row.generation })
     }
-    if (published.length === 0) return { published, missing, generation: 0, complete: false, stale: false }
+    if (published.length === 0)
+      return { published, missing, generation: 0, complete: false, stale: false, sourceCurrency }
 
     const stale = published.some((p) => byPortfolio.get(p.portfolioId)?.status !== "complete")
     return {
@@ -173,6 +210,7 @@ export function createChartingRoutes(db?: DB) {
       // because each is served from its own published generation.
       complete: missing.length === 0 && !stale,
       stale,
+      sourceCurrency,
     }
   }
 
@@ -215,24 +253,54 @@ export function createChartingRoutes(db?: DB) {
     const payerCoverage = await monthlyPayerCoverage(database, identity.id, projection.published, {
       labelIds,
     })
+    // Income facts are stored in the accounts' base currency; convert every
+    // amount to the requested display currency (ratios/yoy are scale-invariant).
+    const incRate = await makeRateConverter(c.req.header("Authorization") ?? null)(
+      projection.sourceCurrency,
+      scope.currency,
+    )
+    const cv = (v: number): number => (incRate == null ? v : v * incRate)
+    const cvN = (v: number | null | undefined): number | null | undefined =>
+      v == null ? v : incRate == null ? v : v * incRate
+    const annualConverted = annual.map((p) => ({
+      ...p,
+      dividends: cv(p.dividends),
+      interest: cv(p.interest),
+      options: cv(p.options),
+      total: cv(p.total),
+      priorYearTotal: cvN(p.priorYearTotal) ?? null,
+    }))
     const body: ChartIncomeData = {
       currency: scope.currency,
       scope: toScopeDto(scope),
       coverage: coverage(projection, accountIds.length),
-      monthly,
-      cumulative,
-      annual: annual.map(({ partial: _partial, ...rest }) => rest),
+      monthly: monthly.map((p) => ({
+        ...p,
+        dividends: cv(p.dividends),
+        interest: cv(p.interest),
+        options: cv(p.options),
+        total: cv(p.total),
+      })),
+      cumulative: cumulative.map((p) => ({
+        ...p,
+        dividends: cv(p.dividends),
+        interest: cv(p.interest),
+        options: cv(p.options),
+        total: cv(p.total),
+        openingBalance: cv(p.openingBalance),
+      })),
+      annual: annualConverted.map(({ partial: _partial, ...rest }) => rest),
       quarterly: quarterly.map((b, i) => ({
         quarter: b.quarter,
-        dividends: b.dividends,
-        interest: b.interest,
-        options: b.options,
-        total: b.total,
-        priorYearQuarterTotal: quarterlyGrowth[i].prior,
+        dividends: cv(b.dividends),
+        interest: cv(b.interest),
+        options: cv(b.options),
+        total: cv(b.total),
+        priorYearQuarterTotal: cvN(quarterlyGrowth[i].prior) ?? null,
         yoyChangePercent: quarterlyGrowth[i].changePercent,
       })),
-      dailyAverageByYear: annualIncomeEquivalent(annual, "day"),
-      monthlyAverageByYear: annualIncomeEquivalent(annual, "month"),
+      dailyAverageByYear: annualIncomeEquivalent(annualConverted, "day"),
+      monthlyAverageByYear: annualIncomeEquivalent(annualConverted, "month"),
       payerCoverage,
     }
     return c.json(body satisfies ChartIncomeData)
@@ -277,6 +345,12 @@ export function createChartingRoutes(db?: DB) {
       const r = await resolvedFxRate(authToken, from, scope.currency)
       return r ? amount * r.rate : null
     }
+    // The series is aggregated in the accounts' base currency; convert it to the
+    // requested display currency so the response is not merely relabeled.
+    const perfRate = await makeRateConverter(authToken)(projection.sourceCurrency, scope.currency)
+    const convPerf = (v: number): number => (perfRate == null ? v : v * perfRate)
+    const convPerfN = (v: number | null | undefined): number | null | undefined =>
+      v == null ? v : perfRate == null ? v : v * perfRate
     const scatter = await profitValuePoints(database, projection.published, {
       displayCurrency: scope.currency,
       convert: convertToDisplay,
@@ -288,18 +362,22 @@ export function createChartingRoutes(db?: DB) {
       coverage: coverage(projection, accountIds.length),
       series: series.points.map((p) => ({
         date: p.date,
-        value: p.value,
-        invested: p.invested,
-        capitalBasis: p.capitalBasis,
-        cumulativeIncome: p.cumulativeIncome,
-        cumulativeOptions: p.cumulativeOptions,
+        value: convPerf(p.value),
+        invested: convPerfN(p.invested),
+        capitalBasis: convPerfN(p.capitalBasis),
+        cumulativeIncome: convPerfN(p.cumulativeIncome),
+        cumulativeOptions: convPerfN(p.cumulativeOptions),
         unpricedValue: null,
         carriedValue: null,
         twr: null,
         mwr: null,
         simple: null,
       })),
-      quarterly: quarterlyReturns(series.points),
+      quarterly: quarterlyReturns(series.points).map((q) => ({
+        ...q,
+        endingValue: convPerf(q.endingValue),
+        cumulativeNetContributions: convPerfN(q.cumulativeNetContributions) ?? undefined,
+      })),
       scatter: scatter.points.map((p) => ({
         symbol: p.key,
         name: p.name,

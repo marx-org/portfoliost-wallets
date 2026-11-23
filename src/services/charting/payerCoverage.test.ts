@@ -87,6 +87,19 @@ describe("monthlyPayerCoverage", () => {
     expect(july?.count).toBe(1)
   })
 
+  it("lists the payer tickers for each month", async () => {
+    const pf = await addPortfolio("A")
+    const aapl = await addPosition(pf, "AAPL")
+    const msft = await addPosition(pf, "MSFT")
+    await addDividend(pf, aapl, "2024-06-05")
+    await addDividend(pf, msft, "2024-06-15")
+
+    const out = await monthlyPayerCoverage(db, "user-1", [pub(pf)])
+    const june = out.find((m) => m.year === 2024 && m.month === 6)
+    expect(june?.count).toBe(2)
+    expect(june?.symbols).toEqual(["AAPL", "MSFT"])
+  })
+
   it("counts the same stock held in two accounts once per month", async () => {
     const pf1 = await addPortfolio("A")
     const pf2 = await addPortfolio("B")

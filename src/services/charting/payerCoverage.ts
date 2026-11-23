@@ -26,6 +26,8 @@ export interface PayerCoverageMonth {
   month: number
   /** Distinct currently-held payers with a recorded dividend in the month. */
   count: number
+  /** Tickers of those payers, sorted — so a tooltip can name them. */
+  symbols: string[]
   partial: boolean
 }
 
@@ -70,16 +72,16 @@ export async function monthlyPayerCoverage(
     .innerJoin(positions, eq(positions.id, chartEventFacts.positionId))
     .where(and(...conds))
 
-  const payersByMonth = new Map<string, Set<string>>()
+  const payersByMonth = new Map<string, Map<string, string>>()
   for (const r of rows) {
     const month = r.month
     if (!month) continue
     let set = payersByMonth.get(month)
     if (!set) {
-      set = new Set()
+      set = new Map()
       payersByMonth.set(month, set)
     }
-    set.add(payerKey(r.symbol, r.instrumentCurrency))
+    set.set(payerKey(r.symbol, r.instrumentCurrency), r.symbol ?? "")
   }
   if (payersByMonth.size === 0) return []
 
@@ -94,11 +96,13 @@ export async function monthlyPayerCoverage(
   for (let year = firstYear; year <= lastYear; year++) {
     for (let month = 1; month <= 12; month++) {
       const key = `${year}-${String(month).padStart(2, "0")}`
-      const count = payersByMonth.get(key)?.size ?? 0
+      const set = payersByMonth.get(key)
+      const symbols = [...(set?.values() ?? [])].filter(Boolean).sort((a, b) => a.localeCompare(b))
       out.push({
         year,
         month,
-        count,
+        count: set?.size ?? 0,
+        symbols,
         partial: year === currentYear && month >= currentMonth,
       })
     }
