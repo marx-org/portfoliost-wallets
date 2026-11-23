@@ -1047,4 +1047,60 @@ describe("GET /api/portfolios/merged (§46, §41 follow-up 1)", () => {
 
     __resetBackfillRunnerForTests()
   })
+
+  // §68 — a virtual portfolio is a read-only VIEW over positions a casual
+  // portfolio already holds (same `positions` rows, seen through a label). Its
+  // snapshots therefore re-count value the casual portfolios already contribute,
+  // and summing them into the aggregate double-counted every mirrored position:
+  // PROD showed the cumulative Performance tab ~692k above Accounts balance,
+  // which is the four virtual portfolios' value counted a second time. The
+  // aggregate is the sum of ACCOUNTS; virtual ones are not accounts.
+  it("excludes virtual portfolios from the aggregate series (no double counting)", async () => {
+    const h = await makeHarness("merged-virtual")
+    const a = app(h.db)
+    const labelId = "44444444-4444-4444-8444-444444444444"
+    await h.db.insert(labels).values({ id: labelId, userId: h.user.id, name: "Mirror", color: "#000000" })
+
+    // The real account: two casual portfolios' worth of value.
+    const casual = await seedPfWithSnapshots(h, "Real account", "USD", [
+      { snapshotDate: "2026-09-01", value: "1000", invested: "800" },
+      { snapshotDate: "2026-09-02", value: "1100", invested: "800" },
+    ])
+
+    // A virtual portfolio mirroring those same instruments — its value is
+    // ALREADY inside the casual total, so the aggregate must ignore it.
+    const [virtual] = await h.db
+      .insert(portfolios)
+      .values({ userId: h.user.id, name: "V: Mirror", baseCurrency: "USD", isVirtual: true, labelId })
+      .returning()
+    await h.db.insert(valueSnapshots).values({
+      portfolioId: virtual.id,
+      snapshotDate: "2026-09-01",
+      value: "400",
+      invested: "0",
+      netFlow: "0",
+    })
+    await h.db.insert(valueSnapshots).values({
+      portfolioId: virtual.id,
+      snapshotDate: "2026-09-02",
+      value: "500",
+      invested: "0",
+      netFlow: "0",
+    })
+
+    const res = await a.request("/api/portfolios/merged?timeframe=ALL", { headers: h.headers })
+    expect(res.status).toBe(200)
+    const body = await res.json()
+    // 1100 (real) — NOT 1100 + 500 (which the bug produced).
+    expect(body.performance.totalValue).toBe(1100)
+    expect(body.performance.capitalBasis).toBe(800)
+    expect(body.performance.timeSeries[body.performance.timeSeries.length - 1].value).toBe(1100)
+    void casual
+
+    // The virtual portfolio is still a first-class view on its OWN analytics —
+    // excluding it from the AGGREGATE does not hide it from its own tab.
+    const own = await a.request(`/api/portfolios/${virtual.id}/analytics?timeframe=ALL`, { headers: h.headers })
+    expect(own.status).toBe(200)
+    expect((await own.json()).performance.totalValue).toBe(500)
+  })
 })
