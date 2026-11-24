@@ -695,3 +695,65 @@ describe("GET /:id/analytics — performance.xirr (§284)", () => {
     expect(p.xirrWithheldReason).toBe("insufficient_history")
   })
 })
+
+/**
+ * §286 — income (dividends + interest) on the analytics payloads. A flow, not a
+ * snapshot: summed from DIVIDEND + INTEREST transactions over the window.
+ */
+describe("GET analytics — performance.income (§286)", () => {
+  async function seedIncome(
+    db: Awaited<ReturnType<typeof makeHarness>>["db"],
+    userId: string,
+    portfolioId: string,
+    type: string,
+    totalAmount: number,
+    date: string,
+    convertedTotalAmount?: number,
+  ) {
+    await db.insert(portfolioTransactions).values({
+      userId,
+      portfolioId,
+      type,
+      instrumentSymbol: "SPY",
+      quantity: "1",
+      price: "0",
+      currency: "USD",
+      instrumentCurrency: "USD",
+      totalAmount: String(totalAmount),
+      convertedTotalAmount: convertedTotalAmount != null ? String(convertedTotalAmount) : null,
+      executedAt: new Date(`${date}T12:00:00Z`),
+    })
+  }
+
+  it("sums net dividends + interest over the window, per portfolio", async () => {
+    const { db, user, headers } = await makeHarness("income-per-portfolio")
+    const pf = await seedPortfolio(db, user.id)
+    await seedSnapshots(db, pf.id, ["2025-01-01", "2025-06-01", "2025-12-31"])
+    await seedIncome(db, user.id, pf.id, "DIVIDEND", 50, "2025-03-01")
+    await seedIncome(db, user.id, pf.id, "DIVIDEND", 20, "2025-09-01")
+    await seedIncome(db, user.id, pf.id, "BUY", 999, "2025-05-01") // not income
+
+    const res = await app(db).request(`/api/portfolios/${pf.id}/analytics?timeframe=ALL`, { headers })
+    expect(res.status).toBe(200)
+    const body = await res.json()
+    expect(body.performance.income).toBe(70)
+  })
+
+  it("sums income across portfolios on /merged", async () => {
+    const { db, user, headers } = await makeHarness("income-merged")
+    const a = await seedPortfolio(db, user.id)
+    const [b] = await db
+      .insert(portfolios)
+      .values({ userId: user.id, name: "Analytics PF B", baseCurrency: "USD" })
+      .returning()
+    await seedSnapshots(db, a.id, ["2025-01-01", "2025-12-31"])
+    await seedSnapshots(db, b.id, ["2025-01-01", "2025-12-31"])
+    await seedIncome(db, user.id, a.id, "DIVIDEND", 30, "2025-02-01")
+    await seedIncome(db, user.id, b.id, "DIVIDEND", 12, "2025-08-01")
+
+    const res = await app(db).request(`/api/portfolios/merged?timeframe=ALL`, { headers })
+    expect(res.status).toBe(200)
+    const body = await res.json()
+    expect(body.performance.income).toBe(42)
+  })
+})
