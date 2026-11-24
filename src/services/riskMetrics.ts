@@ -29,7 +29,12 @@
  *   computeRiskMetrics(returns, dates, riskFreeRate?) → PortfolioRiskMetrics
  */
 
-import { chainReturns, daysBetween } from "./returnColumns.js"
+import { chainReturns } from "./returnColumns.js"
+import {
+  annualizedReturn,
+  periodReturnPercent,
+  annualizedReturnWithheldReason,
+} from "../returns/annualize.js"
 
 /**
  * DAYS_PER_YEAR — "periods per year" for both annualisation constructs here.
@@ -155,72 +160,16 @@ export function winRate(returns: number[]): number {
   return Math.round((wins / returns.length) * 10000) / 100  // 2 dp percentage
 }
 
-/**
- * Annualised return from the flow-neutral index, over elapsed calendar years.
- *
- *   annReturn = (index_last / index_first) ^ (DAYS_PER_YEAR / elapsedDays) − 1
- *
- * §81.2 — the exponent has to pair a "days per year" with a step count in the
- * same unit. The snapshot series is built from `calendarDays()` and carries
- * weekend/holiday carry-forward, so it steps 365 times a year: the numerator
- * is 365 and the denominator is elapsed calendar days read off the dates.
- * Scaling by TRADING_DAYS / n instead mixed 252 with a calendar-day count, an
- * error of 365/252 ≈ 1.45 that understated a genuine +10.0% year as +6.8% and
- * inflated +5.0% in a quarter to +14.5% annualized.
- *
- * Reading the dates rather than `index.length - 1` also keeps the exponent
- * honest across gaps in the series.
- *
- * @param index Flow-neutral index (`chainReturns` output), starting at 1.
- * @param dates ISO date strings matching `index`.
- */
-export function annualizedReturn(index: number[], dates: string[]): number {
-  if (index.length < 2 || dates.length < 2) return 0
-  const i0 = index[0]
-  const iN = index[index.length - 1]
-  if (i0 <= 0 || iN <= 0) return 0
-  const elapsedDays = daysBetween(dates[0], dates[dates.length - 1])
-  if (elapsedDays <= 0) return 0
-  return (iN / i0) ** (DAYS_PER_YEAR / elapsedDays) - 1
-}
-
-/**
- * Period return = (index_last / index_first − 1) as a percentage.
- *
- * @param index Flow-neutral index (`chainReturns` output), starting at 1.
- */
-export function periodReturnPercent(index: number[]): number {
-  if (index.length < 2) return 0
-  const i0 = index[0]
-  const iN = index[index.length - 1]
-  if (i0 <= 0) return 0
-  return Math.round(((iN / i0 - 1) * 100) * 100) / 100
-}
-
-// ---------------------------------------------------------------------------
-// Annualised return withholding rules
-// ---------------------------------------------------------------------------
-
-/**
- * Returns a reason string if the annualised return should be withheld (not
- * shown), or null if it is safe to display.
- *
- * Rules (conservative subset of example-service behaviour):
- *  - < 60 data points (< ~3 months of trading days) → "insufficient_history"
- *  - Series spans < 90 calendar days → "insufficient_history"
- *  - Values contain any NaN/Infinity → "invalid_data"
- */
-export function annualizedReturnWithheldReason(
-  index: number[],
-  dates: string[],
-): string | null {
-  if (index.length < 60) return "insufficient_history"
-  if (index.some((v) => !isFinite(v))) return "invalid_data"
-  if (dates.length >= 2) {
-    if (daysBetween(dates[0], dates[dates.length - 1]) < 90) return "insufficient_history"
-  }
-  return null
-}
+// Annualisation constructs and their withholding rules live in the single
+// returns engine (`src/returns/annualize.ts`) and are re-exported here so the
+// existing importers (`routes/portfolios`, `mergedAnalytics`) keep working.
+// `annualizedReturn` / `annualizedReturnWithheldReason` / `periodReturnPercent`
+// are also imported below for use inside `computeRiskMetrics`.
+export {
+  annualizedReturn,
+  periodReturnPercent,
+  annualizedReturnWithheldReason,
+} from "../returns/annualize.js"
 
 // ---------------------------------------------------------------------------
 // Composite
