@@ -30,6 +30,7 @@ import {
 } from "../services/riskMetrics.js"
 import { buildDailyReturns, buildMonthlyReturns, moneyWeightedRate } from "../services/returnColumns.js"
 import { loadIncome, sumIncome } from "../services/income.js"
+import { realizedGains, unrealizedGains } from "../services/gains.js"
 import { resolveRates, fxTo } from "../services/instruments-fx.js"
 import { sumSnapshotsByDateForwardFilled, buildMergedPerformance } from "../services/mergedAnalytics.js"
 import {
@@ -1096,6 +1097,11 @@ async function resolveAggregateBase(
       (from) => rateMap.get(from.toUpperCase()) ?? null,
       mergedBase,
     )
+    const mergedIds = portfolioRows.map((p) => p.id)
+    const [mergedRealized, mergedUnrealized] = await Promise.all([
+      realizedGains(database, identity.id, mergedIds),
+      unrealizedGains(database, identity.id, mergedIds),
+    ])
 
     return c.json({
       timeframe,
@@ -1108,7 +1114,7 @@ async function resolveAggregateBase(
       // gap, which is §72.30's "no confirmed gap" rather than "none exist".
       gapSymbols: gap.gapSymbols,
       heldGapSymbols: gap.heldGapSymbols,
-      performance: buildMergedPerformance(series, mergedIncome),
+      performance: buildMergedPerformance(series, mergedIncome, mergedRealized, mergedUnrealized),
       benchmarks,
     } satisfies components["schemas"]["PortfolioAnalytics"])
   })
@@ -1571,7 +1577,7 @@ async function resolveAggregateBase(
       return c.json({
         timeframe,
         backfillStatus: "pending",
-        performance: { timeSeries: [], totalValue: 0, capitalBasis: 0, totalReturn: 0, totalReturnPercent: 0, monthlyReturns: [], income: 0 },
+        performance: { timeSeries: [], totalValue: 0, capitalBasis: 0, totalReturn: 0, totalReturnPercent: 0, monthlyReturns: [], income: 0, realizedGains: 0, unrealizedGains: 0 },
         benchmarks: [],
       })
     }
@@ -1611,6 +1617,8 @@ async function resolveAggregateBase(
           annualizedReturn: null,
           annualizedReturnWithheldReason: "insufficient_history",
           income: 0,
+          realizedGains: 0,
+          unrealizedGains: 0,
         },
         benchmarks: [],
       })
@@ -1623,7 +1631,7 @@ async function resolveAggregateBase(
       return c.json({
         timeframe,
         backfillStatus: "pending",
-        performance: { timeSeries: [], totalValue: 0, capitalBasis: 0, totalReturn: 0, totalReturnPercent: 0, monthlyReturns: [], income: 0 },
+        performance: { timeSeries: [], totalValue: 0, capitalBasis: 0, totalReturn: 0, totalReturnPercent: 0, monthlyReturns: [], income: 0, realizedGains: 0, unrealizedGains: 0 },
         benchmarks: [],
       })
     }
@@ -1769,6 +1777,11 @@ async function resolveAggregateBase(
     // §286 — income (dividends + interest) over the window, in the portfolio base.
     const incomeRows = await loadIncome(database, identity.id, [id], firstRow?.snapshotDate, lastRow?.snapshotDate)
     const income = sumIncome(incomeRows, () => pf.baseCurrency, () => 1, pf.baseCurrency)
+    // §286 — realized/unrealized P/L are point-in-time (not windowed).
+    const [realized, unrealized] = await Promise.all([
+      realizedGains(database, identity.id, [id]),
+      unrealizedGains(database, identity.id, [id]),
+    ])
 
     return c.json({
       timeframe,
@@ -1805,6 +1818,8 @@ async function resolveAggregateBase(
         xirr: xirrPercent,
         xirrWithheldReason: xirrWithheldReason,
         income,
+        realizedGains: Math.round(realized * 100) / 100,
+        unrealizedGains: Math.round(unrealized * 100) / 100,
       },
       benchmarks,
     })

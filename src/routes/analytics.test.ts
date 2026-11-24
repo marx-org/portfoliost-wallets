@@ -757,3 +757,41 @@ describe("GET analytics — performance.income (§286)", () => {
     expect(body.performance.income).toBe(42)
   })
 })
+
+/** §286 — realized/unrealized P/L on the analytics payload (was always empty). */
+describe("GET analytics — performance realized/unrealized gains (§286)", () => {
+  it("sums open-position unrealized and SELL realized P/L", async () => {
+    const { db, user, headers } = await makeHarness("gains-per-portfolio")
+    const pf = await seedPortfolio(db, user.id)
+    await seedSnapshots(db, pf.id, ["2025-01-01", "2025-12-31"])
+    await insertPosition(db, {
+      userId: user.id,
+      portfolioId: pf.id,
+      symbol: "SPY",
+      quantity: "2",
+      averageCostBasis: "100",
+      instrumentCurrency: "USD",
+      isOpen: true,
+      unrealizedGainLoss: "150",
+    })
+    await db.insert(portfolioTransactions).values({
+      userId: user.id,
+      portfolioId: pf.id,
+      type: "SELL",
+      instrumentSymbol: "AAPL",
+      quantity: "1",
+      price: "200",
+      currency: "USD",
+      instrumentCurrency: "USD",
+      totalAmount: "200",
+      realizedGainLoss: "75",
+      executedAt: new Date("2025-06-01T12:00:00Z"),
+    })
+
+    const res = await app(db).request(`/api/portfolios/${pf.id}/analytics?timeframe=ALL`, { headers })
+    expect(res.status).toBe(200)
+    const body = await res.json()
+    expect(body.performance.unrealizedGains).toBe(150)
+    expect(body.performance.realizedGains).toBe(75)
+  })
+})
