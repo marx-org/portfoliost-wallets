@@ -3461,6 +3461,8 @@ export interface components {
             month: number;
             /** @description Distinct currently-held stocks with known payment dates in the month */
             count: number;
+            /** @description Tickers of the distinct payers counted in the month, sorted */
+            symbols?: string[];
             partial?: boolean;
         };
         ChartIncomeData: {
@@ -4006,9 +4008,15 @@ export interface components {
                 realizedGains?: number;
                 unrealizedGains?: number;
                 annualizedReturn?: number | null;
+                /** @description Period money-weighted return (index − 100) over the window — NOT annualised. For the annualised money-weighted rate see xirr. */
                 moneyWeightedReturn?: number | null;
                 annualizedReturnWithheldReason?: string | null;
                 moneyWeightedReturnWithheldReason?: string | null;
+                /** @description Annualised money-weighted rate (XIRR) as a percentage. Distinct from annualizedReturn, which is the time-weighted rate p.a. */
+                xirr?: number | null;
+                xirrWithheldReason?: string | null;
+                /** @description Dividends + interest received in the window, net of withholding tax, in the portfolio base currency. */
+                income?: number;
                 timeWeightedReturn?: number | null;
                 sharpeRatio?: number;
                 sortinoRatio?: number;
