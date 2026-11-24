@@ -1,5 +1,5 @@
 import { Hono, type Context } from "hono"
-import { and, asc, count as drizzleCount, desc, eq, inArray, sql } from "drizzle-orm"
+import { and, asc, count as drizzleCount, desc, eq, gte, inArray, lt, sql } from "drizzle-orm"
 import { z } from "zod"
 import { userIdentityMiddleware } from "../auth.js"
 import { getDb, type DB } from "../db/index.js"
@@ -29,6 +29,7 @@ import {
   computeRiskMetrics,
 } from "../services/riskMetrics.js"
 import { buildDailyReturns, buildMonthlyReturns, moneyWeightedRate } from "../services/returnColumns.js"
+import { loadIncome, sumIncome } from "../services/income.js"
 import { resolveRates, fxTo } from "../services/instruments-fx.js"
 import { sumSnapshotsByDateForwardFilled, buildMergedPerformance } from "../services/mergedAnalytics.js"
 import {
@@ -1078,6 +1079,24 @@ async function resolveAggregateBase(
         }))
     }
 
+    // §286 — aggregate income (dividends + interest) over the window, summed
+    // across the same non-virtual portfolios the series covers and converted to
+    // the aggregate base with the same rate map.
+    const baseById = new Map(portfolioRows.map((p) => [p.id, p.baseCurrency]))
+    const mergedIncomeRows = await loadIncome(
+      database,
+      identity.id,
+      portfolioRows.map((p) => p.id),
+      series[0]?.date,
+      series[series.length - 1]?.date,
+    )
+    const mergedIncome = sumIncome(
+      mergedIncomeRows,
+      (pid) => baseById.get(pid) ?? mergedBase,
+      (from) => rateMap.get(from.toUpperCase()) ?? null,
+      mergedBase,
+    )
+
     return c.json({
       timeframe,
       backfillStatus: pendingIds.length > 0 ? "pending" : "complete",
@@ -1089,7 +1108,7 @@ async function resolveAggregateBase(
       // gap, which is §72.30's "no confirmed gap" rather than "none exist".
       gapSymbols: gap.gapSymbols,
       heldGapSymbols: gap.heldGapSymbols,
-      performance: buildMergedPerformance(series),
+      performance: buildMergedPerformance(series, mergedIncome),
       benchmarks,
     } satisfies components["schemas"]["PortfolioAnalytics"])
   })
@@ -1552,7 +1571,7 @@ async function resolveAggregateBase(
       return c.json({
         timeframe,
         backfillStatus: "pending",
-        performance: { timeSeries: [], totalValue: 0, capitalBasis: 0, totalReturn: 0, totalReturnPercent: 0, monthlyReturns: [] },
+        performance: { timeSeries: [], totalValue: 0, capitalBasis: 0, totalReturn: 0, totalReturnPercent: 0, monthlyReturns: [], income: 0 },
         benchmarks: [],
       })
     }
@@ -1591,6 +1610,7 @@ async function resolveAggregateBase(
           simpleReturnPercent: null,
           annualizedReturn: null,
           annualizedReturnWithheldReason: "insufficient_history",
+          income: 0,
         },
         benchmarks: [],
       })
@@ -1603,7 +1623,7 @@ async function resolveAggregateBase(
       return c.json({
         timeframe,
         backfillStatus: "pending",
-        performance: { timeSeries: [], totalValue: 0, capitalBasis: 0, totalReturn: 0, totalReturnPercent: 0, monthlyReturns: [] },
+        performance: { timeSeries: [], totalValue: 0, capitalBasis: 0, totalReturn: 0, totalReturnPercent: 0, monthlyReturns: [], income: 0 },
         benchmarks: [],
       })
     }
@@ -1746,6 +1766,10 @@ async function resolveAggregateBase(
     // complete (all 7 were closed positions).
     const { gapSymbols, heldGapSymbols, fxCoverageHoles } = await getGapSymbols(database, id)
 
+    // §286 — income (dividends + interest) over the window, in the portfolio base.
+    const incomeRows = await loadIncome(database, identity.id, [id], firstRow?.snapshotDate, lastRow?.snapshotDate)
+    const income = sumIncome(incomeRows, () => pf.baseCurrency, () => 1, pf.baseCurrency)
+
     return c.json({
       timeframe,
       backfillStatus: "complete",
@@ -1780,6 +1804,7 @@ async function resolveAggregateBase(
         annualizedReturnWithheldReason: annualizedReturnWithheld,
         xirr: xirrPercent,
         xirrWithheldReason: xirrWithheldReason,
+        income,
       },
       benchmarks,
     })

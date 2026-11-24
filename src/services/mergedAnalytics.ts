@@ -29,6 +29,7 @@ import {
   buildMonthlyReturns,
   buildSimple,
   buildTwr,
+  moneyWeightedRate,
 } from "./returnColumns.js"
 import {
   annualizedReturn,
@@ -272,7 +273,7 @@ export function sumSnapshotsByDateForwardFilled(
  * would put one contract field at two magnitudes on one response — the defect
  * §82.1's comment at the per-portfolio route already records.
  */
-export function buildMergedPerformance(series: MergedPoint[]) {
+export function buildMergedPerformance(series: MergedPoint[], income = 0) {
   const values = series.map((p) => p.value)
   const flows = series.map((p) => p.netFlow)
   const dates = series.map((p) => p.date)
@@ -293,6 +294,7 @@ export function buildMergedPerformance(series: MergedPoint[]) {
   const simpleIndex = buildSimple(values)
 
   const annualizedWithheld = annualizedReturnWithheldReason(twrIndex, dates)
+  const xirrRate = hasReturn ? moneyWeightedRate(values, flows, dates) : null
 
   // §83.4 — §81.1 made `computeRiskMetrics` pure: it takes the daily
   // flow-neutral returns and the dates, and this function already holds both. So
@@ -339,6 +341,12 @@ export function buildMergedPerformance(series: MergedPoint[]) {
         ? Math.round(annualizedReturn(twrIndex, dates) * 10000) / 100
         : null,
     annualizedReturnWithheldReason: annualizedWithheld,
+    // §284/§286 — annualised money-weighted rate, distinct from the period MWR
+    // above; withheld when the aggregate flows cannot be solved.
+    xirr: xirrRate === null ? null : Math.round(xirrRate * 10000) / 100,
+    xirrWithheldReason: hasReturn && xirrRate === null ? "insufficient_history" : null,
+    // §286 — dividends + interest over the window, summed across portfolios.
+    income,
     // §83.4 — the Risk tab's numbers, on the analytics transport. `annualizedReturn`
     // is deliberately NOT copied from here: `computeRiskMetrics` returns a
     // FRACTION and the field above is the analytics PERCENT, both written from the
