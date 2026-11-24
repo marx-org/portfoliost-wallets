@@ -51,12 +51,10 @@ export function xirr(cfs: number[], dates: string[]): number | null {
 }
 
 /**
- * Build the MWR index (starts at 100): `-V0` at the start, `-flow_i` for each
- * deposit, `+V_last` at the end, solved by `xirr` and de-annualised per point.
- * Falls back to `buildSimple` when no sane rate exists.
+ * Build the XIRR cash-flow series from a value/flow series:
+ * `-V0` at the start, `-flow_i` for each deposit, `+V_last` at the end.
  */
-export function buildMwr(values: number[], flows: number[], dates: string[]): number[] {
-  if (values.length === 0) return []
+function xirrCashFlows(values: number[], flows: number[], dates: string[]) {
   const xCF: number[] = [-values[0]]
   const xDates: string[] = [dates[0]]
   for (let i = 1; i < values.length - 1; i++) {
@@ -67,8 +65,28 @@ export function buildMwr(values: number[], flows: number[], dates: string[]): nu
   }
   xCF.push(values[values.length - 1])
   xDates.push(dates[dates.length - 1])
+  return { xCF, xDates }
+}
 
-  const rate = xirr(xCF, xDates)
+/**
+ * The annualised money-weighted rate (XIRR) for a value/flow series, as a
+ * fraction, or `null` when it cannot be solved. This is the annualised
+ * counterpart to the period MWR index built by `buildMwr`.
+ */
+export function moneyWeightedRate(values: number[], flows: number[], dates: string[]): number | null {
+  if (values.length === 0) return null
+  const { xCF, xDates } = xirrCashFlows(values, flows, dates)
+  return xirr(xCF, xDates)
+}
+
+/**
+ * Build the MWR index (starts at 100): `-V0` at the start, `-flow_i` for each
+ * deposit, `+V_last` at the end, solved by `xirr` and de-annualised per point.
+ * Falls back to `buildSimple` when no sane rate exists.
+ */
+export function buildMwr(values: number[], flows: number[], dates: string[]): number[] {
+  if (values.length === 0) return []
+  const rate = moneyWeightedRate(values, flows, dates)
   const totalDays = daysBetween(dates[0], dates[dates.length - 1])
 
   if (rate !== null && totalDays > 0) {

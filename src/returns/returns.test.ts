@@ -14,6 +14,7 @@ import {
   chainReturns,
   buildTwr,
   xirr,
+  moneyWeightedRate,
   buildMwr,
   annualizedReturn,
   periodReturnPercent,
@@ -84,6 +85,30 @@ describe("xirr (library-backed) — published known vectors", () => {
 
   it("returns null when every flow is on one day", () => {
     expect(xirr([-1000, 1100], ["2021-01-01", "2021-01-01"])).toBeNull()
+  })
+})
+
+describe("moneyWeightedRate — annualised XIRR", () => {
+  it("one-year +10% → 0.10 (annualised, not the period index)", () => {
+    const r = moneyWeightedRate([1000, 1100], [0, 0], ["2021-01-01", "2022-01-01"])
+    expect(r!).toBeCloseTo(0.1, 4)
+  })
+
+  it("is withheld (null) on an absurd near-zero-capital history", () => {
+    const dates = ["2024-01-01", "2024-04-01", "2024-07-01", "2025-01-01"]
+    const values = [1, 1, 1, 20_000_001]
+    const flows = [0, 0, 10_000, 0]
+    expect(moneyWeightedRate(values, flows, dates)).toBeNull()
+  })
+
+  it("stays finite and plausible on a healthy multi-year history (no 183% style blow-up)", () => {
+    // 100 → 300 over two years with a mid deposit: a believable annualised rate.
+    const dates = ["2023-01-01", "2023-07-01", "2024-01-01", "2024-07-01", "2025-01-01"]
+    const values = [100, 150, 200, 250, 300]
+    const flows = [0, 0, 50, 0, 0]
+    const r = moneyWeightedRate(values, flows, dates)
+    expect(r).not.toBeNull()
+    expect(Math.abs(r!)).toBeLessThan(2)
   })
 })
 

@@ -27,6 +27,7 @@ export {
   chainReturns,
   buildTwr,
   buildMwr,
+  moneyWeightedRate,
   xirr,
   daysBetween,
   buildMonthlyReturns,
