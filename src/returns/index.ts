@@ -11,6 +11,6 @@
 export { DAYS_PER_YEAR, daysBetween } from "./dates.js"
 export { buildSimple } from "./simple.js"
 export { buildDailyReturns, chainReturns, buildTwr } from "./twr.js"
-export { xirr, buildMwr } from "./mwr.js"
+export { xirr, buildMwr, moneyWeightedRate } from "./mwr.js"
 export { annualizedReturn, periodReturnPercent, annualizedReturnWithheldReason } from "./annualize.js"
 export { buildMonthlyReturns } from "./monthly.js"

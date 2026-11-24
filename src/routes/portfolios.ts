@@ -28,7 +28,7 @@ import {
   annualizedReturnWithheldReason,
   computeRiskMetrics,
 } from "../services/riskMetrics.js"
-import { buildDailyReturns, buildMonthlyReturns } from "../services/returnColumns.js"
+import { buildDailyReturns, buildMonthlyReturns, moneyWeightedRate } from "../services/returnColumns.js"
 import { resolveRates, fxTo } from "../services/instruments-fx.js"
 import { sumSnapshotsByDateForwardFilled, buildMergedPerformance } from "../services/mergedAnalytics.js"
 import {
@@ -1615,6 +1615,8 @@ async function resolveAggregateBase(
         snapshotDate: valueSnapshots.snapshotDate,
         value: valueSnapshots.value,
         invested: valueSnapshots.invested,
+        // §284 — net flow on the day, needed to solve the annualised XIRR.
+        netFlow: valueSnapshots.netFlow,
         // §78.5 / §72.31 — the two withheld amounts, read back so the chart can
         // attribute a step to a specific day.
         unpricedValue: valueSnapshots.unpricedValue,
@@ -1683,6 +1685,18 @@ async function resolveAggregateBase(
       annualizedReturnWithheld === null
         ? Math.round(annualizedReturn(twrIndex, twrDates) * 10000) / 100
         : null
+
+    // §284 — the annualised money-weighted rate (XIRR). Distinct from
+    // `moneyWeightedReturn` above, which is the *period* MWR (index − 100): the
+    // old code returned that cumulative figure under the "XIRR" label, so a
+    // multi-year 183% cumulative return read as an impossible annual rate.
+    // Solved from the window's own value/flow series; withheld when unsolvable.
+    const windowValues = rows.map((r) => Number(r.value))
+    const windowFlows = rows.map((r) => Number(r.netFlow ?? 0))
+    const windowDates = rows.map((r) => r.snapshotDate)
+    const xirrRate = moneyWeightedRate(windowValues, windowFlows, windowDates)
+    const xirrPercent = xirrRate === null ? null : Math.round(xirrRate * 10000) / 100
+    const xirrWithheldReason = xirrRate === null ? "insufficient_history" : null
 
     // Benchmarks: mirror the portfolio's cash flows into each requested ticker
     // (D50) — BUYs invest cash in the benchmark, SELLs release it, seed = the
@@ -1764,6 +1778,8 @@ async function resolveAggregateBase(
         // the SPA had nothing to render a TWR p.a. tile from.
         annualizedReturn: annualizedReturnPercent,
         annualizedReturnWithheldReason: annualizedReturnWithheld,
+        xirr: xirrPercent,
+        xirrWithheldReason: xirrWithheldReason,
       },
       benchmarks,
     })

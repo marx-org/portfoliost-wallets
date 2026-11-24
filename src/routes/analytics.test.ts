@@ -636,3 +636,62 @@ describe("timeframeCutoff (1W/1M/3M windowing)", () => {
     expect(timeframeCutoff("", now)).toBeNull()
   })
 })
+
+/**
+ * §284 — the annualised money-weighted rate (`performance.xirr`) and its
+ * withheld reason. Distinct from `moneyWeightedReturn` (the period MWR index),
+ * which the "XIRR" tile used to show, producing an impossible 183% annual rate.
+ */
+describe("GET /:id/analytics — performance.xirr (§284)", () => {
+  function daysFrom(from: string, n: number): string[] {
+    return calendarDays(from, new Date(Date.parse(`${from}T00:00:00Z`) + (n - 1) * 86400000).toISOString().slice(0, 10))
+  }
+
+  async function seedLinear(
+    db: Awaited<ReturnType<typeof makeHarness>>["db"],
+    portfolioId: string,
+    dates: string[],
+    from: number,
+    to: number,
+  ) {
+    for (let i = 0; i < dates.length; i++) {
+      const value = from + ((to - from) * i) / (dates.length - 1)
+      await db.insert(valueSnapshots).values({
+        portfolioId,
+        snapshotDate: dates[i],
+        value: String(value),
+        invested: String(from),
+        netFlow: "0",
+      })
+    }
+  }
+
+  async function xirrFor(dates: string[], from: number, to: number) {
+    const { db, user, headers } = await makeHarness(`xirr-${dates.length}-${from}-${to}`)
+    const pf = await seedPortfolio(db, user.id)
+    await seedLinear(db, pf.id, dates, from, to)
+    const res = await app(db).request(`/api/portfolios/${pf.id}/analytics?timeframe=ALL`, { headers })
+    expect(res.status).toBe(200)
+    const body = await res.json()
+    return body.performance as {
+      moneyWeightedReturn: number | null
+      xirr: number | null
+      xirrWithheldReason: string | null
+    }
+  }
+
+  it("annualises a one-year +10% history to ~10%, not the period index", async () => {
+    const p = await xirrFor(daysFrom("2025-01-01", 366), 1000, 1100)
+    expect(p.xirr).not.toBeNull()
+    expect(p.xirr!).toBeCloseTo(10, 1)
+    expect(p.xirrWithheldReason).toBeNull()
+  })
+
+  it("withholds an absurd near-total-gain history instead of a garbage rate", async () => {
+    // 1 → 20,000,001 in a year is a ~2e7 annualised rate; the sane-rate guard
+    // must withhold it (the shape behind the old 183% blow-up).
+    const p = await xirrFor(daysFrom("2025-01-01", 366), 1, 20_000_001)
+    expect(p.xirr).toBeNull()
+    expect(p.xirrWithheldReason).toBe("insufficient_history")
+  })
+})
