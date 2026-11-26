@@ -165,9 +165,11 @@ async function buildPortfolioCash(
   db: DB,
   authToken: string,
   portfolio: { id: string; baseCurrency: string; cashBaseCurrencyOnly?: boolean },
+  /** §29 — shared request-local FX cache; omit for a call-local one. */
+  cache: Map<string, number> = new Map(),
 ): Promise<PortfolioCash> {
   const base = portfolio.baseCurrency.toUpperCase()
-  const balances = await cashBalances(db, authToken, portfolio.id)
+  const balances = await cashBalances(db, authToken, portfolio.id, undefined, cache)
   const toBase = await fxTo(authToken, base)
   const items: PortfolioCash["balances"] = []
   let total = 0

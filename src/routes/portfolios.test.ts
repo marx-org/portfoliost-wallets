@@ -1104,3 +1104,47 @@ describe("GET /api/portfolios/merged (§46, §41 follow-up 1)", () => {
     expect((await own.json()).performance.totalValue).toBe(500)
   })
 })
+
+describe("§29 request-local FX cache", () => {
+  afterEach(() => unmockInstrumentsFx())
+
+  it("/total-metrics resolves each dated pair once across portfolios", async () => {
+    const h = await makeHarness()
+    const a = app(h.db)
+    mockInstrumentsFx({ table: { USD: 1.08, PLN: 4.3 }, asOf: "2024-01-01" })
+    try {
+      for (const name of ["A", "B"]) {
+        const created = await a.request("/api/portfolios", {
+          method: "POST",
+          headers: h.headers,
+          body: JSON.stringify({ name, baseCurrency: "PLN" }),
+        })
+        const p = await created.json()
+        for (let i = 0; i < 3; i++) {
+          await h.db.insert(portfolioCashTransactions).values({
+            userId: h.user.id,
+            portfolioId: p.id,
+            type: "DEPOSIT",
+            amount: "100",
+            currency: "USD",
+            transactionDate: "2024-01-01",
+          })
+        }
+      }
+
+      const fetchMock = globalThis.fetch as unknown as { mock: { calls: unknown[] } }
+      fetchMock.mock.calls.length = 0
+      const res = await a.request("/api/portfolios/total-metrics", { headers: h.headers })
+      expect(res.status).toBe(200)
+
+      const fxCalls = fetchMock.mock.calls.filter((c) => String((c as unknown[])[0]).includes("/api/internal/fx-rates")).length
+      // 6 rows across 2 portfolios, one distinct USD>PLN@2024-01-01. The dated
+      // lookups collapse to one; the aggregate cash conversion adds at most one
+      // latest-rate lookup. Without the shared cache this would be 6+.
+      expect(fxCalls).toBeLessThanOrEqual(2)
+      expect(fxCalls).toBeLessThan(6)
+    } finally {
+      unmockInstrumentsFx()
+    }
+  })
+})
