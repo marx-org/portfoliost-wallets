@@ -234,6 +234,28 @@ export function ledgerMode(
   return { kind: "native" }
 }
 
+/**
+ * §29 — one FX lookup per `from>to@day` for the caller's cache. The cash replay
+ * touches the same dated pair once per row and once per portfolio, so without a
+ * shared cache the overview endpoints issue hundreds of identical round-trips.
+ * The cache is request-local: fan-out callers pass one Map in.
+ */
+async function cachedRateTo(
+  authToken: string | null,
+  from: string,
+  to: string,
+  day: string,
+  cache: Map<string, number>,
+  opts: { strict?: boolean },
+): Promise<number> {
+  const key = `${from}>${to}@${day}`
+  const cached = cache.get(key)
+  if (cached !== undefined) return cached
+  const rate = await rateToBase(authToken, from, to, day, opts)
+  cache.set(key, rate)
+  return rate
+}
+
 async function eventRateTo(
   authToken: string | null,
   from: string,
@@ -241,15 +263,10 @@ async function eventRateTo(
   day: string,
   cache: Map<string, number>,
 ): Promise<number> {
-  const key = `${from}>${to}@${day}`
-  const cached = cache.get(key)
-  if (cached !== undefined) return cached
   // A single-currency replay must not turn a missing historical quote into a
   // fabricated 1:1 balance. rateToBase throws when either the FX service or the
   // requested dated pair is unavailable.
-  const rate = await rateToBase(authToken, from, to, day, { strict: true })
-  cache.set(key, rate)
-  return rate
+  return cachedRateTo(authToken, from, to, day, cache, { strict: true })
 }
 
 function manualRate(value: string | number | null | undefined, field: string): number {
@@ -472,13 +489,15 @@ export async function cashBalances(
   authToken: string | null,
   portfolioId: string,
   asOf?: string,
+  /** §29 — shared request-local FX cache; omit for a call-local one. */
+  cache: Map<string, number> = new Map(),
 ): Promise<Map<string, number>> {
   const balances = new Map<string, number>()
   const policy = await cashPolicy(db, portfolioId)
   const base = policy?.baseCurrency.toUpperCase() ?? ""
   const mode = ledgerMode(policy)
   const dated = mode.kind !== "native"
-  const eventRates = new Map<string, number>()
+  const eventRates = cache
   if (mode.kind === "single") balances.set(mode.currency, 0)
   if (mode.kind === "settlement+base") {
     balances.set(mode.settlement, 0)
@@ -612,6 +631,8 @@ export async function cashBalanceSeries(
    * aborts the historical backfill instead of valuing every foreign-currency cash
    * row 1:1. The interactive callers leave it off. */
   opts: { strict?: boolean } = {},
+  /** §29 — shared request-local FX cache; omit for a call-local one. */
+  cache: Map<string, number> = new Map(),
 ): Promise<Map<string, number>> {
   const policy = await cashPolicy(db, portfolioId)
   const mode = ledgerMode(policy)
@@ -628,7 +649,7 @@ export async function cashBalanceSeries(
     ledgerDelta?: () => Promise<number>
   }
   const events: Event[] = []
-  const eventRates = new Map<string, number>()
+  const eventRates = cache
 
   const trades = await db
     .select({
@@ -786,6 +807,8 @@ export async function dailyExternalFlows(
   baseCurrency: string,
   /** §63.10 — see {@link cashBalanceSeries}. */
   opts: { strict?: boolean } = {},
+  /** §29 — shared request-local FX cache; omit for a call-local one. */
+  cache: Map<string, number> = new Map(),
 ): Promise<Map<string, number>> {
   const base = baseCurrency.toUpperCase()
   const ids = Array.isArray(portfolioId) ? portfolioId : [portfolioId]
@@ -814,7 +837,7 @@ export async function dailyExternalFlows(
     const day = toDateStr(r.transactionDate)
     if (!day || day < from || day > to) continue
     const ccy = (r.currency ?? base).toUpperCase()
-    const toBase = await rateToBase(authToken, ccy, base, day, opts)
+    const toBase = await cachedRateTo(authToken, ccy, base, day, cache, opts)
     flows.set(day, (flows.get(day) ?? 0) + Number(r.amount ?? 0) * toBase)
   }
   return flows
@@ -882,6 +905,8 @@ export async function externalCashInvested(
   baseCurrency: string,
   /** §63.10 — see {@link cashBalanceSeries}. */
   opts: { strict?: boolean } = {},
+  /** §29 — shared request-local FX cache; omit for a call-local one. */
+  cache: Map<string, number> = new Map(),
 ): Promise<number> {
   const base = baseCurrency.toUpperCase()
   const rows = await db
@@ -904,7 +929,7 @@ export async function externalCashInvested(
   for (const r of rows) {
     const day = toDateStr(r.transactionDate) ?? new Date().toISOString().slice(0, 10)
     const ccy = (r.currency ?? base).toUpperCase()
-    const toBase = await rateToBase(authToken, ccy, base, day, opts)
+    const toBase = await cachedRateTo(authToken, ccy, base, day, cache, opts)
     const amount = Number(r.amount ?? 0)
     total += amount * toBase
     const prev = legs.get(ccy) ?? { amount: 0, rate: toBase }

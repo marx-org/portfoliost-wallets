@@ -236,6 +236,8 @@ export function createPortfolioRoutes(db?: DB) {
       .where(sql`${portfolios.userId} = ${identity.id}`)
       .orderBy(sql`${portfolios.createdAt} DESC`)
 
+    // §29 — one request-local FX cache shared by every portfolio's cash replay.
+    const fxCache = new Map<string, number>()
     const result = await Promise.all(
       rows.map(async (p) => {
         const metrics = await computeMetrics(database, p.id)
@@ -267,7 +269,7 @@ export function createPortfolioRoutes(db?: DB) {
             dailyChange: 0,
             dailyChangePercentage: 0,
           },
-           ...(p.isVirtual ? {} : { cash: await buildPortfolioCash(database, c.req.header("Authorization") ?? "", p) }),
+           ...(p.isVirtual ? {} : { cash: await buildPortfolioCash(database, c.req.header("Authorization") ?? "", p, fxCache) }),
         }
       }),
     )
@@ -337,6 +339,8 @@ export function createPortfolioRoutes(db?: DB) {
     // §41/S3 — one entry per portfolio, summed after the map so no shared counter
     // is written across an await.
     const externalByPortfolio: number[] = []
+    // §29 — one request-local FX cache shared by every portfolio's cash replay.
+    const fxCache = new Map<string, number>()
     // Compute actual totals from positions + transactions rather than
     // stale denormalized columns.
     const portfolioBreakdown = await Promise.all(
@@ -365,14 +369,14 @@ export function createPortfolioRoutes(db?: DB) {
         // and it did so while /summary-metrics already included cash.
         const cashBal = p.isVirtual
           ? new Map<string, number>()
-          : await cashBalances(database, c.req.header("Authorization") ?? "", p.id)
+          : await cashBalances(database, c.req.header("Authorization") ?? "", p.id, undefined, fxCache)
         cashByPortfolio.set(p.id, cashBal)
         // §41/S3 — collected per portfolio rather than accumulated in place: the
         // rows are built by Promise.all, so `+=` across an await is a race. Summed
         // once below, which also saves a second round of FX lookups over every row.
         externalByPortfolio.push(
            await externalCashInvested(
-            database, c.req.header("Authorization") ?? "", p.id, p.baseCurrency ?? aggregateBase,
+            database, c.req.header("Authorization") ?? "", p.id, p.baseCurrency ?? aggregateBase, undefined, fxCache,
           ),
         )
         const split = await splitPortfolioValue(toBase, posRows, cashBal)

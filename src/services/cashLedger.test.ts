@@ -245,6 +245,30 @@ describe("#64: INTEREST, FEE and FX_CONVERSION in the replay", () => {
     const balances = await cashBalances(h.db, null, portfolioId)
     expect(balances.get("USD")).toBeCloseTo(1000 + 29.248076 - 6.831295 - 14.908623, 6)
   })
+
+  it("§29 shares one FX lookup per from>to@day across calls", async () => {
+    // Two rows, same pair and date: a call-local cache already collapses them
+    // to one lookup. The defect was across calls — every portfolio replayed the
+    // same dated pair again — so the shared cache must collapse those too.
+    await ext({ type: "DEPOSIT", amount: 100, currency: "USD", transactionDate: "2024-01-01" })
+    await ext({ type: "DEPOSIT", amount: 100, currency: "USD", transactionDate: "2024-01-01" })
+    const fetchMock = globalThis.fetch as unknown as { mock: { calls: unknown[] } }
+
+    const shared = new Map<string, number>()
+    fetchMock.mock.calls.length = 0
+    await externalCashInvested(h.db, null, portfolioId, "PLN", undefined, shared)
+    await externalCashInvested(h.db, null, portfolioId, "PLN", undefined, shared)
+    const withShared = fetchMock.mock.calls.length
+
+    fetchMock.mock.calls.length = 0
+    await externalCashInvested(h.db, null, portfolioId, "PLN")
+    await externalCashInvested(h.db, null, portfolioId, "PLN")
+    const withoutShared = fetchMock.mock.calls.length
+
+    expect(withShared).toBe(1)
+    expect(withoutShared).toBe(2)
+    expect(shared.size).toBe(1)
+  })
 })
 
 describe("cashBalances", () => {
